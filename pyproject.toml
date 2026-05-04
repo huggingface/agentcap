@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agentcap"
+version = "0.0.1"
+description = "Capture real LLM-agent chat-completion traces and export them as Hugging Face datasets."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+keywords = ["llm", "agent", "trace", "dataset", "huggingface", "kv-cache"]
+
+dependencies = [
+    "httpx>=0.27",
+    "starlette>=0.40",
+    "uvicorn>=0.30",
+    "datasets>=3.0",
+    "huggingface_hub>=1.13",  # used directly by push_bucket; bucket APIs landed in 1.13
+    "transformers>=4.45",
+    "jinja2>=3.1",  # required by transformers for apply_chat_template; not always pulled in transitively
+    "pyyaml>=6",  # used by HermesDriver to overlay context_length / base_url into config.yaml
+    "click>=8.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+agentcap = "agentcap.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agentcap"]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: tests that spin up real uvicorn servers and talk over TCP loopback (slower)",
+    "live: integration tests that invoke a real agent CLI against a real model server (skipped unless agent binaries + AGENTCAP_TEST_LLM_URL or AGENTCAP_TEST_GGUF are configured)",
+]

@@ -1,0 +1,34 @@
+# 30 transformers-issue-style prompts. Open-ended planning /
+# diagnostic questions over huggingface/transformers that are
+# realistic to drive an agent through several turns of follow-up.
+
+I want to add a new model architecture with a custom attention variant. Walk me through where it has to plug in across modeling code, tokenizer, and the auto-classes.
+We're seeing a regression in `generate()` throughput after a recent refactor. How would I bisect to find the offending change?
+Help me design a chat-template debugging tool that shows, for a given conversation, exactly which tokens belong to which message.
+I'd like to add an OpenAI-compat tools-calling path to `transformers serve`. What's the minimal scope and where do the seams sit?
+We need to support a new quantisation format end-to-end (load, save, generate). Plan the change.
+How would I evaluate whether the fast tokenizer and slow tokenizer for a given model agree on every byte across a corpus? Sketch the experiment.
+I want to extend the trainer to support a new optimizer state-sharding scheme. Where does it touch?
+A user reports that `model.generate(streaming=True)` deadlocks on multi-GPU. Help me trace what could cause it.
+Plan a refactor of `GenerationConfig` so deprecated fields can be cleanly removed in a future major version without breaking older checkpoints.
+I want to add support for tool-calling output parsing in the chat template. What's the design?
+We need to make `from_pretrained` resilient to partial Hub downloads. How would you build that without slowing the happy path?
+Help me design an end-to-end test that verifies attention masks are correct under packed sequences with custom positional encodings.
+I'd like to add a CLI subcommand `transformers chat` that talks to a local server. Plan it.
+A user filed a bug about token-id drift between `apply_chat_template(..., tokenize=True)` and the slow path. How would I reproduce and fix it?
+We want to add a structured-output decoding mode (JSON schema constrained). What changes across logits processors, generation, and docs?
+Walk me through the implications of switching the default cache implementation in `generate()` to a paged-KV cache.
+I want to add a new image processor that streams tiles for very large inputs. Where does it plug in?
+Help me design a regression suite that catches silent changes in chat-template rendering across model releases.
+Plan a deprecation path for the `prepare_inputs_for_generation` override pattern that doesn't break custom models in the wild.
+I want to add a `--profile` flag to `transformers serve` that emits per-token latency. How would I wire it?
+We're integrating a new accelerator backend. What touches: device map, dtype handling, generation cache?
+A user reports OOM on a model that fits at training time but blows up at inference. Help me figure out what's different.
+Help me write a runbook for diagnosing a model whose generated tokens silently differ across CUDA versions.
+I want to add a per-layer trace dump for debugging numerical issues in `forward()`. What's the cleanest hook surface?
+Propose a way to validate that a new tokenizer round-trips through `save_pretrained` / `from_pretrained` losslessly.
+We need to add multi-GPU support to a training example without using accelerate. How much rework, and where?
+I want to add a CI job that fails if a PR changes a model's generation output for a frozen prompt. Plan it.
+Help me think through whether to add a new `Attention` base class or push the variant into the existing protocol.
+We have a feature request for resumable training across preemptible nodes. What does that change in the trainer's checkpoint format?
+A user wants to bring their own attention kernel via a context manager. Sketch the API.
