@@ -145,14 +145,14 @@ def export_cmd(
     proc = load_processor(model)
 
     if output:
-        ds = export_local(trace_dir, output, processor=proc, model=model)
+        n_rows = export_local(trace_dir, output, processor=proc, model=model)
         click.echo(
-            f"agentcap export: wrote {len(ds)} rows to {output}", err=True
+            f"agentcap export: wrote {n_rows} rows to {output}", err=True
         )
     else:
-        ds = push_bucket(trace_dir, push, processor=proc, model=model)
+        n_rows = push_bucket(trace_dir, push, processor=proc, model=model)
         click.echo(
-            f"agentcap export: wrote {len(ds)} rows to bucket {push}", err=True
+            f"agentcap export: wrote {n_rows} rows to bucket {push}", err=True
         )
 
 

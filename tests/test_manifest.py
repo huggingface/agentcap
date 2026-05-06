@@ -646,8 +646,10 @@ def test_export_local_round_trip_real_parquet(tmp_path: Path):
     _write_capture(trace, "rb", body, {"choices": [{"index": 0}]})
 
     out = tmp_path / "rows.parquet"
-    ds = export_local(trace, out, processor=FakeProcessor(), model="m")
-    assert len(ds) == 2
+    n_rows = export_local(
+        trace, out, processor=FakeProcessor(), model="m", progress=False
+    )
+    assert n_rows == 2
     assert out.is_file()
 
     reloaded = load_dataset("parquet", data_files=str(out), split="train")
@@ -659,3 +661,6 @@ def test_export_local_round_trip_real_parquet(tmp_path: Path):
         "sections",
         "token_role",
     }
+    import json as _json
+    sample_req = _json.loads(reloaded[0]["request"])
+    assert sample_req["messages"][0]["role"] == "system"

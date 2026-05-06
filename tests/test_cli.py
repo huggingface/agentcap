@@ -189,10 +189,9 @@ def test_export_auto_detects_model_from_traces(tmp_path: Path):
         })
     )
 
-    fake_ds = type("DS", (), {"__len__": lambda self: 1})()
     runner = CliRunner()
     with patch("agentcap.export.load_processor", return_value=object()), \
-         patch("agentcap.export.export_local", return_value=fake_ds):
+         patch("agentcap.export.export_local", return_value=1):
         result = runner.invoke(
             cli, ["export", str(trace), "--output", str(tmp_path / "out.parquet")]
         )
@@ -265,10 +264,9 @@ def test_export_explicit_model_uses_override_when_traces_uniform(tmp_path: Path)
         })
     )
 
-    fake_ds = type("DS", (), {"__len__": lambda self: 1})()
     runner = CliRunner()
     with patch("agentcap.export.load_processor", return_value=object()) as mock_load, \
-         patch("agentcap.export.export_local", return_value=fake_ds):
+         patch("agentcap.export.export_local", return_value=1):
         result = runner.invoke(
             cli,
             ["export", str(trace), "--model", "override-model",

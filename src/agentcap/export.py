@@ -86,8 +86,26 @@ def _iter_pairs(
         yield rid, body, resp_body, captured_at
 
 
+def _row_for_arrow(manifest_row: dict) -> dict:
+    """Serialise the polymorphic ``request``/``response`` bodies as JSON
+    strings so Arrow's per-row schema inference doesn't choke on
+    heterogeneous tool-schema fields. Consumers do
+    ``json.loads(row["request"])`` to get the dict back."""
+    return {
+        "request_id": manifest_row["request_id"],
+        "model": manifest_row["model"],
+        "captured_at": manifest_row["captured_at"],
+        "request": json.dumps(manifest_row["request"], ensure_ascii=False),
+        "response": json.dumps(manifest_row["response"], ensure_ascii=False),
+        "n_tokens": manifest_row["n_tokens"],
+        "sections": manifest_row["sections"],
+        "token_role": manifest_row["token_role"],
+    }
+
+
 def build_rows(trace_dir: Path | str, *, processor, model: str) -> list[dict]:
-    """Render every captured request into a manifest row, in memory."""
+    """Render every captured request into a manifest row, in memory.
+    Streaming consumers should call :func:`export_local` instead."""
     trace_dir = Path(trace_dir)
     rows: list[dict] = []
     for rid, body, resp, captured_at in _iter_pairs(trace_dir):
@@ -110,16 +128,79 @@ def export_local(
     *,
     processor,
     model: str,
+    batch_size: int = 32,
+    progress: bool = True,
 ):
-    """Render the trace dir into a single parquet file on disk."""
-    from datasets import Dataset
+    """Render the trace dir into a single parquet file on disk.
 
-    rows = build_rows(trace_dir, processor=processor, model=model)
-    ds = Dataset.from_list(rows)
+    Streams via ``pyarrow.parquet.ParquetWriter`` in batches of
+    ``batch_size`` so peak memory is bounded and a mid-render kill
+    leaves a valid parquet up to the last flushed batch. Returns the
+    number of rows written."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    trace_dir = Path(trace_dir)
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    ds.to_parquet(str(output))
-    return ds
+
+    request_files = sorted(trace_dir.glob("*.request.json"))
+    total = len(request_files)
+    if total == 0:
+        raise ValueError(f"no captured requests in {trace_dir}")
+
+    if progress:
+        try:
+            from tqdm import tqdm
+            iterator = tqdm(
+                _iter_pairs(trace_dir),
+                total=total,
+                desc=f"export {trace_dir.name}",
+                unit="row",
+            )
+        except ImportError:
+            iterator = _iter_pairs(trace_dir)
+    else:
+        iterator = _iter_pairs(trace_dir)
+
+    writer: pq.ParquetWriter | None = None
+    schema: pa.Schema | None = None
+    batch: list[dict] = []
+    n_written = 0
+
+    def _flush(rows: list[dict]) -> None:
+        nonlocal writer, schema, n_written
+        if not rows:
+            return
+        table = pa.Table.from_pylist(rows)
+        if writer is None:
+            schema = table.schema
+            writer = pq.ParquetWriter(str(output), schema)
+        else:
+            table = table.cast(schema)
+        writer.write_table(table)
+        n_written += len(rows)
+
+    try:
+        for rid, body, resp, captured_at in iterator:
+            mrow = build_manifest(
+                processor,
+                model=model,
+                request_id=rid,
+                captured_at=captured_at,
+                request_body=body,
+                response_body=resp,
+            )
+            batch.append(_row_for_arrow(mrow))
+            if len(batch) >= batch_size:
+                _flush(batch)
+                batch = []
+        _flush(batch)
+    finally:
+        if writer is not None:
+            writer.close()
+
+    return n_written
 
 
 def parse_bucket_uri(uri: str) -> tuple[str, str]:
@@ -144,13 +225,8 @@ def parse_bucket_uri(uri: str) -> tuple[str, str]:
 
 
 def _default_bucket_filename() -> str:
-    """Per-call unique parquet filename for bucket pushes.
-
-    Sortable by time (UTC), with a short random suffix so two pushes
-    in the same second don't collide. Follows the ``train-*.parquet``
-    convention so a future ``load_dataset`` over the prefix glob picks
-    up every shard naturally.
-    """
+    """Per-call unique ``train-<utc>-<hex>.parquet`` so successive
+    pushes accumulate side-by-side under a prefix."""
     import time
     import uuid
 
@@ -169,17 +245,12 @@ def push_bucket(
     """Render the trace dir into parquet and upload to a Storage Bucket.
 
     ``bucket_uri`` is ``hf://buckets/<owner>/<name>[/<prefix>]``. The
-    parquet file lands at ``<prefix>/<filename>`` (or ``<filename>``
-    if no prefix).
-
-    By default ``filename`` is auto-generated per call, so successive
-    pushes to the same prefix accumulate side-by-side instead of
-    overwriting. Pass an explicit ``filename`` to opt back into
-    overwrite-in-place (e.g. a "latest" pointer file).
-    """
+    parquet file lands at ``<prefix>/<filename>`` (or ``<filename>`` if
+    no prefix). When ``filename`` is None the auto-generated default is
+    unique per call, so pushes accumulate; pass an explicit name to
+    overwrite in place."""
     import tempfile
 
-    from datasets import Dataset
     from huggingface_hub import batch_bucket_files
 
     bucket_id, prefix = parse_bucket_uri(bucket_uri)
@@ -188,15 +259,14 @@ def push_bucket(
         filename = _default_bucket_filename()
     remote_path = f"{prefix}/{filename}" if prefix else filename
 
-    rows = build_rows(trace_dir, processor=processor, model=model)
-    ds = Dataset.from_list(rows)
-
     with tempfile.TemporaryDirectory() as tmpdir:
         local_file = Path(tmpdir) / filename
-        ds.to_parquet(str(local_file))
+        n_rows = export_local(
+            trace_dir, local_file, processor=processor, model=model
+        )
         batch_bucket_files(bucket_id, add=[(str(local_file), remote_path)])
 
-    return ds
+    return n_rows
 
 
 def load_processor(model: str):
