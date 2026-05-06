@@ -40,6 +40,7 @@ agentcap = "agentcap.__main__:main"
 packages = ["src/agentcap"]
 
 [tool.pytest.ini_options]
+testpaths = ["tests"]
 markers = [
     "integration: tests that spin up real uvicorn servers and talk over TCP loopback (slower)",
     "live: integration tests that invoke a real agent CLI against a real model server (skipped unless agent binaries + AGENTCAP_TEST_LLM_URL or AGENTCAP_TEST_GGUF are configured)",
