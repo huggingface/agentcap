@@ -46,7 +46,10 @@ def _default_call_synth(
     body = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 80,
+        # Reason-by-default models (Gemma-4, Qwen3.5+) burn the budget
+        # in reasoning_content before the answer; an 80-token cap was
+        # silently producing empty content + finish_reason="length".
+        "max_tokens": 2048,
         "temperature": 0.7,
     }
     url = upstream.rstrip("/") + "/v1/chat/completions"
