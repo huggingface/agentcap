@@ -29,6 +29,20 @@ from .manifest import build_manifest
 _BUCKET_PREFIX = "hf://buckets/"
 
 
+def detect_agent(trace_dir: Path | str) -> str | None:
+    """Return the agent name persisted alongside ``trace_dir`` by
+    ``agentcap run`` (in ``<trace_dir>/_meta.json``), or ``None`` if
+    the trace dir was produced by some other capture flow that didn't
+    record one."""
+    meta_path = Path(trace_dir) / "_meta.json"
+    try:
+        meta = json.loads(meta_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    val = meta.get("agent")
+    return val if isinstance(val, str) and val else None
+
+
 def detect_model(trace_dir: Path | str) -> str | None:
     """Return the unique ``body.model`` value across all captured
     requests in ``trace_dir``.
@@ -224,14 +238,38 @@ def parse_bucket_uri(uri: str) -> tuple[str, str]:
     return bucket_id, path_in_bucket
 
 
-def _default_bucket_filename() -> str:
-    """Per-call unique ``train-<utc>-<hex>.parquet`` so successive
-    pushes accumulate side-by-side under a prefix."""
+_FILENAME_SAFE = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_."
+
+
+def _slug(s: str) -> str:
+    """Lossy filename-safe slug: replace any non-[A-Za-z0-9._-] char with
+    ``-`` and collapse runs. Strips ``org/`` prefixes from HF model ids."""
+    s = s.split("/")[-1]
+    out = "".join(c if c in _FILENAME_SAFE else "-" for c in s)
+    while "--" in out:
+        out = out.replace("--", "-")
+    return out.strip("-_.") or "x"
+
+
+def _default_bucket_filename(
+    agent: str | None = None, model: str | None = None
+) -> str:
+    """Per-call unique ``train-[<agent>-<model>-]<utc>-<hex>.parquet`` so
+    successive pushes accumulate side-by-side under a prefix and
+    consumers can see (agent, model) at a glance without opening the
+    parquet."""
     import time
     import uuid
 
     ts = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
-    return f"train-{ts}-{uuid.uuid4().hex[:6]}.parquet"
+    parts = ["train"]
+    if agent:
+        parts.append(_slug(agent))
+    if model:
+        parts.append(_slug(model))
+    parts.append(ts)
+    parts.append(uuid.uuid4().hex[:6])
+    return "-".join(parts) + ".parquet"
 
 
 def push_bucket(
@@ -240,15 +278,17 @@ def push_bucket(
     *,
     processor,
     model: str,
+    agent: str | None = None,
     filename: str | None = None,
 ):
     """Render the trace dir into parquet and upload to a Storage Bucket.
 
     ``bucket_uri`` is ``hf://buckets/<owner>/<name>[/<prefix>]``. The
     parquet file lands at ``<prefix>/<filename>`` (or ``<filename>`` if
-    no prefix). When ``filename`` is None the auto-generated default is
-    unique per call, so pushes accumulate; pass an explicit name to
-    overwrite in place."""
+    no prefix). When ``filename`` is None the auto-generated default
+    embeds ``agent`` (when provided) and ``model`` so the file name
+    alone identifies the (agent, model) tuple — and is unique per call,
+    so pushes accumulate. Pass an explicit name to overwrite in place."""
     import tempfile
 
     from huggingface_hub import batch_bucket_files
@@ -256,7 +296,7 @@ def push_bucket(
     bucket_id, prefix = parse_bucket_uri(bucket_uri)
     prefix = prefix.rstrip("/")
     if filename is None:
-        filename = _default_bucket_filename()
+        filename = _default_bucket_filename(agent=agent, model=model)
     remote_path = f"{prefix}/{filename}" if prefix else filename
 
     with tempfile.TemporaryDirectory() as tmpdir:

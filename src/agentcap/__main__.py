@@ -97,15 +97,25 @@ def proxy_cmd(upstream: str, listen: str, trace_dir: str) -> None:
     help="Storage Bucket URI to push to: hf://buckets/<owner>/<name>[/<prefix>]. "
     "Dataset repos aren't accepted — render to --output and use `hf upload` instead.",
 )
+@click.option(
+    "--agent",
+    default=None,
+    help="Agent name to embed in the bucket filename (so pushes are "
+    "grouped by agent + model). If omitted, auto-detected from "
+    "<trace-dir>/_meta.json (written by `agentcap run`); falls back "
+    "to no agent tag for trace dirs produced by other flows.",
+)
 def export_cmd(
     trace_dir: str,
     model: str | None,
     output: str | None,
     push: str | None,
+    agent: str | None,
 ) -> None:
     """Render a captured trace dir into a parquet dataset."""
     from .export import (
         _BUCKET_PREFIX,
+        detect_agent,
         detect_model,
         export_local,
         load_processor,
@@ -142,6 +152,14 @@ def export_cmd(
             err=True,
         )
 
+    if agent is None:
+        agent = detect_agent(trace_dir)
+        if agent is not None:
+            click.echo(
+                f"agentcap export: using agent {agent!r} (auto-detected)",
+                err=True,
+            )
+
     proc = load_processor(model)
 
     if output:
@@ -150,7 +168,9 @@ def export_cmd(
             f"agentcap export: wrote {n_rows} rows to {output}", err=True
         )
     else:
-        n_rows = push_bucket(trace_dir, push, processor=proc, model=model)
+        n_rows = push_bucket(
+            trace_dir, push, processor=proc, model=model, agent=agent
+        )
         click.echo(
             f"agentcap export: wrote {n_rows} rows to bucket {push}", err=True
         )
@@ -251,6 +271,10 @@ def run_cmd(
     sandbox = workdir_p / "sandbox"
     traces.mkdir(parents=True, exist_ok=True)
     sessions.mkdir(parents=True, exist_ok=True)
+    # Persist the agent name so `agentcap export` can tag bucket-pushed
+    # parquet filenames with it. The capture proxy itself stays
+    # agent-agnostic; this is purely an orchestrator hint.
+    (traces / "_meta.json").write_text(json.dumps({"agent": agent}))
     # Empty sandbox dir = the agent's cwd. Keeps cwd-side state (e.g.
     # Hermes auto-injecting AGENTS.md / CLAUDE.md from cwd into every
     # system prompt) from leaking into the trace.

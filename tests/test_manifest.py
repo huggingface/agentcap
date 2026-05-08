@@ -524,9 +524,10 @@ def test_push_bucket_writes_parquet_to_prefix(tmp_path: Path, monkeypatch):
     assert captured["bucket_id"] == "me/my-bucket"
     assert len(captured["uploads"]) == 1
     upload = captured["uploads"][0]
-    # Default filename: train-YYYYMMDDTHHMMSS-HEX6.parquet under the prefix
+    # Default filename embeds the model slug so consumers can see
+    # (agent, model) at a glance under a shared prefix.
     assert re.fullmatch(
-        r"runs/abc/train-\d{8}T\d{6}-[0-9a-f]{6}\.parquet",
+        r"runs/abc/train-m-\d{8}T\d{6}-[0-9a-f]{6}\.parquet",
         upload["remote"],
     ), upload["remote"]
     assert upload["n_rows"] == 2
@@ -589,9 +590,10 @@ def test_push_bucket_no_prefix_writes_to_root(tmp_path: Path, monkeypatch):
         processor=FakeProcessor(), model="m",
     )
     assert len(captured["remote_paths"]) == 1
-    # No prefix → file at bucket root, default name pattern
+    # No prefix → file at bucket root, default name pattern (with
+    # model slug embedded — agent omitted when not passed).
     assert re.fullmatch(
-        r"train-\d{8}T\d{6}-[0-9a-f]{6}\.parquet",
+        r"train-m-\d{8}T\d{6}-[0-9a-f]{6}\.parquet",
         captured["remote_paths"][0],
     )
 
@@ -622,6 +624,61 @@ def test_push_bucket_explicit_filename_overrides_default(
         filename="latest.parquet",
     )
     assert captured["remote_paths"] == ["runs/latest.parquet"]
+
+
+def test_push_bucket_default_filename_embeds_agent_and_slugs_model(
+    tmp_path: Path, monkeypatch
+):
+    """When ``agent`` is passed and the model id contains an
+    ``org/name`` prefix or other filesystem-unsafe chars, the
+    auto-generated bucket filename embeds both as a clean slug so a
+    bucket prefix can hold many (agent, model) tuples side-by-side
+    without name collisions or path traversal."""
+    import re
+
+    import agentcap.export as export_mod
+
+    new_trace = tmp_path / "new"
+    new_trace.mkdir()
+    _write_capture(new_trace, "rid", _BODY, {"choices": []})
+
+    captured: dict = {}
+
+    def _fake_upload(bucket_id, *, add):
+        captured["remote_paths"] = [remote for _, remote in add]
+
+    monkeypatch.setattr(
+        "huggingface_hub.batch_bucket_files", _fake_upload, raising=False
+    )
+
+    export_mod.push_bucket(
+        new_trace, "hf://buckets/me/my-bucket/runs",
+        processor=FakeProcessor(),
+        model="google/gemma-4-E4B-it",
+        agent="goose",
+    )
+
+    assert len(captured["remote_paths"]) == 1
+    # Model org prefix stripped, hyphens and dots preserved.
+    assert re.fullmatch(
+        r"runs/train-goose-gemma-4-E4B-it-\d{8}T\d{6}-[0-9a-f]{6}\.parquet",
+        captured["remote_paths"][0],
+    ), captured["remote_paths"][0]
+
+
+def test_detect_agent_reads_meta_json(tmp_path: Path):
+    """``agentcap run`` writes ``<trace_dir>/_meta.json`` so a later
+    ``agentcap export`` can recover the agent name without the user
+    re-typing it."""
+    import json as _json
+
+    from agentcap.export import detect_agent
+
+    trace = tmp_path / "t"
+    trace.mkdir()
+    assert detect_agent(trace) is None
+    (trace / "_meta.json").write_text(_json.dumps({"agent": "hermes"}))
+    assert detect_agent(trace) == "hermes"
 
 
 @pytest.mark.integration
