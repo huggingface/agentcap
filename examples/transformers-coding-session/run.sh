@@ -27,18 +27,20 @@
 #   UPSTREAM        model server URL                http://127.0.0.1:8000
 #   LISTEN          proxy bind                      127.0.0.1:8001
 #   TURNS           multi-turn count                4
-#   FOLLOWUP        continue | templates | synthesized   continue
+#   FOLLOWUP        continue | templates | synthesized   synthesized
 #   SYNTH_UPSTREAM  synth endpoint (only if FOLLOWUP=synthesized; bypasses
-#                   the proxy)                      defaults to $UPSTREAM
-#   SYNTH_MODEL     synth model                     defaults to $MODEL
+#                   the capture proxy)              defaults to $UPSTREAM
+#   SYNTH_MODEL     synth model                     defaults to $MODEL,
+#                   else auto-detected as the first model id advertised
+#                   by $UPSTREAM/v1/models (so a single llama-server
+#                   covers both the agent and the synth path).
 #   TIMEOUT         per-turn timeout in seconds     300
 #   TRANSFORMERS_CHECKOUT  path to a transformers git checkout. The
 #                   script seeds <WORKDIR>/sandbox as a detached
 #                   ``git worktree`` of it so the agent has real
 #                   transformers code to inspect — without this the
 #                   sandbox is empty and the corpus prompts produce
-#                   pure speculation. Auto-detected from
-#                   ../transformers or /home/ubuntu/transformers.
+#                   pure speculation.
 
 set -euo pipefail
 
@@ -67,16 +69,35 @@ WORKDIR="${WORKDIR:-$HERE/runs/$AGENT-$(date +%Y-%m-%d-%H%M)}"
 UPSTREAM="${UPSTREAM:-http://127.0.0.1:8000}"
 LISTEN="${LISTEN:-127.0.0.1:8001}"
 TURNS="${TURNS:-4}"
-FOLLOWUP="${FOLLOWUP:-continue}"
+FOLLOWUP="${FOLLOWUP:-synthesized}"
 SYNTH_UPSTREAM="${SYNTH_UPSTREAM:-$UPSTREAM}"
 SYNTH_MODEL="${SYNTH_MODEL:-$MODEL}"
 TIMEOUT="${TIMEOUT:-300}"
+
+# When using synthesized follow-ups and no SYNTH_MODEL was provided
+# (typical for hermes, where MODEL is empty because hermes resolves
+# the model from its own config), ask the upstream's /v1/models for
+# the first advertised id. This keeps "single llama-server, no extra
+# args" the working default for hermes too.
+if [[ "$FOLLOWUP" == "synthesized" && -z "$SYNTH_MODEL" ]]; then
+    SYNTH_MODEL=$(
+        curl -sf "$SYNTH_UPSTREAM/v1/models" 2>/dev/null \
+            | python3 -c 'import sys,json; d=json.load(sys.stdin); print((d.get("data") or [{}])[0].get("id",""))' \
+            || true
+    )
+    if [[ -z "$SYNTH_MODEL" ]]; then
+        echo "ERROR: FOLLOWUP=synthesized requires SYNTH_MODEL; could not auto-detect from $SYNTH_UPSTREAM/v1/models." >&2
+        echo "       Set SYNTH_MODEL=<id> or FOLLOWUP=continue." >&2
+        exit 2
+    fi
+    echo "synth model auto-detected: $SYNTH_MODEL" >&2
+fi
 
 # Seed <WORKDIR>/sandbox with a transformers worktree so the corpus
 # prompts have real code to ground in. Skip if sandbox already
 # contains a .git (idempotent across reruns).
 if [[ -z "${TRANSFORMERS_CHECKOUT:-}" ]]; then
-    for c in "$HERE/../../../transformers" /home/ubuntu/transformers; do
+    for c in "$HOME/transformers" "$HERE/transformers"; do
         if [[ -d "$c/.git" || -f "$c/.git" ]]; then
             TRANSFORMERS_CHECKOUT="$(cd "$c" && pwd)"
             break
