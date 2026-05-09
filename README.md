@@ -4,7 +4,10 @@ A framework for capturing real LLM-agent chat-completion traffic and
 exporting it as a [Hugging Face dataset](https://huggingface.co/docs/datasets).
 What an agent actually sends to a model — its full system prompt,
 tool schemas, message history, tool calls, and tool results, every
-turn — preserved verbatim and indexed by `(model, agent build)`.
+turn — preserved verbatim. Rows carry the model id; bucket-pushed
+parquet filenames embed both agent and model
+(`train-<agent>-<model>-<ts>-<hex>.parquet`) so a single bucket prefix
+can hold many `(agent, model)` tuples without aliasing.
 
 The output is a clean dataset other people can load and study without
 re-running the agent. Useful for evaluation, fine-tuning corpora,
@@ -30,23 +33,28 @@ Three components, each independently useful:
    boundaries and per-message structural metadata.
 
 ```
-  ┌──────────────────────── orchestrator ──────────────────────┐
-  │                                                            │
-  │  task list ──► [agent CLI] ──HTTP──► [capture proxy] ──HTTP──► [model server]
-  │       ▲             │                       │
-  │       │             ▼                       ▼
-  │       │     final response text     <trace-dir>/*.{request,response}.json
-  │       │             │                       │
-  │       │             ▼                       │
-  │       └─── [follow-up synthesizer]          │
-  │              (multi-turn)                   │
-  └─────────────────────────────────────────────┘
-                                                ▼
+  ┌─────────────────────────── orchestrator ──────────────────────────────┐
+  │                                                                       │
+  │  task list ──► [agent CLI] ──HTTP──► [capture proxy] ──HTTP──┐        │
+  │       ▲             │                        │                ▼       │
+  │       │             ▼                        ▼            [model      │
+  │       │   final response text   <trace-dir>/*.{req,resp}.json server] │
+  │       │             │                                         ▲       │
+  │       │             ▼                                         │       │
+  │       └─── [follow-up synthesizer] ─── HTTP (bypasses proxy) ─┘       │
+  │              (multi-turn)                                             │
+  └───────────────────────────────────────────────────────────────────────┘
+                                          ▼
                                   agentcap export
-                                                │
-                                                ▼
-                                       Hugging Face dataset
+                                          │
+                                          ▼
+                                 Hugging Face dataset
 ```
+
+The synthesizer talks to the model server **directly**, around the
+capture proxy, so the trace stays a clean record of agent↔model
+interaction; the synthesizer's own LLM calls are an orchestration
+detail and never land in the dataset.
 
 The split is intentional. **Capture is dumb** — no tokenizer, no
 chat-template render, no per-token labels — just persist the bytes.
@@ -84,7 +92,11 @@ pip install -e .
 GGUF_PATH=/path/to/model-Q4_K_M.gguf REASONING=off \
     ./scripts/start_llama_cpp_server.sh &
 
-# Drive Hermes through 30 prompts × 4 turns, capture, then export
+# Drive Hermes through 30 prompts × 4 turns, capture, then export.
+# --followup continue sends the literal string "continue" between
+# turns. For free-form planning prompts, --followup synthesized hits a
+# small synth model (--synth-upstream, --synth-model) for richer
+# topic-aware follow-ups; see examples/transformers-coding-session/run.sh.
 agentcap run \
     --agent hermes \
     --upstream http://127.0.0.1:8000 \
@@ -92,8 +104,11 @@ agentcap run \
     --turns 4 --followup continue \
     --workdir runs/run-001/
 
+# --workers parallelises the per-row chat-template render (CPU-bound,
+# embarrassingly parallel). On a 1000-row trace dir this is the
+# difference between minutes and an hour.
 agentcap export runs/run-001/traces \
-    --output runs/run-001.parquet
+    --output runs/run-001.parquet --workers 8
 ```
 
 See [docs/tested-models-and-agents.md](docs/tested-models-and-agents.md)
