@@ -10,7 +10,7 @@ the model card or agent revs.
 | `Qwen3.6-35B-A3B`               | ✅ | ✅ | ✅ | ✅ |
 | `unsloth/gemma-4-26B-A4B-it`    | ❌¹ | ✅³ | ✅ | ✅ |
 | `Qwen3-4B-Instruct-2507` (CPU)  | ✅² | ✅ | ✅ | ✅² |
-| `google/gemma-4-E4B-it`         | ✅³ | ✅³ | — | ✅³ |
+| `google/gemma-4-E4B-it`         | ✅³ | ✅³ | ✅³ | ✅³ |
 
 `—` = not exercised.
 
