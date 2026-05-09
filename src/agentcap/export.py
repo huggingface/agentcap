@@ -136,6 +136,27 @@ def build_rows(trace_dir: Path | str, *, processor, model: str) -> list[dict]:
     return rows
 
 
+_WORKER_PROCESSOR = None
+
+
+def _worker_init(model: str) -> None:
+    global _WORKER_PROCESSOR
+    _WORKER_PROCESSOR = load_processor(model)
+
+
+def _worker_render(args):
+    rid, body, resp, captured_at, model = args
+    mrow = build_manifest(
+        _WORKER_PROCESSOR,
+        model=model,
+        request_id=rid,
+        captured_at=captured_at,
+        request_body=body,
+        response_body=resp,
+    )
+    return _row_for_arrow(mrow)
+
+
 def export_local(
     trace_dir: Path | str,
     output: Path | str,
@@ -144,13 +165,18 @@ def export_local(
     model: str,
     batch_size: int = 32,
     progress: bool = True,
+    workers: int = 1,
 ):
     """Render the trace dir into a single parquet file on disk.
 
     Streams via ``pyarrow.parquet.ParquetWriter`` in batches of
     ``batch_size`` so peak memory is bounded and a mid-render kill
     leaves a valid parquet up to the last flushed batch. Returns the
-    number of rows written."""
+    number of rows written.
+
+    ``workers > 1`` runs the per-row manifest build in a process pool;
+    each worker re-loads the processor on init. ``workers=1`` keeps
+    the in-process path used by tests and small trace dirs."""
     import pyarrow as pa
     import pyarrow.parquet as pq
 
@@ -163,19 +189,18 @@ def export_local(
     if total == 0:
         raise ValueError(f"no captured requests in {trace_dir}")
 
+    pairs_iter = _iter_pairs(trace_dir)
     if progress:
         try:
             from tqdm import tqdm
-            iterator = tqdm(
-                _iter_pairs(trace_dir),
+            pairs_iter = tqdm(
+                pairs_iter,
                 total=total,
                 desc=f"export {trace_dir.name}",
                 unit="row",
             )
         except ImportError:
-            iterator = _iter_pairs(trace_dir)
-    else:
-        iterator = _iter_pairs(trace_dir)
+            pass
 
     writer: pq.ParquetWriter | None = None
     schema: pa.Schema | None = None
@@ -196,19 +221,36 @@ def export_local(
         n_written += len(rows)
 
     try:
-        for rid, body, resp, captured_at in iterator:
-            mrow = build_manifest(
-                processor,
-                model=model,
-                request_id=rid,
-                captured_at=captured_at,
-                request_body=body,
-                response_body=resp,
+        if workers <= 1:
+            for rid, body, resp, captured_at in pairs_iter:
+                mrow = build_manifest(
+                    processor,
+                    model=model,
+                    request_id=rid,
+                    captured_at=captured_at,
+                    request_body=body,
+                    response_body=resp,
+                )
+                batch.append(_row_for_arrow(mrow))
+                if len(batch) >= batch_size:
+                    _flush(batch)
+                    batch = []
+        else:
+            from concurrent.futures import ProcessPoolExecutor
+            args_iter = (
+                (rid, body, resp, captured_at, model)
+                for rid, body, resp, captured_at in pairs_iter
             )
-            batch.append(_row_for_arrow(mrow))
-            if len(batch) >= batch_size:
-                _flush(batch)
-                batch = []
+            with ProcessPoolExecutor(
+                max_workers=workers,
+                initializer=_worker_init,
+                initargs=(model,),
+            ) as pool:
+                for row in pool.map(_worker_render, args_iter, chunksize=4):
+                    batch.append(row)
+                    if len(batch) >= batch_size:
+                        _flush(batch)
+                        batch = []
         _flush(batch)
     finally:
         if writer is not None:
@@ -280,6 +322,7 @@ def push_bucket(
     model: str,
     agent: str | None = None,
     filename: str | None = None,
+    workers: int = 1,
 ):
     """Render the trace dir into parquet and upload to a Storage Bucket.
 
@@ -302,7 +345,8 @@ def push_bucket(
     with tempfile.TemporaryDirectory() as tmpdir:
         local_file = Path(tmpdir) / filename
         n_rows = export_local(
-            trace_dir, local_file, processor=processor, model=model
+            trace_dir, local_file, processor=processor, model=model,
+            workers=workers,
         )
         batch_bucket_files(bucket_id, add=[(str(local_file), remote_path)])
 

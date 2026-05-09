@@ -105,12 +105,22 @@ def proxy_cmd(upstream: str, listen: str, trace_dir: str) -> None:
     "<trace-dir>/_meta.json (written by `agentcap run`); falls back "
     "to no agent tag for trace dirs produced by other flows.",
 )
+@click.option(
+    "--workers",
+    type=int,
+    default=1,
+    show_default=True,
+    help="Render rows in a process pool of this size. >1 parallelises "
+    "the per-row chat-template render (CPU-bound). Each worker "
+    "re-loads the tokenizer on init.",
+)
 def export_cmd(
     trace_dir: str,
     model: str | None,
     output: str | None,
     push: str | None,
     agent: str | None,
+    workers: int,
 ) -> None:
     """Render a captured trace dir into a parquet dataset."""
     from .export import (
@@ -163,13 +173,16 @@ def export_cmd(
     proc = load_processor(model)
 
     if output:
-        n_rows = export_local(trace_dir, output, processor=proc, model=model)
+        n_rows = export_local(
+            trace_dir, output, processor=proc, model=model, workers=workers
+        )
         click.echo(
             f"agentcap export: wrote {n_rows} rows to {output}", err=True
         )
     else:
         n_rows = push_bucket(
-            trace_dir, push, processor=proc, model=model, agent=agent
+            trace_dir, push, processor=proc, model=model, agent=agent,
+            workers=workers,
         )
         click.echo(
             f"agentcap export: wrote {n_rows} rows to bucket {push}", err=True

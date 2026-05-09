@@ -36,6 +36,7 @@
 # Env knobs:
 #   BUCKET         default `--push` URI when --push/--output not given.
 #                  hf://buckets/dacorvo/agentcap-traces/transformers-coding-session/
+#   WORKERS        parallel render workers (default 8).
 #   AGENTCAP       path to the agentcap binary; default: `agentcap` on PATH
 
 set -euo pipefail
@@ -44,6 +45,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 DEFAULT_BUCKET="hf://buckets/dacorvo/agentcap-traces/transformers-coding-session/"
 AGENTCAP="${AGENTCAP:-agentcap}"
 BUCKET="${BUCKET:-$DEFAULT_BUCKET}"
+WORKERS="${WORKERS:-8}"
 
 WORKDIR=""
 MODEL=""
@@ -85,7 +87,7 @@ if [[ -z "$OUTPUT" && -z "$PUSH" ]]; then
     PUSH="$BUCKET"
 fi
 
-ARGS=("$TRACES")
+ARGS=("$TRACES" --workers "$WORKERS")
 [[ -n "$MODEL"  ]] && ARGS+=(--model  "$MODEL")
 [[ -n "$OUTPUT" ]] && ARGS+=(--output "$OUTPUT")
 [[ -n "$PUSH"   ]] && ARGS+=(--push   "$PUSH")
