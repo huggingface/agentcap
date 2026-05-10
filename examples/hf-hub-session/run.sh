@@ -80,9 +80,22 @@ if [[ "$FOLLOWUP" == "synthesized" && -z "$SYNTH_MODEL" ]]; then
     echo "synth model auto-detected: $SYNTH_MODEL" >&2
 fi
 
-# Empty sandbox by design — the corpus is about reaching the Hub, not
-# grepping a local checkout. Just make sure the dir exists.
+# Sandbox carries no source code — the corpus is about reaching the
+# Hub, not grepping a local checkout. It does carry the AgentSkills
+# bundle so cwd-discovery agents (opencode, goose, pi) surface the
+# `hf-cli`, `huggingface-datasets`, etc. skills. Hermes uses its own
+# ~/.hermes/skills/ and ignores cwd.
 mkdir -p "$WORKDIR/sandbox"
+SKILLS_SRC="${HF_AGENT_SKILLS_DIR:-$HOME/.agents/skills}"
+if [[ -d "$SKILLS_SRC" ]] && [[ ! -e "$WORKDIR/sandbox/skills" ]]; then
+    ln -s "$SKILLS_SRC" "$WORKDIR/sandbox/skills"
+fi
+if [[ ! -f "$WORKDIR/sandbox/AGENTS.md" ]]; then
+    curl -sf https://raw.githubusercontent.com/huggingface/skills/main/agents/AGENTS.md \
+        > "$WORKDIR/sandbox/AGENTS.md.tmp" \
+        && mv "$WORKDIR/sandbox/AGENTS.md.tmp" "$WORKDIR/sandbox/AGENTS.md" \
+        || rm -f "$WORKDIR/sandbox/AGENTS.md.tmp"
+fi
 
 ARGS=(
     --agent    "$AGENT"
