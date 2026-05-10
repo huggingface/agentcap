@@ -8,25 +8,22 @@ the model card or agent revs.
 |---|:-:|:-:|:-:|:-:|
 | `Qwen3-Coder-30B-A3B-Instruct`  | ✅ | — | — | — |
 | `Qwen3.6-35B-A3B`               | ✅ | ✅ | ✅ | ✅ |
-| `unsloth/gemma-4-26B-A4B-it`    | ❌¹ | ✅³ | ✅ | ✅ |
-| `Qwen3-4B-Instruct-2507` (CPU)  | ✅² | ✅ | ✅ | ✅² |
-| `google/gemma-4-E4B-it`         | ✅³ | ✅³ | ✅³ | ✅³ |
+| `unsloth/gemma-4-26B-A4B-it`    | ✅² | ✅² | ✅² | ✅² |
+| `Qwen3-4B-Instruct-2507` (CPU)  | ✅¹ | ✅ | ✅ | ✅¹ |
+| `google/gemma-4-E4B-it`         | ✅² | ✅² | ✅² | ✅² |
 
 `—` = not exercised.
 
-1. The original ❌ claim was that the Gemma family doesn't pick up
-   Hermes' "MUST load a skill" directive. That's now disproven for
-   the 4 B (the 30-prompt corpus run captured `skill_view` and
-   `skills_list` tool calls and ran the Hermes loop end-to-end). The
-   26 B hasn't been re-validated yet.
-2. Hermes and OpenCode require live-test trims to pass on a 4 K-ctx
+1. Hermes and OpenCode require live-test trims to pass on a 4 K-ctx
    CPU server:
    `HermesDriver(ignore_rules=True, toolsets="file", context_length_override=65536)`
    and `OpenCodeDriver(minimal_agent=True)`. Off in production.
-3. Validated end-to-end through the full 30-prompt × 4-turn
-   `examples/transformers-coding-session` corpus, 0 aborts. Parquets
-   live under the `transformers-coding-session/` prefix in
-   `dacorvo/agentcap-traces` (private bucket).
+2. Validated end-to-end through the full 30-prompt × 4-turn
+   `examples/transformers-coding-session` corpus. Parquets live under
+   the `transformers-coding-session/` prefix in
+   `dacorvo/agentcap-traces` (private bucket). A few 26 B runs lost
+   1 task to a 1200 s timeout; the rest of the corpus rendered
+   cleanly.
 
 ## Operational notes
 
