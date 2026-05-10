@@ -6,19 +6,14 @@ the model card or agent revs.
 
 | model (Q4_K_M)                  | Hermes | Goose | pi-mono | OpenCode |
 |---|:-:|:-:|:-:|:-:|
-| `Qwen3-Coder-30B-A3B-Instruct`  | ✅ | — | — | — |
+| `Qwen3-Coder-30B-A3B-Instruct`  | ✅¹ | — | — | — |
 | `Qwen3.6-35B-A3B`               | ✅ | ✅ | ✅ | ✅ |
-| `unsloth/gemma-4-26B-A4B-it`    | ✅² | ✅² | ✅² | ✅² |
-| `Qwen3-4B-Instruct-2507` (CPU)  | ✅¹ | ✅ | ✅ | ✅¹ |
-| `google/gemma-4-E4B-it`         | ✅² | ✅² | ✅² | ✅² |
+| `unsloth/gemma-4-26B-A4B-it`    | ✅¹ | ✅¹ | ✅¹ | ✅¹ |
+| `google/gemma-4-E4B-it`         | ✅¹ | ✅¹ | ✅¹ | ✅¹ |
 
 `—` = not exercised.
 
-1. Hermes and OpenCode require live-test trims to pass on a 4 K-ctx
-   CPU server:
-   `HermesDriver(ignore_rules=True, toolsets="file", context_length_override=65536)`
-   and `OpenCodeDriver(minimal_agent=True)`. Off in production.
-2. Validated end-to-end through the full 30-prompt × 4-turn
+1. Validated end-to-end through the full 30-prompt × 4-turn
    `examples/transformers-coding-session` corpus. Parquets live under
    the `transformers-coding-session/` prefix in
    `dacorvo/agentcap-traces` (private bucket). A few 26 B runs lost
