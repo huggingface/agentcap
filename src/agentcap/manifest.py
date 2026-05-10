@@ -24,6 +24,41 @@ import json
 from typing import Any
 
 
+def _normalize_for_render(request_body: dict) -> dict:
+    """Return a shallowly-rebuilt request body whose tool-call arguments
+    are dicts, not JSON strings.
+
+    The OpenAI spec serialises ``tool_calls[*].function.arguments`` as
+    a string. Chat templates handle this inconsistently: Qwen3-Coder
+    iterates it as a mapping and dies on the string form
+    ("Can only get item pairs from a mapping"); Gemma-4 / Qwen3.6 /
+    Llama accept either. Normalise once on the render side; the
+    captured ``request`` column in the parquet stays byte-verbatim.
+    """
+    messages = request_body.get("messages") or []
+    new_messages: list = []
+    for m in messages:
+        calls = m.get("tool_calls") if isinstance(m, dict) else None
+        if not calls:
+            new_messages.append(m)
+            continue
+        new_calls = []
+        for tc in calls:
+            fn = (tc.get("function") if isinstance(tc, dict) else None) or {}
+            args = fn.get("arguments")
+            if isinstance(args, str):
+                try:
+                    parsed = json.loads(args)
+                except (json.JSONDecodeError, TypeError):
+                    new_calls.append(tc)
+                    continue
+                new_calls.append({**tc, "function": {**fn, "arguments": parsed}})
+            else:
+                new_calls.append(tc)
+        new_messages.append({**m, "tool_calls": new_calls})
+    return {**request_body, "messages": new_messages}
+
+
 def _render_ids(
     processor,
     messages: list,
@@ -144,8 +179,9 @@ def build_manifest(
     who need them can recompute in 5 lines via
     ``AutoTokenizer.from_pretrained(model).apply_chat_template(...)``.
     """
-    sections = compute_sections(processor, request_body)
-    token_role = per_token_roles(processor, request_body)
+    rendered_body = _normalize_for_render(request_body)
+    sections = compute_sections(processor, rendered_body)
+    token_role = per_token_roles(processor, rendered_body)
     n_tokens = sections[-1]["tok_range"][1] if sections else 0
 
     return {

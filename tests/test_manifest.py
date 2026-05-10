@@ -264,6 +264,71 @@ def test_build_manifest_top_level_fields():
     assert len(row["token_role"]) == row["n_tokens"]
 
 
+def test_normalize_for_render_parses_string_arguments():
+    """OpenAI-spec ``tool_calls[*].function.arguments`` is a JSON
+    string. Some chat templates (Qwen3-Coder) iterate it as a mapping
+    and crash on the string form. The render-side normalisation must
+    parse it to a dict; the captured ``request`` body in the row stays
+    byte-verbatim."""
+    from agentcap.manifest import _normalize_for_render
+
+    body = {
+        "messages": [
+            {"role": "user", "content": "u"},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "search",
+                            "arguments": '{"q": "x", "n": 3}',
+                        },
+                    }
+                ],
+            },
+        ],
+    }
+    out = _normalize_for_render(body)
+    args = out["messages"][1]["tool_calls"][0]["function"]["arguments"]
+    assert args == {"q": "x", "n": 3}
+    # Original body untouched.
+    assert (
+        body["messages"][1]["tool_calls"][0]["function"]["arguments"]
+        == '{"q": "x", "n": 3}'
+    )
+
+
+def test_normalize_for_render_keeps_unparseable_arguments_as_string():
+    """If ``arguments`` is a string but not valid JSON (truncated tool
+    call mid-stream, or model emitted garbage), keep the original
+    string — the chat template will at least see the same bytes the
+    server saw."""
+    from agentcap.manifest import _normalize_for_render
+
+    body = {
+        "messages": [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "x",
+                            "arguments": "not json {{",
+                        }
+                    }
+                ],
+            }
+        ]
+    }
+    out = _normalize_for_render(body)
+    assert (
+        out["messages"][0]["tool_calls"][0]["function"]["arguments"]
+        == "not json {{"
+    )
+
+
 # ---------------------------------------------------------------------------
 # build_rows — trace dir → in-memory rows
 # ---------------------------------------------------------------------------
