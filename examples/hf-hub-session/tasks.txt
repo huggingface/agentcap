@@ -1,0 +1,36 @@
+# 30 hub-exploration prompts for an agent. Each is open-ended and
+# multi-turn-friendly. The sandbox is empty by design — the agent is
+# expected to use `hf` CLI tools, the `huggingface_hub` SDK, or HTTPS
+# calls to https://huggingface.co/api/... and webfetch on the Hub
+# docs at https://huggingface.co/docs/hub.
+
+I want to upload my first model to the Hub. Walk me through the steps from `hf auth login` to the final push.
+We're building a Gradio Space that loads a Hub-hosted model. Plan the repo layout and the SDK choice.
+I have a private dataset. How do I share read access with a single collaborator without making the dataset public?
+Explain the difference between `hf_hub_download` and `snapshot_download`. When would I pick each?
+I want to cache a 70 B model on a shared workstation so it doesn't re-download per user. Sketch the cache-sharing setup.
+I want to push my fine-tune as a Pull Request against the original model repo. What does that look like end to end?
+How do I check the storage quota on my account, and how do I prune old commits / LFS objects to free space?
+My Space build is failing. Walk me through where the build logs live and how to iterate on a fix without spamming the repo with empty commits.
+I have a transformers checkpoint locally. Convert it to GGUF and upload it as a separate `<owner>/<name>-GGUF` repo.
+I want to subscribe to webhook events on my org's repos. What event types are available, and what's the security model around them?
+Help me design a Collection that groups every community fine-tune of `Qwen3-Coder-30B-A3B-Instruct` with a coherent README.
+I'm comparing two model fine-tunes via Hub Discussions. Help me cross-link the threads and surface the open vs resolved status across both repos.
+I want to set up an Inference Endpoint for `Qwen/Qwen3-32B`. Plan: hardware sizing, autoscaling, cost; document the assumptions.
+Walk me through migrating a private model repo from LFS-backed to xet-backed storage. What changes for downstream consumers?
+I want to add a license to a dataset that currently has none. Where do I edit it, and what are the implications for existing users who already cloned it?
+I have a multimodal dataset (audio + text). How should I structure it on the Hub so `load_dataset` streams cleanly?
+Plan a CI job (GitHub Actions) that uploads new model checkpoints to a private Hub repo on each merge to `main`.
+I want a Space that uses the Docker SDK and calls a private Inference Endpoint. What's the auth flow, and how do I handle the endpoint's token as a Space secret?
+Give me the procedure for revoking a leaked HF token across all our org's CI systems and rotating the dependent secrets.
+How do I create a fine-grained token scoped to a single repo? When should I use one over a write-all token?
+I need to compare two revisions of a dataset by content hash. Show me how using `huggingface_hub` and the Hub API.
+Walk me through publishing a paper repo (the `papers` repo type), linking its arXiv id, and connecting related Hub assets to it.
+I want to monitor my model's daily download count. Sketch a small ETL using the Hub API plus a cron job.
+Plan how to run a Space on a private cluster (not Hugging Face infrastructure) while keeping it discoverable on the Hub.
+I want to mirror a public dataset to a private Hub repo for compliance. How do I keep the mirror in sync without re-uploading unchanged shards?
+Help me set up a Collection that auto-updates as new community fine-tunes appear for a given base model.
+I'm building a leaderboard Space that pulls eval scores from many model repos. Plan the data model: where the scores live, how the Space refreshes, and how submissions work.
+How do I gate a dataset behind a click-through license and audit who has accepted? Show the API and the UI side.
+Walk me through a `huggingface_hub.HfApi` script that batch-creates, populates, and renames many repos atomically.
+I want to publish a `transformers`-compatible custom model to the Hub. What goes into `config.json`, `modeling_*.py`, and the model card so `from_pretrained` works for a third party?
