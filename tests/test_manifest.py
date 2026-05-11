@@ -329,6 +329,33 @@ def test_normalize_for_render_keeps_unparseable_arguments_as_string():
     )
 
 
+def test_normalize_for_render_flattens_content_parts_list():
+    """Some clients send ``content`` as OpenAI's multimodal parts list
+    (``[{"type": "text", "text": "..."}]``); Qwen3-Coder's template
+    string-concats the list and crashes. The render-side normalisation
+    joins the text parts in order; non-text parts are dropped."""
+    from agentcap.manifest import _normalize_for_render
+
+    body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Hello "},
+                    {"type": "image_url", "image_url": {"url": "x"}},
+                    {"type": "text", "text": "world."},
+                ],
+            },
+            {"role": "assistant", "content": "fine"},
+        ]
+    }
+    out = _normalize_for_render(body)
+    assert out["messages"][0]["content"] == "Hello world."
+    assert out["messages"][1]["content"] == "fine"
+    # Captured body untouched.
+    assert isinstance(body["messages"][0]["content"], list)
+
+
 # ---------------------------------------------------------------------------
 # build_rows — trace dir → in-memory rows
 # ---------------------------------------------------------------------------

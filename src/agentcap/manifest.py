@@ -24,38 +24,68 @@ import json
 from typing import Any
 
 
-def _normalize_for_render(request_body: dict) -> dict:
-    """Return a shallowly-rebuilt request body whose tool-call arguments
-    are dicts, not JSON strings.
+def _flatten_content_parts(content):
+    """Collapse OpenAI "content parts" lists into a plain string.
 
-    The OpenAI spec serialises ``tool_calls[*].function.arguments`` as
-    a string. Chat templates handle this inconsistently: Qwen3-Coder
-    iterates it as a mapping and dies on the string form
-    ("Can only get item pairs from a mapping"); Gemma-4 / Qwen3.6 /
-    Llama accept either. Normalise once on the render side; the
-    captured ``request`` column in the parquet stays byte-verbatim.
+    Some clients send ``content`` as a list of typed parts
+    (``[{"type": "text", "text": "..."}]``); some chat templates
+    (Qwen3-Coder) try to string-concat the list and crash. Join the
+    text parts in order; non-text parts are dropped. Non-list values
+    pass through unchanged.
+    """
+    if not isinstance(content, list):
+        return content
+    out: list[str] = []
+    for p in content:
+        if isinstance(p, dict) and p.get("type") == "text":
+            t = p.get("text")
+            if isinstance(t, str):
+                out.append(t)
+    return "".join(out)
+
+
+def _normalize_for_render(request_body: dict) -> dict:
+    """Return a shallowly-rebuilt request body that real chat templates
+    can render.
+
+    Two normalisations, applied per message:
+
+    - ``tool_calls[*].function.arguments`` parsed from JSON string to
+      dict (OpenAI spec serialises it as a string; Qwen3-Coder's
+      template iterates it as a mapping).
+    - ``content`` lists of typed parts collapsed to a plain string
+      (some clients use the multimodal-style list form; Qwen3-Coder's
+      template tries to string-concat the list).
+
+    The captured ``request`` column in the parquet stays byte-verbatim
+    — this normalisation is render-only.
     """
     messages = request_body.get("messages") or []
     new_messages: list = []
     for m in messages:
-        calls = m.get("tool_calls") if isinstance(m, dict) else None
-        if not calls:
+        if not isinstance(m, dict):
             new_messages.append(m)
             continue
-        new_calls = []
-        for tc in calls:
-            fn = (tc.get("function") if isinstance(tc, dict) else None) or {}
-            args = fn.get("arguments")
-            if isinstance(args, str):
-                try:
-                    parsed = json.loads(args)
-                except (json.JSONDecodeError, TypeError):
+        new_m = {**m}
+        if "content" in new_m:
+            new_m["content"] = _flatten_content_parts(new_m["content"])
+        calls = new_m.get("tool_calls")
+        if calls:
+            new_calls = []
+            for tc in calls:
+                fn = (tc.get("function") if isinstance(tc, dict) else None) or {}
+                args = fn.get("arguments")
+                if isinstance(args, str):
+                    try:
+                        parsed = json.loads(args)
+                    except (json.JSONDecodeError, TypeError):
+                        new_calls.append(tc)
+                        continue
+                    new_calls.append({**tc, "function": {**fn, "arguments": parsed}})
+                else:
                     new_calls.append(tc)
-                    continue
-                new_calls.append({**tc, "function": {**fn, "arguments": parsed}})
-            else:
-                new_calls.append(tc)
-        new_messages.append({**m, "tool_calls": new_calls})
+            new_m["tool_calls"] = new_calls
+        new_messages.append(new_m)
     return {**request_body, "messages": new_messages}
 
 
