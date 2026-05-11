@@ -25,7 +25,7 @@
 #
 # Env knobs:
 #   UPSTREAM        model server URL                http://127.0.0.1:8000
-#   LISTEN          proxy bind                      127.0.0.1:8001
+#   LISTEN          in-process proxy bind HOST:PORT (default 127.0.0.1:8001)
 #   TURNS           multi-turn count                4
 #   FOLLOWUP        continue | templates | synthesized   synthesized
 #   SYNTH_UPSTREAM  synth endpoint (only if FOLLOWUP=synthesized; bypasses
@@ -67,7 +67,6 @@ fi
 
 WORKDIR="${WORKDIR:-$HERE/runs/$AGENT-$(date +%Y-%m-%d-%H%M)}"
 UPSTREAM="${UPSTREAM:-http://127.0.0.1:8000}"
-LISTEN="${LISTEN:-127.0.0.1:8001}"
 TURNS="${TURNS:-4}"
 FOLLOWUP="${FOLLOWUP:-synthesized}"
 SYNTH_UPSTREAM="${SYNTH_UPSTREAM:-$UPSTREAM}"
@@ -117,15 +116,16 @@ if [[ ! -e "$SANDBOX/.git" ]]; then
 fi
 
 ARGS=(
-    --agent    "$AGENT"
-    --upstream "$UPSTREAM"
-    --listen   "$LISTEN"
-    --tasks    "$HERE/tasks.txt"
-    --turns    "$TURNS"
-    --followup "$FOLLOWUP"
-    --workdir  "$WORKDIR"
-    --timeout  "$TIMEOUT"
+    --agent     "$AGENT"
+    --upstream  "$UPSTREAM"
+    --workspace "$SANDBOX"
+    --tasks     "$HERE/tasks.txt"
+    --turns     "$TURNS"
+    --followup  "$FOLLOWUP"
+    --workdir   "$WORKDIR"
+    --timeout   "$TIMEOUT"
 )
+[[ -n "${LISTEN:-}" ]] && ARGS+=(--listen "$LISTEN")
 [[ -n "$MODEL" ]] && ARGS+=(--model "$MODEL")
 if [[ "$FOLLOWUP" == "synthesized" ]]; then
     ARGS+=(--synth-upstream "$SYNTH_UPSTREAM" --synth-model "$SYNTH_MODEL")

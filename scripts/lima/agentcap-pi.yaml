@@ -1,0 +1,35 @@
+# Lima VM for the `pi` agent.
+#
+#   limactl start --name=agentcap-pi scripts/lima/agentcap-pi.yaml
+#   limactl shell agentcap-pi
+#   limactl stop  agentcap-pi
+#
+# TODO(install): user-mode step below is a placeholder. Fill in the
+# canonical `pi` install command before use.
+
+minimumLimaVersion: 2.0.0
+
+base:
+- template:ubuntu-24.04
+
+cpus: 2
+memory: "2GiB"
+disk: "20GiB"
+
+# `mounts: []` overrides the `~` mount inherited from ubuntu-24.04.
+mounts: []
+
+provision:
+- mode: system
+  script: |
+    #!/bin/bash
+    set -eux
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        ca-certificates curl python3 python3-pip
+- mode: user
+  script: |
+    #!/bin/bash
+    set -eux
+    echo "ERROR: pi install command not configured in agentcap-pi.yaml" >&2
+    exit 1

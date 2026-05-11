@@ -23,6 +23,14 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Optional
 
 import httpx
+
+
+# Bind address for the in-process proxy started by ``agentcap run``.
+# Held constant so the per-agent Containerfiles can bake the proxy URL
+# into the agent's config files (no per-run config rewriting needed).
+# The standalone ``agentcap proxy`` subcommand still accepts --listen.
+IN_PROCESS_PROXY_HOST = "127.0.0.1"
+IN_PROCESS_PROXY_PORT = 8001
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse

@@ -20,7 +20,6 @@ from agentcap.drivers.goose import GooseDriver
 from agentcap.drivers.hermes import (
     HermesDriver,
     _rewrite_config,
-    build_overlay_hermes_home,
     parse_response_text as hermes_parse,
     parse_session_id,
 )
@@ -130,16 +129,16 @@ def test_pi_build_models_json_shape():
 # ---------------------------------------------------------------------------
 
 
-def test_get_driver_known_names():
-    assert isinstance(get_driver("hermes"), HermesDriver)
-    assert isinstance(get_driver("opencode"), OpenCodeDriver)
-    assert isinstance(get_driver("goose"), GooseDriver)
-    assert isinstance(get_driver("pi"), PiDriver)
+def test_get_driver_known_names(fake_sandbox):
+    assert isinstance(get_driver("hermes", sandbox=fake_sandbox), HermesDriver)
+    assert isinstance(get_driver("opencode", sandbox=fake_sandbox), OpenCodeDriver)
+    assert isinstance(get_driver("goose", sandbox=fake_sandbox), GooseDriver)
+    assert isinstance(get_driver("pi", sandbox=fake_sandbox), PiDriver)
 
 
-def test_get_driver_unknown_name():
+def test_get_driver_unknown_name(fake_sandbox):
     with pytest.raises(ValueError):
-        get_driver("not-a-real-driver")
+        get_driver("not-a-real-driver", sandbox=fake_sandbox)
 
 
 def test_opencode_parse_session_id_finds_top_level():
@@ -161,8 +160,8 @@ def test_opencode_parse_session_id_missing_returns_none():
     assert opencode_parse_session('{"type":"text","text":"hi"}\n') is None
 
 
-def test_hermes_driver_close_is_idempotent():
-    drv = HermesDriver()
+def test_hermes_driver_close_is_idempotent(fake_sandbox):
+    drv = HermesDriver(sandbox=fake_sandbox)
     drv.close()
     drv.close()  # second call should not raise
 
@@ -231,92 +230,11 @@ def test_rewrite_config_preserves_existing_auxiliary_keys():
     assert cfg["auxiliary"]["other_key"] == "keep_me"
 
 
-def _make_user_hermes_home(root: Path) -> Path:
-    home = root / "user_hermes"
-    home.mkdir()
-    (home / "config.yaml").write_text(
-        "model:\n  provider: custom\n  base_url: http://localhost:8000/v1\n"
-    )
-    # Identity / read-only content (overlay symlinks these through)
-    (home / "skills").mkdir()
-    (home / "skills" / "demo.md").write_text("a skill")
-    (home / "SOUL.md").write_text("# soul")
-    # Writable per-run state (overlay isolates these)
-    (home / "memories").mkdir()
-    (home / "memories" / "MEMORY.md").write_text(
-        "user's persistent memory — must not be touched\n"
-    )
-    (home / "sessions").mkdir()
-    (home / "sessions" / "old.json").write_text("{}")
-    (home / "state.db").write_text("user state bytes")
-    return home
-
-
-def test_build_overlay_symlinks_identity_content(tmp_path: Path):
-    user_home = _make_user_hermes_home(tmp_path)
-    overlay = build_overlay_hermes_home(
-        "http://127.0.0.1:8001/v1",
-        user_hermes_home=user_home,
-        overlay_root=tmp_path / "overlay",
-    )
-    cfg = overlay / "config.yaml"
-    assert cfg.is_file() and not cfg.is_symlink()
-    assert "http://127.0.0.1:8001/v1" in cfg.read_text()
-    assert (overlay / "skills").is_symlink()
-    assert (overlay / "skills").resolve() == (user_home / "skills").resolve()
-    assert (overlay / "skills" / "demo.md").read_text() == "a skill"
-    assert (overlay / "SOUL.md").is_symlink()
-
-
-def test_build_overlay_isolates_writable_state(tmp_path: Path):
-    """Memory / session / state.db / sandbox are NOT symlinked through —
-    they're per-run-fresh so a capture run never reads or mutates the
-    user's persistent ~/.hermes state."""
-    user_home = _make_user_hermes_home(tmp_path)
-    overlay = build_overlay_hermes_home(
-        "http://127.0.0.1:8001/v1",
-        user_hermes_home=user_home,
-        overlay_root=tmp_path / "overlay",
-    )
-    mem = overlay / "memories"
-    assert mem.is_dir() and not mem.is_symlink()
-    assert list(mem.iterdir()) == []
-    sess = overlay / "sessions"
-    assert sess.is_dir() and not sess.is_symlink()
-    assert list(sess.iterdir()) == []
-    assert not (overlay / "state.db").is_symlink()
-    if (overlay / "state.db").exists():
-        assert (overlay / "state.db").read_text() != "user state bytes"
-
-
-def test_build_overlay_writes_to_overlay_dont_leak_to_user_home(tmp_path: Path):
-    """Concrete check: writing into overlay/memories/ must not surface
-    in user_home/memories/. Regression test for the memory-bleed bug."""
-    user_home = _make_user_hermes_home(tmp_path)
-    overlay = build_overlay_hermes_home(
-        "http://127.0.0.1:8001/v1",
-        user_hermes_home=user_home,
-        overlay_root=tmp_path / "overlay",
-    )
-    (overlay / "memories" / "MEMORY.md").write_text(
-        "agentcap-internal note — must not escape\n"
-    )
-    user_mem = (user_home / "memories" / "MEMORY.md").read_text()
-    assert "agentcap-internal" not in user_mem
-    assert user_mem == "user's persistent memory — must not be touched\n"
-
-
-def test_build_overlay_missing_user_home_raises(tmp_path: Path):
-    with pytest.raises(FileNotFoundError):
-        build_overlay_hermes_home(
-            "http://x", user_hermes_home=tmp_path / "nope"
-        )
-
-
-def test_build_overlay_missing_user_config_raises(tmp_path: Path):
-    home = tmp_path / "home"
-    home.mkdir()
-    with pytest.raises(FileNotFoundError):
-        build_overlay_hermes_home(
-            "http://x", user_hermes_home=home, overlay_root=tmp_path / "ov"
-        )
+# NOTE: the host-side `build_overlay_hermes_home` function was
+# removed when HermesDriver moved its overlay logic *inside* the
+# sandbox. Behaviour previously verified by 5 unit tests against
+# fake user-homes is now covered by the live driver test
+# (tests/test_drivers_live.py::test_hermes_live) which exercises
+# the full path against a real Lima VM (macOS) or bwrap'd host
+# (Linux). The pure-Python parts that survived as standalone
+# helpers (`_rewrite_config`) keep their own tests above.

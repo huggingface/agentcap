@@ -1,26 +1,30 @@
 """OpenCode driver.
 
+Drives ``opencode run --format json`` non-interactively. The provider
+config (proxy URL, ``minimal`` agent definition) is baked into the
+per-agent image at ``~/.config/opencode/opencode.json`` — see
+[containers/agentcap-opencode.Containerfile](
+../../../containers/agentcap-opencode.Containerfile). The driver
+passes the model id at the CLI (``--model local/<id>``); session
+continuity is via ``--session`` on resume.
+
 OpenCode emits NDJSON events on stdout when invoked with
 ``--format json``. ``text`` events carry assistant chunks; the
-session id appears in every event as ``sessionID``. Multi-turn is
-via ``opencode run --session <id>``: the driver parses the id from
-``start`` output and reuses it on ``resume``.
+session id appears in every event as ``sessionID``.
 
-The model endpoint is configured via an ``opencode.json`` written
-into ``cwd`` when ``proxy_base_url`` is set. Always launch from a
-real project dir — opencode hangs ≥30 min if the model directs it
-to recursively glob from filesystem root.
+Always launch from a real project dir — opencode hangs ≥30 min if
+the model directs it to recursively glob from filesystem root.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 from pathlib import Path
 from typing import Sequence
 
 from . import AgentDriver, AgentTurn
+from ..sandbox import Sandbox
 
 
 _DEFAULT_PROVIDER_NAME = "local"
@@ -61,6 +65,32 @@ def parse_session_id(stdout: str) -> str | None:
     return None
 
 
+def parse_tool_errors(stdout: str) -> list[str]:
+    """Extract tool-call errors from opencode's NDJSON stream.
+
+    Each ``tool_use`` event carries a ``part.state`` block with a
+    ``status`` field (``"completed"`` / ``"error"``) and, on error,
+    an ``error`` message + the failing ``input``. We surface every
+    error as ``"<tool>: <message>"`` so the caller can fail loud
+    rather than mistake a destructive or no-op tool call for a real
+    edit.
+    """
+    errors: list[str] = []
+    for obj in _iter_events(stdout):
+        if obj.get("type") != "tool_use":
+            continue
+        part = obj.get("part") or {}
+        state = part.get("state") or {}
+        if state.get("status") != "error":
+            continue
+        tool = part.get("tool") or "<unknown>"
+        msg = state.get("error") or "(no error message)"
+        errors.append(f"{tool}: {msg}")
+    return errors
+
+
+# Retained for tests and back-compat callers. Not used by OpenCodeDriver
+# at runtime — the equivalent JSON is baked into the per-agent image.
 _MINIMAL_AGENT_PROMPT = (
     "You are a coding assistant. Always make code changes by CALLING "
     "the edit tool — do NOT just describe the change in prose. The "
@@ -68,17 +98,6 @@ _MINIMAL_AGENT_PROMPT = (
     "the file. Use read first to see the current contents, then edit "
     "to change them. Stop after a successful edit."
 )
-
-# Minimal-agent permissions: deny all tools then explicitly allow
-# read + edit. opencode resolves rules via findLast, so the specific
-# allows override the wildcard deny. Use the ``permission`` field
-# (not the deprecated ``tools`` field, which has surprising aliasing
-# of write/multiedit/patch onto ``permission.edit``).
-_MINIMAL_AGENT_PERMISSION: dict[str, str] = {
-    "*": "deny",
-    "read": "allow",
-    "edit": "allow",
-}
 
 
 def build_opencode_config(
@@ -90,15 +109,8 @@ def build_opencode_config(
     max_tokens: int = 8192,
     minimal_agent: bool = False,
 ) -> dict:
-    """Render an ``opencode.json`` payload that wires a local
-    OpenAI-compatible provider at ``base_url``.
-
-    With ``minimal_agent=True`` the config also defines an
-    ``agent.minimal`` entry with a stripped system prompt and only
-    ``read`` + ``edit`` tools enabled. Pass ``--agent minimal`` (or
-    ``OpenCodeDriver(minimal_agent=True)`` so the driver does it) to
-    use it. Trades fidelity for speed on tool-heavy CPU runs.
-    """
+    """Render an ``opencode.json`` payload. Kept for tests; the
+    production path bakes the equivalent into the image."""
     cfg: dict = {
         "$schema": "https://opencode.ai/config.json",
         "provider": {
@@ -123,7 +135,7 @@ def build_opencode_config(
                 "description": "Stripped agent for CI / small-model CPU runs.",
                 "model": f"{provider_name}/{model_id}",
                 "prompt": _MINIMAL_AGENT_PROMPT,
-                "permission": dict(_MINIMAL_AGENT_PERMISSION),
+                "permission": {"*": "deny", "read": "allow", "edit": "allow"},
             }
         }
     return cfg
@@ -134,64 +146,26 @@ class OpenCodeDriver(AgentDriver):
 
     def __init__(
         self,
+        *,
+        sandbox: Sandbox,
         binary: str = "opencode",
         model: str | None = None,
-        proxy_base_url: str | None = None,
         cwd: Path | str | None = None,
         provider_name: str = _DEFAULT_PROVIDER_NAME,
-        context_window: int = 65536,
-        max_tokens: int = 8192,
         extra_args: Sequence[str] = (),
         minimal_agent: bool = False,
     ) -> None:
-        # minimal_agent: write a stripped-down ``agent.minimal`` into
-        # the generated opencode.json (system prompt + only read/edit
-        # tools) and invoke ``opencode run --agent minimal``. Off by
-        # default — capture runs want the realistic surface.
+        self.sandbox = sandbox
         self.binary = binary
         self.model = model
-        self.proxy_base_url = proxy_base_url
-        self.cwd = Path(cwd) if cwd is not None else None
+        self.cwd = str(cwd) if cwd is not None else None
         self.provider_name = provider_name
-        self.context_window = context_window
-        self.max_tokens = max_tokens
         self.extra_args = list(extra_args)
         self.minimal_agent = minimal_agent
-        self._wrote_config: Path | None = None
-
-    def _maybe_write_config(self) -> None:
-        """Write opencode.json into ``cwd`` if proxy redirect requested.
-
-        Skipped when ``cwd`` is ``None`` (caller is responsible for
-        providing config) or when no ``proxy_base_url`` was given.
-        """
-        if self.proxy_base_url is None or self.model is None or self.cwd is None:
-            return
-        if self._wrote_config is not None:
-            return
-        cfg_path = self.cwd / "opencode.json"
-        cfg_path.write_text(
-            json.dumps(
-                build_opencode_config(
-                    provider_name=self.provider_name,
-                    base_url=self.proxy_base_url,
-                    model_id=self.model,
-                    context_window=self.context_window,
-                    max_tokens=self.max_tokens,
-                    minimal_agent=self.minimal_agent,
-                ),
-                indent=2,
-            )
-        )
-        self._wrote_config = cfg_path
 
     def close(self) -> None:
-        if self._wrote_config is not None and self._wrote_config.is_file():
-            try:
-                self._wrote_config.unlink()
-            except OSError:
-                pass
-            self._wrote_config = None
+        """No-op. Per-run state lives in the buildah container's
+        OverlayFS upper layer."""
 
     def _build_argv(
         self, prompt: str, *, session_id: str | None = None
@@ -213,15 +187,10 @@ class OpenCodeDriver(AgentDriver):
         env: dict | None,
         timeout: float | None,
     ) -> subprocess.CompletedProcess:
-        full_env = {**os.environ, "OPENAI_API_KEY": "dummy"}
-        if env:
-            full_env.update(env)
-        return subprocess.run(
+        return self.sandbox.run(
             argv,
-            env=full_env,
-            cwd=str(self.cwd) if self.cwd is not None else None,
-            capture_output=True,
-            text=True,
+            env=env or {},
+            cwd=self.cwd,
             timeout=timeout,
         )
 
@@ -232,7 +201,6 @@ class OpenCodeDriver(AgentDriver):
         env: dict | None = None,
         timeout: float | None = None,
     ) -> AgentTurn:
-        self._maybe_write_config()
         proc = self._run(self._build_argv(prompt), env, timeout)
         return AgentTurn(
             session_id=parse_session_id(proc.stdout),
@@ -240,6 +208,7 @@ class OpenCodeDriver(AgentDriver):
             returncode=proc.returncode,
             stdout=proc.stdout,
             stderr=proc.stderr,
+            tool_errors=parse_tool_errors(proc.stdout),
         )
 
     def resume(
@@ -250,7 +219,6 @@ class OpenCodeDriver(AgentDriver):
         env: dict | None = None,
         timeout: float | None = None,
     ) -> AgentTurn:
-        self._maybe_write_config()
         proc = self._run(
             self._build_argv(prompt, session_id=session_id), env, timeout
         )
@@ -260,4 +228,5 @@ class OpenCodeDriver(AgentDriver):
             returncode=proc.returncode,
             stdout=proc.stdout,
             stderr=proc.stderr,
+            tool_errors=parse_tool_errors(proc.stdout),
         )

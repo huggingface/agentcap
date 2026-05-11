@@ -1,0 +1,24 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "local": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Local via agentcap proxy",
+      "options": {"baseURL": "@@AGENTCAP_PROXY_URL@@"},
+      "models": {
+        "gemma-4-E4B-it": {
+          "name": "gemma-4-E4B-it",
+          "options": {"max_tokens": 8192},
+          "limit": {"context": 65536, "output": 8192}
+        }
+      }
+    }
+  },
+  "agent": {
+    "minimal": {
+      "description": "Stripped agent for CI / small-model CPU runs.",
+      "prompt": "You are a coding assistant. Always make code changes by CALLING the edit tool — do NOT just describe the change in prose. The user's task is incomplete until your tool call actually modifies the file. Use read first to see the current contents, then edit to change them. Stop after a successful edit.",
+      "permission": {"*": "deny", "read": "allow", "edit": "allow"}
+    }
+  }
+}

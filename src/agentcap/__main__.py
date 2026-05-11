@@ -209,15 +209,41 @@ def export_cmd(
 )
 @click.option(
     "--listen",
-    default="127.0.0.1:8001",
-    show_default=True,
-    help="HOST:PORT the in-process proxy binds on. Point your agent at this.",
+    default=None,
+    help="HOST:PORT the in-process capture proxy binds on "
+    "(default: 127.0.0.1:8001). Override if the default port "
+    "collides on your host — the agent images pick the URL up via "
+    "AGENTCAP_PROXY_URL.",
 )
 @click.option(
     "--workdir",
     required=True,
     type=click.Path(file_okay=False, dir_okay=True),
     help="Output directory for traces, sessions logs, and the run summary.",
+)
+@click.option(
+    "--workspace",
+    default=None,
+    type=click.Path(exists=True, file_okay=False, dir_okay=True),
+    help="Host directory to expose as the agent's cwd (bind-mounted "
+    "writable into the sandbox). Use this when the corpus needs the "
+    "agent to see real source — e.g. a transformers git worktree for "
+    "the transformers-coding-session corpus. If omitted, the agent's "
+    "cwd is a fresh hermetic temp dir (recommended for any corpus "
+    "that's self-contained).",
+)
+@click.option(
+    "--skills",
+    "skills_dir",
+    default=None,
+    type=click.Path(exists=True, file_okay=False, dir_okay=True),
+    help="Host directory containing a huggingface/skills-shaped "
+    "checkout (``agents/AGENTS.md`` + ``skills/<name>/SKILL.md``). "
+    "Bind-mounted read-only into the sandbox; the agent's "
+    "image-side entrypoint wires it into the agent's expected "
+    "discovery location (``~/.hermes/skills/`` for hermes; "
+    "``AGENTS.md`` + ``skills/`` symlinks in cwd for "
+    "opencode/goose/pi).",
 )
 @click.option(
     "--tasks",
@@ -261,8 +287,10 @@ def run_cmd(
     agent: str,
     model: str | None,
     upstream: str,
-    listen: str,
+    listen: str | None,
     workdir: str,
+    workspace: str | None,
+    skills_dir: str | None,
     tasks_file: str,
     turns: int,
     followup: str,
@@ -276,24 +304,27 @@ def run_cmd(
     from .drivers import get_driver
     from .followups import get_followup
     from .orchestrator import Orchestrator, read_tasks_txt
-    from .proxy import serve_in_thread
+    from .proxy import (
+        IN_PROCESS_PROXY_HOST,
+        IN_PROCESS_PROXY_PORT,
+        serve_in_thread,
+    )
+    from .sandbox import require_sandbox_or_die
 
-    workdir_p = Path(workdir)
-    traces = workdir_p / "traces"
-    sessions = workdir_p / "sessions"
-    sandbox = workdir_p / "sandbox"
-    traces.mkdir(parents=True, exist_ok=True)
-    sessions.mkdir(parents=True, exist_ok=True)
-    # Persist the agent name so `agentcap export` can tag bucket-pushed
-    # parquet filenames with it. The capture proxy itself stays
-    # agent-agnostic; this is purely an orchestrator hint.
-    (traces / "_meta.json").write_text(json.dumps({"agent": agent}))
-    # Empty sandbox dir = the agent's cwd. Keeps cwd-side state (e.g.
-    # Hermes auto-injecting AGENTS.md / CLAUDE.md from cwd into every
-    # system prompt) from leaking into the trace.
-    sandbox.mkdir(parents=True, exist_ok=True)
+    # --- validation: everything that can reject the CLI invocation
+    # goes here, BEFORE we touch the sandbox or the workdir. So a
+    # bad CLI call doesn't pay the cost of building/booting the
+    # per-agent image/VM or leave stray temp dirs behind.
 
-    host, port = _parse_listen(listen)
+    # In-process proxy bind address. ``--listen HOST:PORT`` overrides
+    # the default for hosts where it collides. The image entrypoint
+    # reads AGENTCAP_PROXY_URL and patches each agent's config at run
+    # time.
+    if listen is not None:
+        host, port = _parse_listen(listen)
+    else:
+        host, port = IN_PROCESS_PROXY_HOST, IN_PROCESS_PROXY_PORT
+    proxy_url = f"http://{host}:{port}/v1"
 
     if followup == "synthesized":
         if not synth_upstream or not synth_model:
@@ -306,23 +337,62 @@ def run_cmd(
     else:
         fu = get_followup(followup)
 
-    proxy_base_url = f"http://{host}:{port}/v1"
-    driver_kwargs: dict = {}
-    if agent == "hermes":
-        # Build a temp HERMES_HOME so requests are routed through the
-        # capture proxy without modifying the user's ~/.hermes/config.yaml.
-        # Run hermes from the sandbox dir so cwd-side state (AGENTS.md,
-        # CLAUDE.md, .cursorrules) doesn't leak into captured prompts.
-        driver_kwargs["proxy_base_url"] = proxy_base_url
-        driver_kwargs["cwd"] = sandbox
-    elif agent in ("opencode", "goose", "pi"):
-        if not model:
-            raise click.UsageError(
-                f"--model is required for --agent {agent}"
-            )
-        driver_kwargs["proxy_base_url"] = proxy_base_url
+    if agent in ("opencode", "goose", "pi") and not model:
+        raise click.UsageError(
+            f"--model is required for --agent {agent}"
+        )
+
+    # --- sandbox setup: from here on, side effects.
+
+    def _sb_log(msg: str) -> None:
+        click.echo(f"  [sandbox] {msg}", err=True)
+
+    # Builds the per-agent image (Linux) or boots the per-agent VM
+    # (macOS) before returning. First call per agent can take minutes.
+    # ``AGENTCAP_PROXY_URL`` is read by the image's entrypoint script
+    # to render the agent's config files at startup;
+    # ``AGENTCAP_SKILLS_DIR`` (when --skills is set) tells the same
+    # script where the bind-mounted skills checkout lives so it can
+    # symlink into the agent-specific discovery location.
+    sandbox_env = {"AGENTCAP_PROXY_URL": proxy_url}
+    sandbox_ro: list[Path] = []
+    if skills_dir is not None:
+        skills_abs = Path(skills_dir).resolve()
+        sandbox_env["AGENTCAP_SKILLS_DIR"] = str(skills_abs)
+        sandbox_ro.append(skills_abs)
+    sandbox = require_sandbox_or_die(
+        agent=agent, command="agentcap run", log=_sb_log,
+        env=sandbox_env,
+        readonly_paths=sandbox_ro,
+    )
+
+    workdir_p = Path(workdir)
+    traces = workdir_p / "traces"
+    sessions = workdir_p / "sessions"
+    traces.mkdir(parents=True, exist_ok=True)
+    sessions.mkdir(parents=True, exist_ok=True)
+    # Persist the agent name so `agentcap export` can tag bucket-pushed
+    # parquet filenames with it. The capture proxy itself stays
+    # agent-agnostic; this is purely an orchestrator hint.
+    (traces / "_meta.json").write_text(json.dumps({"agent": agent}))
+    # Agent cwd resolution. If the user passed --workspace, use that
+    # host path (bind-mounted into the sandbox; the agent sees its
+    # contents, e.g. a transformers worktree). Otherwise mint a fresh
+    # hermetic temp dir so cwd-side state (Hermes auto-injecting
+    # AGENTS.md, etc.) doesn't leak between runs.
+    if workspace is not None:
+        sandbox_cwd = str(Path(workspace).resolve())
+    else:
+        sandbox_cwd = sandbox.mkdtemp(prefix="agentcap-run-")
+
+    # The agent talks to the in-process proxy at the fixed URL baked
+    # into the per-agent image — drivers no longer need a base_url
+    # argument. ``cwd`` is the per-run sandbox-side dir we just
+    # minted; the orchestrator runs the agent from there so cwd-side
+    # state (Hermes auto-injecting AGENTS.md, etc.) is isolated.
+    driver_kwargs: dict = {"sandbox": sandbox, "cwd": sandbox_cwd}
+    if agent in ("opencode", "goose", "pi"):
         driver_kwargs["model"] = model
-        driver_kwargs["cwd"] = sandbox
     driver = get_driver(agent, **driver_kwargs)
     tasks = read_tasks_txt(tasks_file)
     if not tasks:
@@ -346,6 +416,10 @@ def run_cmd(
         close = getattr(driver, "close", None)
         if callable(close):
             close()
+        # Tear down the sandbox's working container / VM session.
+        sb_close = getattr(sandbox, "close", None)
+        if callable(sb_close):
+            sb_close()
 
     summary = {
         "agent": agent,

@@ -16,7 +16,7 @@ agent's semantics. Configuring the agent to point at the capture proxy
 from __future__ import annotations
 
 import abc
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable
 
 
@@ -29,6 +29,9 @@ class AgentTurn:
     returncode: int
     stdout: str
     stderr: str
+    #: ``"<tool>: <message>"`` for each errored tool call in stdout
+    #: (driver-specific parser). Empty if the driver has no parser yet.
+    tool_errors: list[str] = field(default_factory=list)
 
 
 class AgentDriver(abc.ABC):

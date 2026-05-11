@@ -1,39 +1,37 @@
 """pi-mono coding-agent driver.
 
 Drives ``pi -p "<prompt>" --provider local --model <id>`` non-
-interactively. pi only accepts a custom OpenAI-compatible endpoint
-through ``~/.pi/agent/models.json``, so the driver materialises a
-sandboxed config dir on first use and points
-``PI_CODING_AGENT_DIR`` at it.
-
-llama.cpp's OpenAI shim doesn't accept the ``developer`` role pi uses
-for reasoning-capable models, so we set
-``compat.supportsDeveloperRole`` and ``compat.supportsReasoningEffort``
-to ``false`` in the generated config.
+interactively. The provider config (proxy URL, model entries) and
+PI_CODING_AGENT_DIR are baked into the per-agent image — see
+[containers/agentcap-pi.Containerfile](
+../../../containers/agentcap-pi.Containerfile). The driver passes
+the model id at the CLI.
 
 Native sessions: pi tracks the most recent session under
 ``PI_CODING_AGENT_SESSION_DIR`` and resumes via ``--continue``. The
 driver lets pi mint its own UUID on ``start`` (no flag), then passes
-``--continue`` on ``resume``. Each driver instance gets its own
-per-instance session dir so concurrent runs don't trample each
-other. Telemetry / version-check are disabled via ``PI_OFFLINE`` +
-``PI_SKIP_VERSION_CHECK``.
+``--continue`` on ``resume``. Session state lives in the buildah
+container's OverlayFS upper layer — survives across turns within
+one ``agentcap run``, discarded when the sandbox closes.
 """
 
 from __future__ import annotations
 
 import json
-import os
-import shutil
 import subprocess
-import tempfile
 from pathlib import Path
 from typing import Sequence
 
 from . import AgentDriver, AgentTurn
+from ..sandbox import Sandbox
 
 
 _DEFAULT_PROVIDER_NAME = "local"
+
+
+def parse_tool_errors(stdout: str) -> list[str]:
+    # TODO: pi's tool-error format is not yet characterised.
+    return []
 
 
 def build_models_json(
@@ -45,12 +43,8 @@ def build_models_json(
     context_window: int = 65536,
     max_tokens: int = 4096,
 ) -> dict:
-    """Render a pi ``models.json`` payload that registers a single
-    OpenAI-compatible local provider/model.
-
-    ``api_key_env`` is the env-var name pi will read; pi requires an
-    API key field even when the upstream ignores it.
-    """
+    """Render a pi ``models.json`` payload. Kept for tests; the
+    production path bakes the equivalent into the image."""
     return {
         "providers": {
             provider_name: {
@@ -70,10 +64,8 @@ def build_models_json(
                         "contextWindow": context_window,
                         "maxTokens": max_tokens,
                         "cost": {
-                            "input": 0,
-                            "output": 0,
-                            "cacheRead": 0,
-                            "cacheWrite": 0,
+                            "input": 0, "output": 0,
+                            "cacheRead": 0, "cacheWrite": 0,
                         },
                     }
                 ],
@@ -87,54 +79,24 @@ class PiDriver(AgentDriver):
 
     def __init__(
         self,
+        *,
+        sandbox: Sandbox,
         binary: str = "pi",
         model: str | None = None,
-        proxy_base_url: str | None = None,
-        api_key: str = "dummy",
         cwd: Path | str | None = None,
         provider_name: str = _DEFAULT_PROVIDER_NAME,
-        context_window: int = 65536,
-        max_tokens: int = 4096,
         extra_args: Sequence[str] = (),
     ) -> None:
+        self.sandbox = sandbox
         self.binary = binary
         self.model = model
-        self.proxy_base_url = proxy_base_url
-        self.api_key = api_key
-        self.cwd = Path(cwd) if cwd is not None else None
+        self.cwd = str(cwd) if cwd is not None else None
         self.provider_name = provider_name
-        self.context_window = context_window
-        self.max_tokens = max_tokens
         self.extra_args = list(extra_args)
-        self._overlay_dir: Path | None = None
-
-    def _ensure_overlay(self) -> Path:
-        """Build the PI_CODING_AGENT_DIR overlay on first use."""
-        if self._overlay_dir is None:
-            self._overlay_dir = Path(
-                tempfile.mkdtemp(prefix="agentcap-pi-")
-            )
-            (self._overlay_dir / "sessions").mkdir(parents=True, exist_ok=True)
-            if self.proxy_base_url is None or self.model is None:
-                # Without redirect or model, leave models.json absent
-                # and let pi fall through to its built-in providers.
-                return self._overlay_dir
-            payload = build_models_json(
-                provider_name=self.provider_name,
-                base_url=self.proxy_base_url,
-                model_id=self.model,
-                context_window=self.context_window,
-                max_tokens=self.max_tokens,
-            )
-            (self._overlay_dir / "models.json").write_text(
-                json.dumps(payload, indent=2)
-            )
-        return self._overlay_dir
 
     def close(self) -> None:
-        if self._overlay_dir is not None and self._overlay_dir.is_dir():
-            shutil.rmtree(self._overlay_dir, ignore_errors=True)
-            self._overlay_dir = None
+        """No-op. Per-run state lives in the buildah container's
+        OverlayFS upper layer."""
 
     def _build_argv(
         self,
@@ -165,21 +127,10 @@ class PiDriver(AgentDriver):
         env: dict | None,
         timeout: float | None,
     ) -> subprocess.CompletedProcess:
-        full_env = {**os.environ}
-        overlay = self._ensure_overlay()
-        full_env["PI_CODING_AGENT_DIR"] = str(overlay)
-        full_env["PI_CODING_AGENT_SESSION_DIR"] = str(overlay / "sessions")
-        full_env.setdefault("PI_OFFLINE", "1")
-        full_env.setdefault("PI_SKIP_VERSION_CHECK", "1")
-        full_env["PI_LOCAL_API_KEY"] = self.api_key
-        if env:
-            full_env.update(env)
-        return subprocess.run(
+        return self.sandbox.run(
             argv,
-            env=full_env,
-            cwd=str(self.cwd) if self.cwd is not None else None,
-            capture_output=True,
-            text=True,
+            env=env or {},
+            cwd=self.cwd,
             timeout=timeout,
         )
 
@@ -204,6 +155,7 @@ class PiDriver(AgentDriver):
             returncode=proc.returncode,
             stdout=proc.stdout,
             stderr=proc.stderr,
+            tool_errors=parse_tool_errors(proc.stdout),
         )
 
     def resume(
@@ -225,4 +177,5 @@ class PiDriver(AgentDriver):
             returncode=proc.returncode,
             stdout=proc.stdout,
             stderr=proc.stderr,
+            tool_errors=parse_tool_errors(proc.stdout),
         )

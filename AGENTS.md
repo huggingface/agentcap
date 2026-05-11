@@ -44,16 +44,36 @@ explicitly first.
    straight to the model server so the captured corpus stays a clean
    record of agent↔model interaction.
 
-9. **`HermesDriver` builds a sandboxed `HERMES_HOME` overlay** so a
-   capture run never reads or mutates the user's persistent
-   `~/.hermes/` state. Identity content (`config.yaml` rewritten to
-   point at the proxy, `skills/`, `SOUL.md`, …) is symlinked through
-   so the agent's behaviour is preserved. Writable per-run state
-   (`memories/`, `sessions/`, `state.db`, `sandboxes/`, `logs/`,
-   `cron/`) is fresh-empty in the overlay at start-of-run, and
-   discarded on driver close. Without this, `memory(action=add)`
-   calls during a run would write through into the user's real
-   `~/.hermes/memories/MEMORY.md`.
+9. **`HermesDriver` builds a sandboxed `HERMES_HOME` overlay inside
+   the sandbox** so a capture run never reads or mutates the
+   sandbox-side `~/.hermes/` state. The overlay is materialised
+   entirely via the Sandbox protocol (`sandbox.mkdtemp` then `sh -c
+   "cp -aL ~/.hermes/. <overlay>"` then `rm -rf` of
+   `_HERMES_FRESH_PER_RUN` entries then `sandbox.write_text` of the
+   rewritten `config.yaml`). On Linux/bwrap the sandbox-side
+   `~/.hermes/` is the host's; on Lima it's the VM-provisioned
+   home inside the `agentcap-hermes` VM. Either way the user's
+   actual home is never touched.
+
+   - **Snapshot**: identity content (`skills/`, `SOUL.md`,
+     `hermes-agent/`, `hooks/`, `pairing/`, `models_dev_cache.json`)
+     is brought across by the `cp -aL`. Agent writes inside the
+     overlay diverge from the source.
+   - **Fresh per-run** (`_HERMES_FRESH_PER_RUN`): `memories/`,
+     `sessions/`, `sandboxes/`, `state.db`, `logs/`, `cron/`,
+     `image_cache/`, `audio_cache/`, `auth.lock`. Wiped from the
+     snapshot after the copy and recreated empty (files are left
+     absent so hermes recreates them on demand). Discarded on
+     driver close.
+
+   `config.yaml` is regenerated with the proxy `base_url` swapped
+   in and (optionally) the two `context_length` guards lowered for
+   CPU/small-model runs.
+
+   Skills used by the corpus (e.g. `huggingface/skills` for the
+   `hf-hub-session` runs) are not injected by the runner anymore.
+   They live in the agentcap-hermes VM, installed at provisioning
+   or via `hermes skills install` once.
 
    **Lifecycle is per-`agentcap run` invocation, not per-task.** The
    overlay is built once when the driver is constructed and reused
@@ -138,3 +158,26 @@ explicitly first.
    `session-compact` — surface a `Driver.compact(session_id)`
    method and let the orchestrator call it when the previous turn's
    prompt-token count is approaching the configured ceiling.
+
+5. **Agent install in the Lima templates is incomplete.** The
+   per-agent Lima templates at `scripts/lima/agentcap-<agent>.yaml`
+   install opencode and goose via their upstream `curl … | bash`
+   installers, but the hermes and pi templates contain `TODO`
+   placeholders that fail provisioning loud. Drop in the canonical
+   install commands for each so `limactl start --name=agentcap-<agent>
+   scripts/lima/agentcap-<agent>.yaml` succeeds without manual
+   intervention. The driver + test wiring is already sandbox-aware:
+   the live tests probe each agent's binary via
+   `sandbox.run(["command", "-v", <agent>], check=False)` and skip
+   with a clear "provision the agentcap-<agent> VM" hint if it's
+   missing, so an unprovisioned agent doesn't manifest as a
+   confusing test failure.
+
+6. **Corpus-specific VM mounts.** With the default `mounts: []`,
+   corpora that need specific host content inside the VM — e.g.
+   `transformers-coding-session`'s transformers source tree — must
+   either ship a corpus-specific Lima template variant (mounting
+   that path read-only) or use `limactl edit <vm>` to amend the
+   provisioned VM and restart it. Tokens / per-run secrets (e.g.
+   `HF_TOKEN`) flow through `sandbox.run(env={…})` →
+   `limactl shell -- env KEY=VAL …`, no mount required.

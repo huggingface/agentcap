@@ -87,7 +87,7 @@ def test_run_synthesized_requires_synth_flags(tmp_path: Path):
     assert "--synth-upstream" in result.output
 
 
-def test_run_invokes_orchestrator_under_proxy(tmp_path: Path, monkeypatch):
+def test_run_invokes_orchestrator_under_proxy(tmp_path: Path, monkeypatch, fake_sandbox):
     """Smoke-test for the `run` command. Patches out the proxy lifecycle
     and the driver factory so no subprocesses or sockets are touched."""
     import contextlib
@@ -125,6 +125,13 @@ def test_run_invokes_orchestrator_under_proxy(tmp_path: Path, monkeypatch):
         "agentcap.drivers.get_driver", lambda name, **kw: fake_driver
     )
 
+    # Bypass require_sandbox_or_die (which would build an image / boot
+    # a VM) with the test-only fake_sandbox fixture.
+    monkeypatch.setattr(
+        "agentcap.sandbox.require_sandbox_or_die",
+        lambda **kw: fake_sandbox,
+    )
+
     proxy_started = {"count": 0}
 
     @contextlib.contextmanager
@@ -141,7 +148,6 @@ def test_run_invokes_orchestrator_under_proxy(tmp_path: Path, monkeypatch):
             "run",
             "--agent", "hermes",
             "--upstream", "http://up:8000",
-            "--listen", "127.0.0.1:8765",
             "--workdir", str(workdir),
             "--tasks", str(tasks),
             "--turns", "2",

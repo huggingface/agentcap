@@ -1,0 +1,33 @@
+# Lima VM for the `opencode` agent.
+#
+#   limactl start --name=agentcap-opencode scripts/lima/agentcap-opencode.yaml
+#   limactl shell agentcap-opencode
+#   limactl stop  agentcap-opencode
+
+minimumLimaVersion: 2.0.0
+
+base:
+- template:ubuntu-24.04
+
+cpus: 2
+memory: "2GiB"
+disk: "20GiB"
+
+# `mounts: []` overrides the `~` mount inherited from ubuntu-24.04.
+mounts: []
+
+provision:
+- mode: system
+  script: |
+    #!/bin/bash
+    set -eux
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        ca-certificates curl python3 python3-pip unzip
+- mode: user
+  script: |
+    #!/bin/bash
+    set -eux
+    curl -fsSL https://opencode.ai/install | bash
+    install -d "$HOME/.local/bin"
+    ln -sf "$HOME/.opencode/bin/opencode" "$HOME/.local/bin/opencode" || true
