@@ -2,8 +2,12 @@
 # Image entrypoint. Translates ``AGENTCAP_PROXY_URL`` (full /v1 URL)
 # into goose's expected ``OPENAI_HOST`` (host root, no /v1) and
 # wires a skills checkout into cwd if ``AGENTCAP_SKILLS_DIR`` is set.
-# Default proxy URL points at the agentcap in-process proxy.
+# Default proxy URL points at the agentcap in-process proxy. Env
+# exports duplicate the Containerfile ENV directives so the Lima
+# backend (no image-baked ENV) also sees them; redundant under bwrap.
 set -e
+export OPENAI_API_KEY=dummy
+export GOOSE_PROVIDER=openai
 url="${AGENTCAP_PROXY_URL:-http://127.0.0.1:8001/v1}"
 export OPENAI_HOST="${url%/v1}"
 

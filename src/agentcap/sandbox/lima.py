@@ -4,6 +4,15 @@ The Mac host is reachable from inside the VM as
 ``host.lima.internal``. ``limactl shell`` has no ``--env`` flag, so
 env is injected via the POSIX ``env KEY=VAL …`` prefix on the VM
 side (see :meth:`LimaSandbox._build_shell_cmd`).
+
+``run()`` and ``wrap()`` prepend the canonical
+``/usr/local/bin/agentcap-init`` to the agent argv — mirror of the
+Containerfile ``ENTRYPOINT`` so the init script can render config
+files from env vars before exec'ing the agent.
+:meth:`_exec_in_vm` (used by mkdtemp / write_text / …) skips the
+init prefix: those are sandbox-internal ops, and they need to work
+even before the bundle is installed by
+:func:`lima_provisioning.ensure_vm`.
 """
 
 from __future__ import annotations
@@ -17,6 +26,8 @@ from pathlib import Path
 
 _DEFAULT_VM = "agentcap-unset"
 _LIMACTL = "limactl"
+
+INIT_PATH = "/usr/local/bin/agentcap-init"
 
 
 def build_command(
@@ -44,9 +55,13 @@ class LimaSandbox:
         self,
         vm: str = _DEFAULT_VM,
         workdir: Path | str | None = None,
+        env: dict[str, str] | None = None,
     ) -> None:
+        # ``env`` is the sandbox-wide baked env (e.g. AGENTCAP_PROXY_URL
+        # from ``agentcap run``); merged with per-call env at run time.
         self.vm = vm
         self.workdir = workdir
+        self._baked_env: dict[str, str] = dict(env or {})
 
     def wrap(
         self,
@@ -62,7 +77,9 @@ class LimaSandbox:
                 "Use BwrapSandbox for real network isolation.\n"
             )
         # writable_paths is advisory on Lima — VM mounts decide.
-        return build_command(argv, vm=self.vm, workdir=self.workdir)
+        return build_command(
+            [INIT_PATH] + argv, vm=self.vm, workdir=self.workdir,
+        )
 
     def _build_shell_cmd(
         self,
@@ -100,7 +117,12 @@ class LimaSandbox:
             sys.stderr.write(
                 "[lima-sandbox] WARN deny_network=True ignored on Lima.\n"
             )
-        cmd = self._build_shell_cmd(list(argv), env=env, cwd=cwd)
+        full_env = dict(self._baked_env)
+        if env:
+            full_env.update(env)
+        cmd = self._build_shell_cmd(
+            [INIT_PATH] + list(argv), env=full_env or None, cwd=cwd,
+        )
         return subprocess.run(
             cmd,
             env=os.environ.copy(),
@@ -148,4 +170,4 @@ def _shell_quote(s: str) -> str:
     return "'" + s.replace("'", "'\\''") + "'"
 
 
-__all__ = ["LimaSandbox", "build_command"]
+__all__ = ["LimaSandbox", "build_command", "INIT_PATH"]

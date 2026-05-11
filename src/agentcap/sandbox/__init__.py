@@ -79,9 +79,8 @@ def get_sandbox(
     autodetect would pick the other.
 
     ``env`` is overlaid on top of the per-image baked env vars
-    (Linux/bwrap path only — Lima ignores it). Used by ``agentcap run``
-    to pass things like ``AGENTCAP_PROXY_URL`` that the image's
-    startup script reads.
+    (both backends). Used by ``agentcap run`` to pass things like
+    ``AGENTCAP_PROXY_URL`` that the image's startup script reads.
 
     Callers must call :func:`require_sandbox_or_die` (or
     :func:`image_provisioning.ensure_image` /
@@ -100,7 +99,7 @@ def get_sandbox(
         )
 
     if backend == "lima":
-        return LimaSandbox(vm=lima_vm_name(agent))
+        return LimaSandbox(vm=lima_vm_name(agent), env=env)
 
     raise ValueError(
         f"unknown sandbox backend {backend!r}; expected 'bwrap' or 'lima'"

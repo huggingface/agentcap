@@ -1,11 +1,8 @@
-# Lima VM for the `pi` agent.
+# Lima VM for the `pi` agent (pi-coding-agent npm package).
 #
 #   limactl start --name=agentcap-pi scripts/lima/agentcap-pi.yaml
 #   limactl shell agentcap-pi
 #   limactl stop  agentcap-pi
-#
-# TODO(install): user-mode step below is a placeholder. Fill in the
-# canonical `pi` install command before use.
 
 minimumLimaVersion: 2.0.0
 
@@ -26,10 +23,20 @@ provision:
     set -eux
     apt-get update
     apt-get install -y --no-install-recommends \
-        ca-certificates curl python3 python3-pip
+        ca-certificates curl python3 gnupg
+    # pi-tui's regex uses ECMAScript 2024 `v` flag; Ubuntu's default
+    # Node 18 chokes on it. Pin NodeSource's Node 20 LTS line.
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+    apt-get install -y --no-install-recommends nodejs
 - mode: user
   script: |
     #!/bin/bash
     set -eux
-    echo "ERROR: pi install command not configured in agentcap-pi.yaml" >&2
-    exit 1
+    sudo npm install -g --no-fund --no-audit \
+        "@mariozechner/pi-coding-agent@0.73.0"
+    command -v pi
+    # /opt/pi-config is where the Containerfile bakes models.json;
+    # mirror it so agentcap-init's sed path matches both backends.
+    # Chown to this user so sed runs without sudo at run time.
+    sudo mkdir -p /opt/pi-config/sessions
+    sudo chown -R "$USER:$USER" /opt/pi-config

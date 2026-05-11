@@ -237,29 +237,30 @@ def live_proxy_base_url():
         )
         _log(f"llama-server ready at :{port}")
 
-        # The agent images bake the in-process proxy URL (127.0.0.1:8001)
-        # into their config; we must actually run a proxy there for
-        # captures to reach llama-server. Start one in-thread for the
-        # duration of the test session.
+        # Start the in-process proxy on a free port (don't hardcode
+        # 8001 — collides with whatever the user has running). Bind
+        # 0.0.0.0 so the Lima VM can reach it via host.lima.internal.
+        # ``sandbox_for`` propagates the resulting URL into each
+        # sandbox as ``AGENTCAP_PROXY_URL``; the per-agent
+        # ``agentcap-init`` substitutes that into the baked config.
         import tempfile
 
-        from agentcap.proxy import (
-            IN_PROCESS_PROXY_HOST,
-            IN_PROCESS_PROXY_PORT,
-            serve_in_thread,
-        )
+        from agentcap.proxy import serve_in_thread
         upstream = f"http://127.0.0.1:{port}"
+        proxy_port = _free_port()
         trace_dir = tempfile.mkdtemp(prefix="agentcap-pytest-traces-")
+        agent_url = (
+            f"http://{_agent_reachable_host()}:{proxy_port}/v1"
+        )
         _log(
-            f"starting in-process proxy on "
-            f"{IN_PROCESS_PROXY_HOST}:{IN_PROCESS_PROXY_PORT} "
-            f"-> {upstream}"
+            f"starting in-process proxy on 0.0.0.0:{proxy_port} "
+            f"-> {upstream} (agents reach it at {agent_url})"
         )
         with serve_in_thread(
             upstream, trace_dir,
-            host=IN_PROCESS_PROXY_HOST, port=IN_PROCESS_PROXY_PORT,
-        ) as proxy:
-            yield proxy.base_url + "/v1"
+            host="0.0.0.0", port=proxy_port,
+        ):
+            yield agent_url
     finally:
         proc.terminate()
         try:
@@ -284,7 +285,7 @@ _HELLO_PY = 'def hello():\n    print("Hello, world!")\n'
 
 
 @pytest.fixture(scope="session")
-def sandbox_for(lima_vm_for, agentcap_image_for):
+def sandbox_for(lima_vm_for, agentcap_image_for, live_proxy_base_url):
     """Factory: ``sandbox_for("hermes")`` returns a Sandbox keyed on
     the given agent. On macOS this is the ``agentcap-<agent>``
     LimaSandbox (the fixture ensures the VM is up first); on Linux
@@ -311,7 +312,10 @@ def sandbox_for(lima_vm_for, agentcap_image_for):
             pytest.skip(
                 "live tests require Linux (bwrap+buildah) or macOS (lima)"
             )
-        sb = get_sandbox(agent=agent)
+        sb = get_sandbox(
+            agent=agent,
+            env={"AGENTCAP_PROXY_URL": live_proxy_base_url},
+        )
         cache[agent] = sb
         return sb
 
