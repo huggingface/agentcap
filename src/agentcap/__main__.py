@@ -319,12 +319,23 @@ def run_cmd(
     # In-process proxy bind address. ``--listen HOST:PORT`` overrides
     # the default for hosts where it collides. The image entrypoint
     # reads AGENTCAP_PROXY_URL and patches each agent's config at run
-    # time.
+    # time. When the bind host is 0.0.0.0 (or otherwise non-routable
+    # from inside the sandbox), advertise a sandbox-reachable host
+    # instead: ``host.lima.internal`` on macOS / Lima, ``127.0.0.1``
+    # on Linux / bwrap.
     if listen is not None:
         host, port = _parse_listen(listen)
     else:
         host, port = IN_PROCESS_PROXY_HOST, IN_PROCESS_PROXY_PORT
-    proxy_url = f"http://{host}:{port}/v1"
+    agent_host = host
+    if host in ("0.0.0.0", "::"):
+        import platform as _platform
+        import shutil as _shutil
+        if _platform.system() == "Darwin" and _shutil.which("limactl"):
+            agent_host = "host.lima.internal"
+        else:
+            agent_host = "127.0.0.1"
+    proxy_url = f"http://{agent_host}:{port}/v1"
 
     if followup == "synthesized":
         if not synth_upstream or not synth_model:

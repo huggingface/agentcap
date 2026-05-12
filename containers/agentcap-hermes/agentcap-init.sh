@@ -19,10 +19,10 @@ hermes config set model.base_url "$url" >/dev/null
 
 if [ -n "${AGENTCAP_SKILLS_DIR:-}" ] && [ -d "$AGENTCAP_SKILLS_DIR" ]; then
     if [ -d "$AGENTCAP_SKILLS_DIR/skills" ]; then
-        mkdir -p /root/.hermes/skills
+        mkdir -p "$HOME/.hermes/skills"
         for d in "$AGENTCAP_SKILLS_DIR/skills/"*/; do
             [ -d "$d" ] && \
-                ln -sfn "$d" "/root/.hermes/skills/$(basename "$d")"
+                ln -sfn "$d" "$HOME/.hermes/skills/$(basename "$d")"
         done
     fi
     [ -f "$AGENTCAP_SKILLS_DIR/agents/AGENTS.md" ] && \
