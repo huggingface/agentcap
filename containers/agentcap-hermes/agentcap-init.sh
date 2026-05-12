@@ -17,6 +17,15 @@ set -e
 url="${AGENTCAP_PROXY_URL:-http://127.0.0.1:8001/v1}"
 hermes config set model.base_url "$url" >/dev/null
 
+# Without an explicit model.name, hermes falls back to its built-in
+# default (currently ``google/gemma-4-E4B-it``), which is what gets
+# sent as the ``model`` field on every outbound request and recorded
+# by the capture proxy. Tying it to AGENTCAP_MODEL keeps captured
+# traces honest about which model the agent was actually run against.
+if [ -n "${AGENTCAP_MODEL:-}" ]; then
+    hermes config set model.name "$AGENTCAP_MODEL" >/dev/null
+fi
+
 if [ -n "${AGENTCAP_SKILLS_DIR:-}" ] && [ -d "$AGENTCAP_SKILLS_DIR" ]; then
     if [ -d "$AGENTCAP_SKILLS_DIR/skills" ]; then
         mkdir -p "$HOME/.hermes/skills"

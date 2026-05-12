@@ -76,6 +76,7 @@ def test_run_synthesized_requires_synth_flags(tmp_path: Path):
         [
             "run",
             "--agent", "hermes",
+            "--model", "google/gemma-4-E4B-it",
             "--upstream", "http://up",
             "--workdir", str(tmp_path / "wd"),
             "--tasks", str(tasks),
@@ -147,6 +148,7 @@ def test_run_invokes_orchestrator_under_proxy(tmp_path: Path, monkeypatch, fake_
         [
             "run",
             "--agent", "hermes",
+            "--model", "google/gemma-4-E4B-it",
             "--upstream", "http://up:8000",
             "--workdir", str(workdir),
             "--tasks", str(tasks),

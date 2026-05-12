@@ -199,8 +199,10 @@ def export_cmd(
 @click.option(
     "--model",
     default=None,
-    help="Model id passed to the agent (required for opencode/goose/pi; "
-    "ignored by hermes since hermes resolves the model from its own config).",
+    help="Model id the agent uses in its outbound requests (and that "
+    "the capture proxy records as the ``model`` field). Required for "
+    "all drivers — hermes used to default to its own built-in id, but "
+    "that made captured traces lie about which model was actually run.",
 )
 @click.option(
     "--upstream",
@@ -348,7 +350,7 @@ def run_cmd(
     else:
         fu = get_followup(followup)
 
-    if agent in ("opencode", "goose", "pi") and not model:
+    if not model:
         raise click.UsageError(
             f"--model is required for --agent {agent}"
         )
@@ -365,7 +367,7 @@ def run_cmd(
     # ``AGENTCAP_SKILLS_DIR`` (when --skills is set) tells the same
     # script where the bind-mounted skills checkout lives so it can
     # symlink into the agent-specific discovery location.
-    sandbox_env = {"AGENTCAP_PROXY_URL": proxy_url}
+    sandbox_env = {"AGENTCAP_PROXY_URL": proxy_url, "AGENTCAP_MODEL": model}
     sandbox_ro: list[Path] = []
     if skills_dir is not None:
         skills_abs = Path(skills_dir).resolve()
