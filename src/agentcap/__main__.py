@@ -317,6 +317,7 @@ def run_cmd(
     from .drivers import get_driver
     from .followups import get_followup
     from .orchestrator import Orchestrator, read_tasks_txt
+    from .provider import probe, refine_for_sub_provider
     from .proxy import (
         IN_PROCESS_PROXY_HOST,
         IN_PROCESS_PROXY_PORT,
@@ -397,10 +398,23 @@ def run_cmd(
     sessions = workdir_p / "sessions"
     traces.mkdir(parents=True, exist_ok=True)
     sessions.mkdir(parents=True, exist_ok=True)
-    # Persist the agent name so `agentcap export` can tag bucket-pushed
-    # parquet filenames with it. The capture proxy itself stays
-    # agent-agnostic; this is purely an orchestrator hint.
-    (traces / "_meta.json").write_text(json.dumps({"agent": agent}))
+    # Probe the upstream once so the trace dir self-describes its
+    # inference stack (provider, server version, served model id,
+    # chat-template hash, …). Never raises — an unreachable upstream
+    # just yields ``endpoints: {}`` and a hostname-derived provider
+    # slug. The full probe lands in _meta.json; the export pipeline
+    # promotes a small subset to parquet columns.
+    click.echo(f"  [probe] {upstream}", err=True)
+    provider_meta = probe(upstream, api_key=api_key)
+    provider_meta["provider"] = refine_for_sub_provider(
+        provider_meta["provider"], model
+    )
+    click.echo(f"  [probe] provider={provider_meta['provider']}", err=True)
+    (traces / "_meta.json").write_text(json.dumps({
+        "agent": agent,
+        "model": model,
+        **provider_meta,
+    }))
     # Agent cwd resolution. If the user passed --workspace, use that
     # host path (bind-mounted into the sandbox; the agent sees its
     # contents, e.g. a transformers worktree). Otherwise mint a fresh

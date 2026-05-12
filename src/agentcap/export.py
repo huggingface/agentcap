@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Iterator
 
 from .manifest import build_manifest
+from .provider import flatten_for_parquet
 
 
 _BUCKET_PREFIX = "hf://buckets/"
@@ -41,6 +42,22 @@ def detect_agent(trace_dir: Path | str) -> str | None:
         return None
     val = meta.get("agent")
     return val if isinstance(val, str) and val else None
+
+
+def detect_provider_columns(trace_dir: Path | str) -> dict:
+    """Read the probed provider/upstream metadata written by
+    ``agentcap run`` (in ``<trace_dir>/_meta.json``) and flatten it
+    to the columns we stamp onto every parquet row. Returns an empty
+    dict for legacy trace dirs without provider info — the export
+    schema then just omits those columns."""
+    meta_path = Path(trace_dir) / "_meta.json"
+    try:
+        meta = json.loads(meta_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if "provider" not in meta and "upstream_url" not in meta:
+        return {}
+    return flatten_for_parquet(meta)
 
 
 def detect_model(trace_dir: Path | str) -> str | None:
@@ -167,6 +184,7 @@ def export_local(
     batch_size: int = 32,
     progress: bool = True,
     workers: int = 1,
+    provider_columns: dict | None = None,
 ):
     """Render the trace dir into a single parquet file on disk.
 
@@ -184,6 +202,8 @@ def export_local(
     trace_dir = Path(trace_dir)
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
+    if provider_columns is None:
+        provider_columns = detect_provider_columns(trace_dir)
 
     request_files = sorted(trace_dir.glob("*.request.json"))
     total = len(request_files)
@@ -212,6 +232,12 @@ def export_local(
         nonlocal writer, schema, n_written
         if not rows:
             return
+        if provider_columns:
+            for r in rows:
+                # update() doesn't overwrite columns the manifest set
+                # — defensive in case a future manifest field collides.
+                for k, v in provider_columns.items():
+                    r.setdefault(k, v)
         table = pa.Table.from_pylist(rows)
         if writer is None:
             schema = table.schema
@@ -295,12 +321,14 @@ def _slug(s: str) -> str:
 
 
 def _default_bucket_filename(
-    agent: str | None = None, model: str | None = None
+    agent: str | None = None,
+    model: str | None = None,
+    provider: str | None = None,
 ) -> str:
-    """Per-call unique ``train-[<agent>-<model>-]<utc>-<hex>.parquet`` so
-    successive pushes accumulate side-by-side under a prefix and
-    consumers can see (agent, model) at a glance without opening the
-    parquet."""
+    """Per-call unique ``train-[<agent>-<model>-<provider>-]<utc>-<hex>.parquet``
+    so successive pushes accumulate side-by-side under a prefix and
+    consumers can see (agent, model, provider) at a glance without
+    opening the parquet."""
     import time
     import uuid
 
@@ -310,6 +338,12 @@ def _default_bucket_filename(
         parts.append(_slug(agent))
     if model:
         parts.append(_slug(model))
+    if provider:
+        # ``_slug`` strips everything before the last ``/`` (it's
+        # tuned for HF org/repo ids). For provider slugs we want to
+        # keep the hierarchy: ``hf-router/fireworks-ai`` →
+        # ``hf-router-fireworks-ai``.
+        parts.append(_slug(provider.replace("/", "-")))
     parts.append(ts)
     parts.append(uuid.uuid4().hex[:6])
     return "-".join(parts) + ".parquet"
@@ -339,15 +373,20 @@ def push_bucket(
 
     bucket_id, prefix = parse_bucket_uri(bucket_uri)
     prefix = prefix.rstrip("/")
+    provider_columns = detect_provider_columns(trace_dir)
     if filename is None:
-        filename = _default_bucket_filename(agent=agent, model=model)
+        filename = _default_bucket_filename(
+            agent=agent,
+            model=model,
+            provider=provider_columns.get("provider") or None,
+        )
     remote_path = f"{prefix}/{filename}" if prefix else filename
 
     with tempfile.TemporaryDirectory() as tmpdir:
         local_file = Path(tmpdir) / filename
         n_rows = export_local(
             trace_dir, local_file, processor=processor, model=model,
-            workers=workers,
+            workers=workers, provider_columns=provider_columns,
         )
         batch_bucket_files(bucket_id, add=[(str(local_file), remote_path)])
 
@@ -357,9 +396,14 @@ def push_bucket(
 def load_processor(model: str):
     """Load an HF tokenizer/processor for ``model``.
 
+    HF Router model ids carry a ``:<sub-provider>`` suffix
+    (``meta-llama/Llama-3.3-70B-Instruct:fireworks-ai``) that isn't
+    part of any HF repo name — strip before resolving the tokenizer.
+
     Deferred import so unit tests can drive the rendering paths with a
     fake processor without pulling in transformers.
     """
     from transformers import AutoTokenizer
 
-    return AutoTokenizer.from_pretrained(model)
+    bare = model.split(":", 1)[0]
+    return AutoTokenizer.from_pretrained(bare)
