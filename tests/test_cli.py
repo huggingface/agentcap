@@ -67,9 +67,45 @@ def test_run_requires_agent_upstream_and_workdir():
     assert "--agent" in result.output
 
 
-def test_run_synthesized_requires_synth_flags(tmp_path: Path):
+def test_run_synthesized_defaults_from_upstream_and_model(
+    tmp_path: Path, monkeypatch, fake_sandbox
+):
+    import contextlib
+
+    from agentcap.drivers import AgentTurn
+
     tasks = tmp_path / "tasks.txt"
     tasks.write_text("a task\n")
+
+    class _FakeDriver:
+        name = "hermes"
+
+        def start(self, prompt, *, env=None, timeout=None):
+            return AgentTurn(
+                session_id="ses_xyz", response_text="r", returncode=0,
+                stdout="", stderr="",
+            )
+
+        def resume(self, prompt, *, session_id, env=None, timeout=None):
+            return AgentTurn(
+                session_id=session_id, response_text="r", returncode=0,
+                stdout="", stderr="",
+            )
+
+    monkeypatch.setattr(
+        "agentcap.drivers.get_driver", lambda name, **kw: _FakeDriver()
+    )
+    monkeypatch.setattr(
+        "agentcap.sandbox.require_sandbox_or_die",
+        lambda **kw: fake_sandbox,
+    )
+
+    @contextlib.contextmanager
+    def fake_proxy(*args, **kwargs):
+        yield None
+
+    monkeypatch.setattr("agentcap.proxy.serve_in_thread", fake_proxy)
+
     runner = CliRunner()
     result = runner.invoke(
         cli,
@@ -84,8 +120,7 @@ def test_run_synthesized_requires_synth_flags(tmp_path: Path):
             "--followup", "synthesized",
         ],
     )
-    assert result.exit_code != 0
-    assert "--synth-upstream" in result.output
+    assert result.exit_code == 0, result.output
 
 
 def test_run_invokes_orchestrator_under_proxy(tmp_path: Path, monkeypatch, fake_sandbox):
@@ -177,6 +212,63 @@ def test_export_requires_output_or_push(tmp_path: Path):
     result = runner.invoke(cli, ["export", str(trace), "--model", "m"])
     assert result.exit_code != 0
     assert "--output" in result.output or "--push" in result.output
+
+
+def test_run_hf_router_api_key_auto_from_hf_token_env(
+    tmp_path: Path, monkeypatch, fake_sandbox
+):
+    import contextlib
+
+    from agentcap.drivers import AgentTurn
+
+    tasks = tmp_path / "tasks.txt"
+    tasks.write_text("a task\n")
+
+    class _FakeDriver:
+        name = "hermes"
+
+        def start(self, prompt, *, env=None, timeout=None):
+            return AgentTurn(
+                session_id="ses_xyz", response_text="r", returncode=0,
+                stdout="", stderr="",
+            )
+
+        def resume(self, prompt, *, session_id, env=None, timeout=None):
+            return AgentTurn(
+                session_id=session_id, response_text="r", returncode=0,
+                stdout="", stderr="",
+            )
+
+    monkeypatch.setattr(
+        "agentcap.drivers.get_driver", lambda name, **kw: _FakeDriver()
+    )
+    monkeypatch.setattr(
+        "agentcap.sandbox.require_sandbox_or_die",
+        lambda **kw: fake_sandbox,
+    )
+
+    @contextlib.contextmanager
+    def fake_proxy(*args, **kwargs):
+        yield None
+
+    monkeypatch.setattr("agentcap.proxy.serve_in_thread", fake_proxy)
+    monkeypatch.setenv("HF_TOKEN", "hf_env_token")
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "run",
+            "--agent", "hermes",
+            "--model", "Qwen/Qwen3-8B",
+            "--upstream", "https://router.huggingface.co",
+            "--workdir", str(tmp_path / "wd"),
+            "--tasks", str(tasks),
+            "--turns", "1",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "HF Router token source=HF_TOKEN" in result.output
 
 
 def test_export_auto_detects_model_from_traces(tmp_path: Path):

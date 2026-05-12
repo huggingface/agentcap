@@ -52,7 +52,11 @@ def _default_call_synth(
         "max_tokens": 2048,
         "temperature": 0.7,
     }
-    url = upstream.rstrip("/") + "/v1/chat/completions"
+    base = upstream.rstrip("/")
+    if base.endswith("/v1"):
+        url = base + "/chat/completions"
+    else:
+        url = base + "/v1/chat/completions"
     resp = httpx.post(url, json=body, timeout=timeout)
     resp.raise_for_status()
     data = resp.json()

@@ -161,10 +161,22 @@ GGUF_PATH=/path/to/model-Q4_K_M.gguf REASONING=off \
 # --followup continue is the cheaper alternative (literal "continue").
 agentcap run \
     --agent hermes \
+   --model google/gemma-4-E4B-it \
     --upstream http://127.0.0.1:8000 \
     --tasks examples/transformers-coding-session/tasks.txt \
     --turns 4 --followup synthesized \
     --workdir runs/run-001/
+
+# HF Router flow (no extra synth flags needed).
+# If --api-key / AGENTCAP_API_KEY is unset, agentcap auto-tries
+# HF_TOKEN and ~/.cache/huggingface/token when upstream is the router.
+agentcap run \
+   --agent hermes \
+   --model Qwen/Qwen3-8B \
+   --upstream https://router.huggingface.co \
+   --tasks examples/transformers-coding-session/tasks.txt \
+   --turns 4 --followup synthesized \
+   --workdir runs/router-qwen3/
 
 # --workers parallelises the per-row chat-template render. On a
 # 1000-row trace dir this is the difference between minutes and an
@@ -175,6 +187,12 @@ agentcap export runs/run-001/traces \
 
 See [docs/tested-models-and-agents.md](docs/tested-models-and-agents.md)
 for which model + agent combinations have been validated end-to-end.
+
+For `agentcap run`, `--model` is required for all drivers.
+
+When `--followup synthesized` is enabled, `--synth-upstream` defaults
+to `--upstream` and `--synth-model` defaults to `--model`. Pass synth
+flags only when you intentionally want a different synth backend/model.
 
 `--model` is inferred from the captured request bodies; pass it
 explicitly to override or when traces lack a model field. The trace

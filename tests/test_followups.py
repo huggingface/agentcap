@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import httpx
 import pytest
 
 from agentcap.followups import get_followup
 from agentcap.followups.continue_ import ContinueFollowUp
 from agentcap.followups.synthesized import SynthesizedFollowUp
+from agentcap.followups.synthesized import _default_call_synth
 from agentcap.followups.templates import TemplatesFollowUp
 
 
@@ -107,3 +109,29 @@ def test_get_followup_dispatch():
 def test_get_followup_unknown():
     with pytest.raises(ValueError):
         get_followup("not-a-strategy")
+
+
+def test_default_call_synth_accepts_upstream_with_v1_suffix(monkeypatch):
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+    captured = {}
+
+    def fake_post(url, json, timeout):
+        captured["url"] = url
+        return _Resp()
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    out = _default_call_synth(
+        upstream="https://router.huggingface.co/v1",
+        model="Qwen/Qwen3-8B",
+        prompt="p",
+        timeout=5,
+    )
+    assert out == "ok"
+    assert captured["url"] == "https://router.huggingface.co/v1/chat/completions"

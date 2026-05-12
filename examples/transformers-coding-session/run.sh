@@ -11,29 +11,27 @@
 #   2. The agent binary on PATH (or wherever agentcap can find it).
 #
 # Usage:
-#   ./run.sh --agent <name> [--model <id>] [WORKDIR]
+#   ./run.sh --agent <name> --model <id> [WORKDIR]
 #
 # Examples:
-#   ./run.sh --agent hermes
+#   ./run.sh --agent hermes --model Qwen/Qwen3-8B
 #   ./run.sh --agent pi --model qwen3.6-35b-a3b
 #   ./run.sh --agent goose --model gemma-4-26b
 #
 # ``--agent`` accepts any value listed by ``agentcap run --help``.
-# ``--model`` is required for opencode / goose / pi, and
-# ignored by hermes (which resolves the model from
-# ``~/.hermes/config.yaml``).
+# ``--model`` is required for all agents.
 #
 # Env knobs:
 #   UPSTREAM        model server URL                http://127.0.0.1:8000
 #   LISTEN          in-process proxy bind HOST:PORT (default 127.0.0.1:8001)
 #   TURNS           multi-turn count                4
 #   FOLLOWUP        continue | templates | synthesized   synthesized
-#   SYNTH_UPSTREAM  synth endpoint (only if FOLLOWUP=synthesized; bypasses
-#                   the capture proxy)              defaults to $UPSTREAM
-#   SYNTH_MODEL     synth model                     defaults to $MODEL,
-#                   else auto-detected as the first model id advertised
-#                   by $UPSTREAM/v1/models (so a single llama-server
-#                   covers both the agent and the synth path).
+#   SYNTH_UPSTREAM  optional synth endpoint override (only when
+#                   FOLLOWUP=synthesized). If unset, agentcap uses
+#                   --upstream by default.
+#   SYNTH_MODEL     optional synth model override (only when
+#                   FOLLOWUP=synthesized). If unset, agentcap uses
+#                   --model by default.
 #   TIMEOUT         per-turn timeout in seconds     300
 #   TRANSFORMERS_CHECKOUT  path to a transformers git checkout. The
 #                   script seeds <WORKDIR>/sandbox as a detached
@@ -64,33 +62,18 @@ if [[ -z "$AGENT" ]]; then
     echo "ERROR: --agent <name> is required. See: $0 --help" >&2
     exit 2
 fi
+if [[ -z "$MODEL" ]]; then
+    echo "ERROR: --model <id> is required. See: $0 --help" >&2
+    exit 2
+fi
 
 WORKDIR="${WORKDIR:-$HERE/runs/$AGENT-$(date +%Y-%m-%d-%H%M)}"
 UPSTREAM="${UPSTREAM:-http://127.0.0.1:8000}"
 TURNS="${TURNS:-4}"
 FOLLOWUP="${FOLLOWUP:-synthesized}"
-SYNTH_UPSTREAM="${SYNTH_UPSTREAM:-$UPSTREAM}"
-SYNTH_MODEL="${SYNTH_MODEL:-$MODEL}"
+SYNTH_UPSTREAM="${SYNTH_UPSTREAM:-}"
+SYNTH_MODEL="${SYNTH_MODEL:-}"
 TIMEOUT="${TIMEOUT:-300}"
-
-# When using synthesized follow-ups and no SYNTH_MODEL was provided
-# (typical for hermes, where MODEL is empty because hermes resolves
-# the model from its own config), ask the upstream's /v1/models for
-# the first advertised id. This keeps "single llama-server, no extra
-# args" the working default for hermes too.
-if [[ "$FOLLOWUP" == "synthesized" && -z "$SYNTH_MODEL" ]]; then
-    SYNTH_MODEL=$(
-        curl -sf "$SYNTH_UPSTREAM/v1/models" 2>/dev/null \
-            | python3 -c 'import sys,json; d=json.load(sys.stdin); print((d.get("data") or [{}])[0].get("id",""))' \
-            || true
-    )
-    if [[ -z "$SYNTH_MODEL" ]]; then
-        echo "ERROR: FOLLOWUP=synthesized requires SYNTH_MODEL; could not auto-detect from $SYNTH_UPSTREAM/v1/models." >&2
-        echo "       Set SYNTH_MODEL=<id> or FOLLOWUP=continue." >&2
-        exit 2
-    fi
-    echo "synth model auto-detected: $SYNTH_MODEL" >&2
-fi
 
 # Seed <WORKDIR>/sandbox with a transformers worktree so the corpus
 # prompts have real code to ground in. Skip if sandbox already
@@ -128,7 +111,8 @@ ARGS=(
 [[ -n "${LISTEN:-}" ]] && ARGS+=(--listen "$LISTEN")
 [[ -n "$MODEL" ]] && ARGS+=(--model "$MODEL")
 if [[ "$FOLLOWUP" == "synthesized" ]]; then
-    ARGS+=(--synth-upstream "$SYNTH_UPSTREAM" --synth-model "$SYNTH_MODEL")
+    [[ -n "${SYNTH_UPSTREAM:-}" ]] && ARGS+=(--synth-upstream "$SYNTH_UPSTREAM")
+    [[ -n "${SYNTH_MODEL:-}" ]] && ARGS+=(--synth-model "$SYNTH_MODEL")
 fi
 
 agentcap run "${ARGS[@]}"

@@ -8,8 +8,10 @@ Subcommands:
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 import click
 
@@ -40,6 +42,39 @@ def _parse_listen(listen: str) -> tuple[str, int]:
             f"port {port} out of range", param_hint="--listen"
         )
     return host, port
+
+
+def _is_hf_router_upstream(upstream: str) -> bool:
+    host = (urlparse(upstream).hostname or "").lower()
+    return host == "router.huggingface.co"
+
+
+def _read_hf_token_cache() -> str | None:
+    token_path = Path.home() / ".cache" / "huggingface" / "token"
+    try:
+        token = token_path.read_text().strip()
+    except OSError:
+        return None
+    return token or None
+
+
+def _resolve_api_key(
+    *, upstream: str, explicit_api_key: str | None
+) -> tuple[str | None, str | None]:
+    if explicit_api_key:
+        return explicit_api_key, "--api-key / AGENTCAP_API_KEY"
+    if not _is_hf_router_upstream(upstream):
+        return None, None
+
+    hf_env = (os.environ.get("HF_TOKEN") or "").strip()
+    if hf_env:
+        return hf_env, "HF_TOKEN"
+
+    cached = _read_hf_token_cache()
+    if cached:
+        return cached, "~/.cache/huggingface/token"
+
+    return None, None
 
 
 @cli.command("proxy")
@@ -217,7 +252,8 @@ def export_cmd(
     help="Bearer token forwarded to the upstream. Required for "
     "authenticated providers (HF Router, OpenAI, Together, …); leave "
     "unset for local servers that don't auth (llama-server, vLLM). "
-    "Falls back to the AGENTCAP_API_KEY env var.",
+    "Falls back to AGENTCAP_API_KEY. For HF Router only, if unset "
+    "we also auto-try HF_TOKEN and ~/.cache/huggingface/token.",
 )
 @click.option(
     "--listen",
@@ -281,12 +317,14 @@ def export_cmd(
 @click.option(
     "--synth-upstream",
     default=None,
-    help="Synthesizer endpoint (only used with --followup synthesized). Should bypass the capture proxy.",
+    help="Synthesizer endpoint (only used with --followup synthesized). "
+    "Should bypass the capture proxy. Defaults to --upstream.",
 )
 @click.option(
     "--synth-model",
     default=None,
-    help="Synthesizer model id (only used with --followup synthesized).",
+    help="Synthesizer model id (only used with --followup synthesized). "
+    "Defaults to --model.",
 )
 @click.option(
     "--timeout",
@@ -351,20 +389,30 @@ def run_cmd(
             agent_host = "127.0.0.1"
     proxy_url = f"http://{agent_host}:{port}/v1"
 
+    if not model:
+        raise click.UsageError(
+            f"--model is required for --agent {agent}"
+        )
+
     if followup == "synthesized":
-        if not synth_upstream or not synth_model:
-            raise click.UsageError(
-                "--followup synthesized requires --synth-upstream and --synth-model"
-            )
+        resolved_synth_upstream = synth_upstream or upstream
+        resolved_synth_model = synth_model or model
         fu = get_followup(
-            "synthesized", upstream=synth_upstream, model=synth_model
+            "synthesized",
+            upstream=resolved_synth_upstream,
+            model=resolved_synth_model,
         )
     else:
         fu = get_followup(followup)
 
-    if not model:
-        raise click.UsageError(
-            f"--model is required for --agent {agent}"
+    api_key, api_key_source = _resolve_api_key(
+        upstream=upstream,
+        explicit_api_key=api_key,
+    )
+    if api_key_source and _is_hf_router_upstream(upstream):
+        click.echo(
+            f"  [auth] HF Router token source={api_key_source}",
+            err=True,
         )
 
     # --- sandbox setup: from here on, side effects.

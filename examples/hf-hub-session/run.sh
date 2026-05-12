@@ -35,23 +35,26 @@
 #     skills path anymore.
 #
 # Usage:
-#   ./run.sh --agent <name> [--model <id>] [WORKDIR]
+#   ./run.sh --agent <name> --model <id> [WORKDIR]
 #
 # Examples:
-#   ./run.sh --agent hermes
+#   ./run.sh --agent hermes --model Qwen/Qwen3-8B
 #   ./run.sh --agent goose --model gemma-4-26B-A4B-it
 #
 # ``--agent`` accepts any value listed by ``agentcap run --help``.
-# ``--model`` is required for opencode / goose / pi, ignored by hermes.
+# ``--model`` is required for all agents.
 #
 # Env knobs:
 #   UPSTREAM        model server URL                http://127.0.0.1:8000
 #   LISTEN          in-process proxy bind HOST:PORT (default 127.0.0.1:8001)
 #   TURNS           multi-turn count                4
 #   FOLLOWUP        continue | templates | synthesized   synthesized
-#   SYNTH_UPSTREAM  synth endpoint (bypasses the capture proxy)  $UPSTREAM
-#   SYNTH_MODEL     synth model id; auto-detected from
-#                   $UPSTREAM/v1/models when unset
+#   SYNTH_UPSTREAM  optional synth endpoint override (only when
+#                   FOLLOWUP=synthesized). If unset, agentcap uses
+#                   --upstream by default.
+#   SYNTH_MODEL     optional synth model override (only when
+#                   FOLLOWUP=synthesized). If unset, agentcap uses
+#                   --model by default.
 #   TIMEOUT         per-turn timeout in seconds     300
 #   SKILLS_CHECKOUT path to a huggingface/skills clone (see Prereqs.4)
 
@@ -77,28 +80,18 @@ if [[ -z "$AGENT" ]]; then
     echo "ERROR: --agent <name> is required. See: $0 --help" >&2
     exit 2
 fi
+if [[ -z "$MODEL" ]]; then
+    echo "ERROR: --model <id> is required. See: $0 --help" >&2
+    exit 2
+fi
 
 WORKDIR="${WORKDIR:-$HERE/runs/$AGENT-$(date +%Y-%m-%d-%H%M)}"
 UPSTREAM="${UPSTREAM:-http://127.0.0.1:8000}"
 TURNS="${TURNS:-4}"
 FOLLOWUP="${FOLLOWUP:-synthesized}"
-SYNTH_UPSTREAM="${SYNTH_UPSTREAM:-$UPSTREAM}"
-SYNTH_MODEL="${SYNTH_MODEL:-$MODEL}"
+SYNTH_UPSTREAM="${SYNTH_UPSTREAM:-}"
+SYNTH_MODEL="${SYNTH_MODEL:-}"
 TIMEOUT="${TIMEOUT:-300}"
-
-if [[ "$FOLLOWUP" == "synthesized" && -z "$SYNTH_MODEL" ]]; then
-    SYNTH_MODEL=$(
-        curl -sf "$SYNTH_UPSTREAM/v1/models" 2>/dev/null \
-            | python3 -c 'import sys,json; d=json.load(sys.stdin); print((d.get("data") or [{}])[0].get("id",""))' \
-            || true
-    )
-    if [[ -z "$SYNTH_MODEL" ]]; then
-        echo "ERROR: FOLLOWUP=synthesized requires SYNTH_MODEL; could not auto-detect from $SYNTH_UPSTREAM/v1/models." >&2
-        echo "       Set SYNTH_MODEL=<id> or FOLLOWUP=continue." >&2
-        exit 2
-    fi
-    echo "synth model auto-detected: $SYNTH_MODEL" >&2
-fi
 
 # Resolve a huggingface/skills checkout. The corpus is about reaching
 # the Hub via documented skills (hf-cli, huggingface-datasets, etc.),
@@ -159,7 +152,8 @@ ARGS=(
 [[ -n "${LISTEN:-}" ]] && ARGS+=(--listen "$LISTEN")
 [[ -n "$MODEL" ]] && ARGS+=(--model "$MODEL")
 if [[ "$FOLLOWUP" == "synthesized" ]]; then
-    ARGS+=(--synth-upstream "$SYNTH_UPSTREAM" --synth-model "$SYNTH_MODEL")
+    [[ -n "${SYNTH_UPSTREAM:-}" ]] && ARGS+=(--synth-upstream "$SYNTH_UPSTREAM")
+    [[ -n "${SYNTH_MODEL:-}" ]] && ARGS+=(--synth-model "$SYNTH_MODEL")
 fi
 
 agentcap run "${ARGS[@]}"
