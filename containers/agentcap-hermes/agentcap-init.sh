@@ -26,6 +26,13 @@ if [ -n "${AGENTCAP_MODEL:-}" ]; then
     hermes config set model.name "$AGENTCAP_MODEL" >/dev/null
 fi
 
+# Real key when the upstream needs one (HF Router, OpenAI, …); the
+# local-server path leaves it unset, and hermes is happy to send no
+# Authorization header in that case.
+if [ -n "${AGENTCAP_API_KEY:-}" ]; then
+    hermes config set model.api_key "$AGENTCAP_API_KEY" >/dev/null
+fi
+
 if [ -n "${AGENTCAP_SKILLS_DIR:-}" ] && [ -d "$AGENTCAP_SKILLS_DIR" ]; then
     if [ -d "$AGENTCAP_SKILLS_DIR/skills" ]; then
         mkdir -p "$HOME/.hermes/skills"

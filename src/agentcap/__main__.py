@@ -210,6 +210,16 @@ def export_cmd(
     help="Base URL of the upstream model server (e.g. http://127.0.0.1:8000).",
 )
 @click.option(
+    "--api-key",
+    "api_key",
+    default=None,
+    envvar="AGENTCAP_API_KEY",
+    help="Bearer token forwarded to the upstream. Required for "
+    "authenticated providers (HF Router, OpenAI, Together, …); leave "
+    "unset for local servers that don't auth (llama-server, vLLM). "
+    "Falls back to the AGENTCAP_API_KEY env var.",
+)
+@click.option(
     "--listen",
     default=None,
     help="HOST:PORT the in-process capture proxy binds on "
@@ -289,6 +299,7 @@ def run_cmd(
     agent: str,
     model: str | None,
     upstream: str,
+    api_key: str | None,
     listen: str | None,
     workdir: str,
     workspace: str | None,
@@ -368,6 +379,8 @@ def run_cmd(
     # script where the bind-mounted skills checkout lives so it can
     # symlink into the agent-specific discovery location.
     sandbox_env = {"AGENTCAP_PROXY_URL": proxy_url, "AGENTCAP_MODEL": model}
+    if api_key:
+        sandbox_env["AGENTCAP_API_KEY"] = api_key
     sandbox_ro: list[Path] = []
     if skills_dir is not None:
         skills_abs = Path(skills_dir).resolve()

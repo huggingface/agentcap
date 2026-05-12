@@ -6,7 +6,9 @@
 # exports duplicate the Containerfile ENV directives so the Lima
 # backend (no image-baked ENV) also sees them; redundant under bwrap.
 set -e
-export OPENAI_API_KEY=dummy
+# Real key when the upstream needs one (HF Router, OpenAI, …); ``dummy``
+# is fine for unauthenticated local servers (llama-server, vLLM).
+export OPENAI_API_KEY="${AGENTCAP_API_KEY:-dummy}"
 export GOOSE_PROVIDER=openai
 url="${AGENTCAP_PROXY_URL:-http://127.0.0.1:8001/v1}"
 export OPENAI_HOST="${url%/v1}"

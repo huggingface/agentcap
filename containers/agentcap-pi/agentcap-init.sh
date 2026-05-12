@@ -10,7 +10,9 @@ export PI_CODING_AGENT_DIR=/opt/pi-config
 export PI_CODING_AGENT_SESSION_DIR=/opt/pi-config/sessions
 export PI_OFFLINE=1
 export PI_SKIP_VERSION_CHECK=1
-export PI_LOCAL_API_KEY=dummy
+# Real key when the upstream needs one (HF Router, OpenAI, …); ``dummy``
+# is fine for unauthenticated local servers (llama-server, vLLM).
+export PI_LOCAL_API_KEY="${AGENTCAP_API_KEY:-dummy}"
 url="${AGENTCAP_PROXY_URL:-http://127.0.0.1:8001/v1}"
 sed -i "s|@@AGENTCAP_PROXY_URL@@|${url}|g" /opt/pi-config/models.json
 
