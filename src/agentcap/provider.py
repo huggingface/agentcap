@@ -174,13 +174,25 @@ def refine_for_sub_provider(provider: str, model: str | None) -> str:
 
 def flatten_for_parquet(meta: dict) -> dict:
     """Pick the small set of probe fields worth promoting to columns.
+
+    Explicit top-level keys (``server_version``, ``served_model_id``)
+    win over endpoint-derived values — this lets retroactive scripts
+    that rebuild ``_meta.json`` for historical captures inject a known
+    version without having to fake the full endpoint structure.
+
     The raw ``endpoints`` dict stays in ``_meta.json`` for forensics."""
     endpoints = meta.get("endpoints") or {}
     return {
         "provider": meta.get("provider", "unknown"),
         "upstream_url": meta.get("upstream_url", ""),
-        "server_version": _extract_server_version(endpoints),
-        "served_model_id": _extract_served_model(endpoints),
+        "server_version": (
+            meta.get("server_version")
+            or _extract_server_version(endpoints)
+        ),
+        "served_model_id": (
+            meta.get("served_model_id")
+            or _extract_served_model(endpoints)
+        ),
     }
 
 

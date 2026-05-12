@@ -150,3 +150,18 @@ def test_flatten_handles_empty_endpoints():
     assert out["upstream_url"] == "http://x"
     assert out["server_version"] == ""
     assert out["served_model_id"] == ""
+
+
+def test_flatten_honors_explicit_top_level_fields():
+    """Retroactive _meta.json writers can pre-populate the columns
+    directly instead of synthesizing endpoint structures."""
+    meta = {
+        "provider": "local-llama-server",
+        "upstream_url": "",
+        "server_version": "llama.cpp version: 9039 (4f04476e5)",
+        "served_model_id": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+        "endpoints": {},
+    }
+    out = flatten_for_parquet(meta)
+    assert out["server_version"] == "llama.cpp version: 9039 (4f04476e5)"
+    assert out["served_model_id"] == "Qwen/Qwen3-Coder-30B-A3B-Instruct"
