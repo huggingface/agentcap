@@ -372,14 +372,47 @@ def run_cmd(
     def _sb_log(msg: str) -> None:
         click.echo(f"  [sandbox] {msg}", err=True)
 
+    workdir_p = Path(workdir)
+    traces = workdir_p / "traces"
+    sessions = workdir_p / "sessions"
+    traces.mkdir(parents=True, exist_ok=True)
+    sessions.mkdir(parents=True, exist_ok=True)
+    # Probe the upstream once so the trace dir self-describes its
+    # inference stack (provider, server version, served model id,
+    # chat-template hash, …). Never raises — an unreachable upstream
+    # just yields ``endpoints: {}`` and a hostname-derived provider
+    # slug. The full probe lands in _meta.json; the export pipeline
+    # promotes a small subset to parquet columns. The provider slug
+    # also flows into the sandbox so the agent's init script can
+    # pick the right credential channel (env-var auth for HF Router
+    # / OpenAI / …, no-auth for local llama.cpp / vLLM).
+    click.echo(f"  [probe] {upstream}", err=True)
+    provider_meta = probe(upstream, api_key=api_key)
+    provider_meta["provider"] = refine_for_sub_provider(
+        provider_meta["provider"], model
+    )
+    click.echo(f"  [probe] provider={provider_meta['provider']}", err=True)
+    (traces / "_meta.json").write_text(json.dumps({
+        "agent": agent,
+        "model": model,
+        **provider_meta,
+    }))
+
     # Builds the per-agent image (Linux) or boots the per-agent VM
     # (macOS) before returning. First call per agent can take minutes.
     # ``AGENTCAP_PROXY_URL`` is read by the image's entrypoint script
     # to render the agent's config files at startup;
-    # ``AGENTCAP_SKILLS_DIR`` (when --skills is set) tells the same
-    # script where the bind-mounted skills checkout lives so it can
-    # symlink into the agent-specific discovery location.
-    sandbox_env = {"AGENTCAP_PROXY_URL": proxy_url, "AGENTCAP_MODEL": model}
+    # ``AGENTCAP_PROVIDER`` (from the probe above) lets the entrypoint
+    # pick the right credential channel — env-var auth for hosted
+    # providers (HF Router, OpenAI, …), no-auth for local
+    # llama.cpp / vLLM. ``AGENTCAP_SKILLS_DIR`` (when --skills is
+    # set) tells the same script where the bind-mounted skills
+    # checkout lives.
+    sandbox_env = {
+        "AGENTCAP_PROXY_URL": proxy_url,
+        "AGENTCAP_MODEL": model,
+        "AGENTCAP_PROVIDER": provider_meta["provider"],
+    }
     if api_key:
         sandbox_env["AGENTCAP_API_KEY"] = api_key
     sandbox_ro: list[Path] = []
@@ -393,28 +426,6 @@ def run_cmd(
         readonly_paths=sandbox_ro,
     )
 
-    workdir_p = Path(workdir)
-    traces = workdir_p / "traces"
-    sessions = workdir_p / "sessions"
-    traces.mkdir(parents=True, exist_ok=True)
-    sessions.mkdir(parents=True, exist_ok=True)
-    # Probe the upstream once so the trace dir self-describes its
-    # inference stack (provider, server version, served model id,
-    # chat-template hash, …). Never raises — an unreachable upstream
-    # just yields ``endpoints: {}`` and a hostname-derived provider
-    # slug. The full probe lands in _meta.json; the export pipeline
-    # promotes a small subset to parquet columns.
-    click.echo(f"  [probe] {upstream}", err=True)
-    provider_meta = probe(upstream, api_key=api_key)
-    provider_meta["provider"] = refine_for_sub_provider(
-        provider_meta["provider"], model
-    )
-    click.echo(f"  [probe] provider={provider_meta['provider']}", err=True)
-    (traces / "_meta.json").write_text(json.dumps({
-        "agent": agent,
-        "model": model,
-        **provider_meta,
-    }))
     # Agent cwd resolution. If the user passed --workspace, use that
     # host path (bind-mounted into the sandbox; the agent sees its
     # contents, e.g. a transformers worktree). Otherwise mint a fresh
@@ -430,9 +441,7 @@ def run_cmd(
     # argument. ``cwd`` is the per-run sandbox-side dir we just
     # minted; the orchestrator runs the agent from there so cwd-side
     # state (Hermes auto-injecting AGENTS.md, etc.) is isolated.
-    driver_kwargs: dict = {"sandbox": sandbox, "cwd": sandbox_cwd}
-    if agent in ("opencode", "goose", "pi"):
-        driver_kwargs["model"] = model
+    driver_kwargs: dict = {"sandbox": sandbox, "cwd": sandbox_cwd, "model": model}
     driver = get_driver(agent, **driver_kwargs)
     tasks = read_tasks_txt(tasks_file)
     if not tasks:

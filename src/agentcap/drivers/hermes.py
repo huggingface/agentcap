@@ -106,6 +106,7 @@ class HermesDriver(AgentDriver):
         *,
         sandbox: Sandbox,
         binary: str = "hermes",
+        model: str | None = None,
         extra_args: Sequence[str] = ("-Q", "--yolo", "--accept-hooks"),
         cwd: Path | str | None = None,
         ignore_rules: bool = False,
@@ -118,8 +119,14 @@ class HermesDriver(AgentDriver):
         #
         # ignore_rules / toolsets shrink the default Hermes system
         # prompt for CPU + small-model runs.
+        #
+        # model: passed via ``hermes chat -m <id>``. The CLI flag is
+        # the only path that reliably populates the ``model`` field
+        # in the outbound OAI request body; ``model.name`` in
+        # ``config.yaml`` doesn't propagate for every provider profile.
         self.sandbox = sandbox
         self.binary = binary
+        self.model = model
         self.extra_args = list(extra_args)
         self.cwd = str(cwd) if cwd is not None else None
         self.ignore_rules = ignore_rules
@@ -133,6 +140,8 @@ class HermesDriver(AgentDriver):
         self, prompt: str, *, session_id: str | None
     ) -> list[str]:
         argv = [self.binary, "chat", "-q", prompt, *self.extra_args]
+        if self.model:
+            argv.extend(["-m", self.model])
         if self.ignore_rules:
             argv.append("--ignore-rules")
         if self.toolsets:

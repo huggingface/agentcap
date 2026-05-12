@@ -17,21 +17,29 @@ set -e
 url="${AGENTCAP_PROXY_URL:-http://127.0.0.1:8001/v1}"
 hermes config set model.base_url "$url" >/dev/null
 
-# Without an explicit model.name, hermes falls back to its built-in
-# default (currently ``google/gemma-4-E4B-it``), which is what gets
-# sent as the ``model`` field on every outbound request and recorded
-# by the capture proxy. Tying it to AGENTCAP_MODEL keeps captured
-# traces honest about which model the agent was actually run against.
-if [ -n "${AGENTCAP_MODEL:-}" ]; then
-    hermes config set model.name "$AGENTCAP_MODEL" >/dev/null
-fi
+# Provider switch driven by the orchestrator's upstream probe
+# (AGENTCAP_PROVIDER). For hosted providers we use the built-in
+# profile that reads its API key from os.environ (env_vars=...)
+# — credentials flow through process env only, never get
+# persisted to ~/.hermes/config.yaml. For local servers
+# (llama.cpp / vLLM / unknown) ``custom`` is the right profile —
+# no auth needed, the proxy URL is the only knob.
+case "${AGENTCAP_PROVIDER:-custom}" in
+    hf-router|hf-router/*)
+        hermes config set model.provider huggingface >/dev/null
+        [ -n "${AGENTCAP_API_KEY:-}" ] && export HF_TOKEN="$AGENTCAP_API_KEY"
+        ;;
+    openai|openai/*)
+        hermes config set model.provider openai >/dev/null
+        [ -n "${AGENTCAP_API_KEY:-}" ] && export OPENAI_API_KEY="$AGENTCAP_API_KEY"
+        ;;
+    *)
+        hermes config set model.provider custom >/dev/null
+        ;;
+esac
 
-# Real key when the upstream needs one (HF Router, OpenAI, …); the
-# local-server path leaves it unset, and hermes is happy to send no
-# Authorization header in that case.
-if [ -n "${AGENTCAP_API_KEY:-}" ]; then
-    hermes config set model.api_key "$AGENTCAP_API_KEY" >/dev/null
-fi
+# Model id flows via the hermes CLI ``-m`` flag (the driver
+# appends it) — config-side model.name is left alone.
 
 if [ -n "${AGENTCAP_SKILLS_DIR:-}" ] && [ -d "$AGENTCAP_SKILLS_DIR" ]; then
     if [ -d "$AGENTCAP_SKILLS_DIR/skills" ]; then
