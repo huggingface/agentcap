@@ -18,12 +18,16 @@ explicitly first.
    at *export* time by re-rendering through the model's chat template.
    The runtime path produces no manifest sidecar.
 
-3. **No derived metadata in manifest rows.** Rows expose the raw
-   `request` body and structural `sections` only. Anything that
-   reduces those to a single hashable identifier (prefix ids, args
-   hashes, "agent build" ids) is a consumer-side choice — different
-   consumers want different definitions, and shipping one in rows
-   means everyone computes both ours and theirs.
+3. **No hashable identifiers in manifest rows.** Rows expose the raw
+   `request` body, structural `sections`, and the rendered token
+   sequence (`rendered_tokens`, `token_role`). Hashable derivatives
+   — prefix ids, args hashes, "agent build" ids — stay consumer-side;
+   different consumers want different definitions, and shipping one
+   in rows means everyone computes both ours and theirs.
+   `rendered_tokens` is the carve-out: consumer-side recompute requires
+   `_normalize_for_render` (Qwen3-Coder templates crash on list-typed
+   content / string-typed tool_call.arguments), which isn't a public
+   API; shipping the ids removes that coupling at ~10× row-size cost.
 
 4. **Capture is via a transparent HTTP proxy, not via patches to the
    serving stack.** Compatibility with any OpenAI-compat backend is

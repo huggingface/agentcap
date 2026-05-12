@@ -253,15 +253,17 @@ def test_build_manifest_top_level_fields():
     assert row["request_id"] == "rid-1"
     assert row["model"] == "my-model"
     assert row["captured_at"] == 123
-    # Rows never carry derived metadata — no agent_build_id, no
-    # rendered_tokens, no args_hash. Consumers compute their own from
-    # the raw `request` body if they need them.
+    # Hashable identifiers (agent_build_id, args_hash, prefix_id) stay
+    # consumer-side; rendered_tokens IS shipped (consumers need it for
+    # byte-stable matching without re-running _normalize_for_render).
     assert "agent_build_id" not in row
-    assert "rendered_tokens" not in row
     assert row["request"] == body
     assert row["response"] == {"choices": []}
     assert row["n_tokens"] == row["sections"][-1]["tok_range"][1]
     assert len(row["token_role"]) == row["n_tokens"]
+    assert isinstance(row["rendered_tokens"], list)
+    assert all(isinstance(t, int) for t in row["rendered_tokens"])
+    assert len(row["rendered_tokens"]) == row["n_tokens"]
 
 
 def test_normalize_for_render_parses_string_arguments():

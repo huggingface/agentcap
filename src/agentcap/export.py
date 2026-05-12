@@ -114,6 +114,7 @@ def _row_for_arrow(manifest_row: dict) -> dict:
         "n_tokens": manifest_row["n_tokens"],
         "sections": manifest_row["sections"],
         "token_role": manifest_row["token_role"],
+        "rendered_tokens": manifest_row["rendered_tokens"],
     }
 
 

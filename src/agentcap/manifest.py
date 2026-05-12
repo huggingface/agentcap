@@ -8,11 +8,14 @@ compute:
 - per-message ``sections`` with ``tok_range``, role, stability, and
   (for ``role=tool``) ``tool_name`` + ``tool_call_id``.
 - ``token_role``: per-token role label for the rendered prompt.
+- ``rendered_tokens``: the integer token id sequence for the prompt,
+  aligned with ``token_role``. Lets consumers do byte-stable matching /
+  splice selection without loading a tokenizer or re-discovering the
+  per-agent normalisation in :func:`_normalize_for_render` (Qwen3-Coder
+  templates crash on raw OpenAI-spec input).
 
-The manifest deliberately exposes structural facts only — no derived
-cache keys. ``prefix_id`` / ``args_hash`` definitions belong to the
-consumer, who can build them from the raw ``request`` body and the
-``sections`` map (see README "Deriving cache keys").
+Hashable cache keys (prefix_id, args_hash, agent_build_id) stay
+consumer-side — different consumers want different definitions.
 
 The capture proxy never imports this module — manifest computation is
 strictly export-side.
@@ -203,13 +206,17 @@ def build_manifest(
 ) -> dict:
     """Assemble a single manifest row.
 
-    Rendered token IDs are deliberately *not* included — they're
-    deterministic from ``(request.messages, request.tools, model)``
-    and inflate row size by ~10× for typical agent prompts. Consumers
-    who need them can recompute in 5 lines via
-    ``AutoTokenizer.from_pretrained(model).apply_chat_template(...)``.
+    Includes ``rendered_tokens`` (list[int], aligned with
+    ``token_role``). Recomputing this consumer-side requires
+    re-applying :func:`_normalize_for_render` (Qwen3-Coder templates
+    crash on list-typed content / string-typed tool_call.arguments),
+    which isn't a public API; shipping the ids removes that coupling
+    at a ~10× row-size cost.
     """
     rendered_body = _normalize_for_render(request_body)
+    messages = list(rendered_body.get("messages") or [])
+    tools = rendered_body.get("tools")
+    rendered_tokens = _render_ids(processor, messages, tools)
     sections = compute_sections(processor, rendered_body)
     token_role = per_token_roles(processor, rendered_body)
     n_tokens = sections[-1]["tok_range"][1] if sections else 0
@@ -223,4 +230,5 @@ def build_manifest(
         "n_tokens": n_tokens,
         "sections": sections,
         "token_role": token_role,
+        "rendered_tokens": rendered_tokens,
     }
