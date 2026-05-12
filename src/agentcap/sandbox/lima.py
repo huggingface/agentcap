@@ -123,12 +123,34 @@ class LimaSandbox:
         cmd = self._build_shell_cmd(
             [INIT_PATH] + list(argv), env=full_env or None, cwd=cwd,
         )
-        return subprocess.run(
-            cmd,
-            env=os.environ.copy(),
-            capture_output=True, text=True,
-            timeout=timeout, check=check,
-        )
+        try:
+            return subprocess.run(
+                cmd,
+                env=os.environ.copy(),
+                capture_output=True, text=True,
+                timeout=timeout, check=check,
+            )
+        except subprocess.TimeoutExpired:
+            # Python's SIGKILL went to the local ``limactl shell``
+            # wrapper; the inner agent process inside the VM has been
+            # orphaned (sshd's session-close doesn't propagate cleanly
+            # to non-tty children) and will keep firing requests at the
+            # capture proxy. Best-effort kill of any process matching
+            # the agent binary before re-raising. argv[0] is the agent
+            # binary the driver invoked.
+            if argv:
+                self._pkill_in_vm(argv[0])
+            raise
+
+    def _pkill_in_vm(self, pattern: str) -> None:
+        """Kill any VM-side process whose cmdline matches ``pattern``
+        via ``pkill -9 -f``. Best-effort: short timeout, never raises."""
+        try:
+            self._exec_in_vm(
+                ["pkill", "-9", "-f", pattern], check=False, timeout=10,
+            )
+        except Exception:
+            pass
 
     def _exec_in_vm(
         self,
