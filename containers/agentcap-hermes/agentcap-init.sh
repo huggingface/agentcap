@@ -53,4 +53,8 @@ if [ -n "${AGENTCAP_SKILLS_DIR:-}" ] && [ -d "$AGENTCAP_SKILLS_DIR" ]; then
         ln -sf "$AGENTCAP_SKILLS_DIR/agents/AGENTS.md" "$PWD/AGENTS.md"
 fi
 
+# Record this shell's PID so the sandbox can target the about-to-be
+# exec'd agent precisely on timeout. ``exec`` keeps $$, so the value
+# stays valid after the replacement.
+echo $$ > /tmp/agentcap-current.pid
 exec "$@"

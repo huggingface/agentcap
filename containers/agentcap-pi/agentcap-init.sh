@@ -24,4 +24,7 @@ if [ -n "${AGENTCAP_SKILLS_DIR:-}" ] && [ -d "$AGENTCAP_SKILLS_DIR" ]; then
         ln -sfn "$AGENTCAP_SKILLS_DIR/skills" "$PWD/skills"
 fi
 
+# Record this shell's PID so the sandbox can target the about-to-be
+# exec'd agent precisely on timeout. ``exec`` keeps $$.
+echo $$ > /tmp/agentcap-current.pid
 exec "$@"

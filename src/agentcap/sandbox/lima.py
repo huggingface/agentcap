@@ -135,19 +135,27 @@ class LimaSandbox:
             # wrapper; the inner agent process inside the VM has been
             # orphaned (sshd's session-close doesn't propagate cleanly
             # to non-tty children) and will keep firing requests at the
-            # capture proxy. Best-effort kill of any process matching
-            # the agent binary before re-raising. argv[0] is the agent
-            # binary the driver invoked.
-            if argv:
-                self._pkill_in_vm(argv[0])
+            # capture proxy until it finishes its loop. Read the PID
+            # ``agentcap-init`` wrote just before ``exec``ing the agent
+            # and kill exactly that process before re-raising.
+            self._kill_current_pid_in_vm()
             raise
 
-    def _pkill_in_vm(self, pattern: str) -> None:
-        """Kill any VM-side process whose cmdline matches ``pattern``
-        via ``pkill -9 -f``. Best-effort: short timeout, never raises."""
+    def _kill_current_pid_in_vm(self) -> None:
+        """Read ``/tmp/agentcap-current.pid`` (written by
+        ``agentcap-init`` just before the final ``exec``) and SIGKILL
+        that PID inside the VM. Best-effort: short timeout, never
+        raises — a missing file or already-dead process is fine."""
         try:
+            r = self._exec_in_vm(
+                ["cat", "/tmp/agentcap-current.pid"],
+                check=False, timeout=5,
+            )
+            pid = (r.stdout or "").strip()
+            if not pid or not pid.isdigit():
+                return
             self._exec_in_vm(
-                ["pkill", "-9", "-f", pattern], check=False, timeout=10,
+                ["kill", "-9", pid], check=False, timeout=5,
             )
         except Exception:
             pass
