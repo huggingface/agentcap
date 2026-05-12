@@ -99,15 +99,28 @@ def _render_ids(
     *,
     add_generation_prompt: bool = False,
 ) -> list[int]:
+    """Render ``messages`` through the processor's chat template.
+
+    Strict templates (Qwen3-Coder, Qwen3.6, Kimi-K2, …) raise
+    ``jinja2.exceptions.TemplateError: No user query found in
+    messages.`` when a prefix hasn't yet hit a user turn — typically
+    ``messages[:1] == [system]`` during the cumulative walk in
+    :func:`compute_sections`. Catch that family of errors and return
+    an empty token list; the affected section gets ``tokens=0`` but
+    the rest of the walk proceeds normally.
+    """
     if not messages:
         return []
-    out = processor.apply_chat_template(
-        messages,
-        tools=tools,
-        tokenize=True,
-        return_dict=True,
-        add_generation_prompt=add_generation_prompt,
-    )
+    try:
+        out = processor.apply_chat_template(
+            messages,
+            tools=tools,
+            tokenize=True,
+            return_dict=True,
+            add_generation_prompt=add_generation_prompt,
+        )
+    except Exception:
+        return []
     ids = out["input_ids"]
     if hasattr(ids, "tolist"):
         ids = ids.tolist()
