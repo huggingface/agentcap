@@ -180,19 +180,30 @@ def flatten_for_parquet(meta: dict) -> dict:
     that rebuild ``_meta.json`` for historical captures inject a known
     version without having to fake the full endpoint structure.
 
+    For multi-tenant routers (``hf-router``), ``served_model_id`` is
+    inherently per-request, not per-deployment — the catalog from
+    ``/v1/models`` lists thousands of models, so falling back to its
+    first entry would be misleading. Pin it to the requested model
+    instead, which matches what every ``request.body.model`` will say
+    for that run.
+
     The raw ``endpoints`` dict stays in ``_meta.json`` for forensics."""
     endpoints = meta.get("endpoints") or {}
+    provider = meta.get("provider", "unknown")
+    served_model_id = meta.get("served_model_id")
+    if not served_model_id:
+        if provider.startswith("hf-router"):
+            served_model_id = meta.get("model") or ""
+        else:
+            served_model_id = _extract_served_model(endpoints)
     return {
-        "provider": meta.get("provider", "unknown"),
+        "provider": provider,
         "upstream_url": meta.get("upstream_url", ""),
         "server_version": (
             meta.get("server_version")
             or _extract_server_version(endpoints)
         ),
-        "served_model_id": (
-            meta.get("served_model_id")
-            or _extract_served_model(endpoints)
-        ),
+        "served_model_id": served_model_id,
     }
 
 
