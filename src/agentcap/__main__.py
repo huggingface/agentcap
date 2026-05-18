@@ -116,9 +116,8 @@ def proxy_cmd(upstream: str, listen: str, trace_dir: str) -> None:
 @click.option(
     "--model",
     default=None,
-    help="HF model id whose chat template to render with. "
-    "If omitted, inferred from the captured request bodies "
-    "(fails if they're not all for the same model).",
+    help="Override the model id used in the bucket filename. Captured "
+    "``body.model`` remains the source of truth in the parquet itself.",
 )
 @click.option(
     "--output",
@@ -135,19 +134,8 @@ def proxy_cmd(upstream: str, listen: str, trace_dir: str) -> None:
 @click.option(
     "--agent",
     default=None,
-    help="Agent name to embed in the bucket filename (so pushes are "
-    "grouped by agent + model). If omitted, auto-detected from "
-    "<trace-dir>/_meta.json (written by `agentcap run`); falls back "
-    "to no agent tag for trace dirs produced by other flows.",
-)
-@click.option(
-    "--workers",
-    type=int,
-    default=1,
-    show_default=True,
-    help="Render rows in a process pool of this size. >1 parallelises "
-    "the per-row chat-template render (CPU-bound). Each worker "
-    "re-loads the tokenizer on init.",
+    help="Agent name to embed in the bucket filename. Trace dir has no "
+    "in-band source for this; supply when known, leave unset otherwise.",
 )
 def export_cmd(
     trace_dir: str,
@@ -155,15 +143,12 @@ def export_cmd(
     output: str | None,
     push: str | None,
     agent: str | None,
-    workers: int,
 ) -> None:
     """Render a captured trace dir into a parquet dataset."""
     from .export import (
         _BUCKET_PREFIX,
-        detect_agent,
         detect_model,
         export_local,
-        load_processor,
         push_bucket,
     )
 
@@ -177,9 +162,8 @@ def export_cmd(
             f"For Dataset repos, render to --output and use `hf upload`."
         )
 
-    # Always run detection — its job is to enforce that the trace dir is
-    # for exactly one model. --model can fall back to the detected value
-    # but cannot bypass the uniqueness check.
+    # detect_model enforces the no-mixed-models invariant; --model
+    # cannot bypass it.
     try:
         detected = detect_model(trace_dir)
     except ValueError as exc:
@@ -197,28 +181,13 @@ def export_cmd(
             err=True,
         )
 
-    if agent is None:
-        agent = detect_agent(trace_dir)
-        if agent is not None:
-            click.echo(
-                f"agentcap export: using agent {agent!r} (auto-detected)",
-                err=True,
-            )
-
-    proc = load_processor(model)
-
     if output:
-        n_rows = export_local(
-            trace_dir, output, processor=proc, model=model, workers=workers
-        )
+        n_rows = export_local(trace_dir, output)
         click.echo(
             f"agentcap export: wrote {n_rows} rows to {output}", err=True
         )
     else:
-        n_rows = push_bucket(
-            trace_dir, push, processor=proc, model=model, agent=agent,
-            workers=workers,
-        )
+        n_rows = push_bucket(trace_dir, push, model=model, agent=agent)
         click.echo(
             f"agentcap export: wrote {n_rows} rows to bucket {push}", err=True
         )
@@ -355,7 +324,7 @@ def run_cmd(
     from .drivers import get_driver
     from .followups import get_followup
     from .orchestrator import Orchestrator, read_tasks_txt
-    from .provider import probe, refine_for_sub_provider
+    from .provider import _hostname_fallback, refine_for_sub_provider
     from .proxy import (
         IN_PROCESS_PROXY_HOST,
         IN_PROCESS_PROXY_PORT,
@@ -363,18 +332,11 @@ def run_cmd(
     )
     from .sandbox import require_sandbox_or_die
 
-    # --- validation: everything that can reject the CLI invocation
-    # goes here, BEFORE we touch the sandbox or the workdir. So a
-    # bad CLI call doesn't pay the cost of building/booting the
-    # per-agent image/VM or leave stray temp dirs behind.
+    # Validate before touching the sandbox / workdir so a bad CLI call
+    # doesn't pay the cost of building / booting the per-agent image.
 
-    # In-process proxy bind address. ``--listen HOST:PORT`` overrides
-    # the default for hosts where it collides. The image entrypoint
-    # reads AGENTCAP_PROXY_URL and patches each agent's config at run
-    # time. When the bind host is 0.0.0.0 (or otherwise non-routable
-    # from inside the sandbox), advertise a sandbox-reachable host
-    # instead: ``host.lima.internal`` on macOS / Lima, ``127.0.0.1``
-    # on Linux / bwrap.
+    # Bind 0.0.0.0 needs a sandbox-reachable advertise host:
+    # host.lima.internal on macOS/Lima, 127.0.0.1 on Linux/bwrap.
     if listen is not None:
         host, port = _parse_listen(listen)
     else:
@@ -425,41 +387,19 @@ def run_cmd(
     sessions = workdir_p / "sessions"
     traces.mkdir(parents=True, exist_ok=True)
     sessions.mkdir(parents=True, exist_ok=True)
-    # Probe the upstream once so the trace dir self-describes its
-    # inference stack (provider, server version, served model id,
-    # chat-template hash, …). Never raises — an unreachable upstream
-    # just yields ``endpoints: {}`` and a hostname-derived provider
-    # slug. The full probe lands in _meta.json; the export pipeline
-    # promotes a small subset to parquet columns. The provider slug
-    # also flows into the sandbox so the agent's init script can
-    # pick the right credential channel (env-var auth for HF Router
-    # / OpenAI / …, no-auth for local llama.cpp / vLLM).
-    click.echo(f"  [probe] {upstream}", err=True)
-    provider_meta = probe(upstream, api_key=api_key)
-    provider_meta["provider"] = refine_for_sub_provider(
-        provider_meta["provider"], model
+    # Hostname classification — used by the sandbox env to pick the
+    # agent's credential channel (env-var auth vs no-auth).
+    provider_slug = refine_for_sub_provider(
+        _hostname_fallback(upstream), model
     )
-    click.echo(f"  [probe] provider={provider_meta['provider']}", err=True)
-    (traces / "_meta.json").write_text(json.dumps({
-        "agent": agent,
-        "model": model,
-        **provider_meta,
-    }))
+    click.echo(f"  [provider] {provider_slug}", err=True)
 
-    # Builds the per-agent image (Linux) or boots the per-agent VM
-    # (macOS) before returning. First call per agent can take minutes.
-    # ``AGENTCAP_PROXY_URL`` is read by the image's entrypoint script
-    # to render the agent's config files at startup;
-    # ``AGENTCAP_PROVIDER`` (from the probe above) lets the entrypoint
-    # pick the right credential channel — env-var auth for hosted
-    # providers (HF Router, OpenAI, …), no-auth for local
-    # llama.cpp / vLLM. ``AGENTCAP_SKILLS_DIR`` (when --skills is
-    # set) tells the same script where the bind-mounted skills
-    # checkout lives.
+    # First call per agent builds/boots the image; can take minutes.
+    # Env vars consumed by the image entrypoint to render configs.
     sandbox_env = {
         "AGENTCAP_PROXY_URL": proxy_url,
         "AGENTCAP_MODEL": model,
-        "AGENTCAP_PROVIDER": provider_meta["provider"],
+        "AGENTCAP_PROVIDER": provider_slug,
     }
     if api_key:
         sandbox_env["AGENTCAP_API_KEY"] = api_key
@@ -474,21 +414,13 @@ def run_cmd(
         readonly_paths=sandbox_ro,
     )
 
-    # Agent cwd resolution. If the user passed --workspace, use that
-    # host path (bind-mounted into the sandbox; the agent sees its
-    # contents, e.g. a transformers worktree). Otherwise mint a fresh
-    # hermetic temp dir so cwd-side state (Hermes auto-injecting
-    # AGENTS.md, etc.) doesn't leak between runs.
+    # Without --workspace, mint a hermetic temp dir so cwd-side state
+    # (Hermes auto-injects AGENTS.md) doesn't leak between runs.
     if workspace is not None:
         sandbox_cwd = str(Path(workspace).resolve())
     else:
         sandbox_cwd = sandbox.mkdtemp(prefix="agentcap-run-")
 
-    # The agent talks to the in-process proxy at the fixed URL baked
-    # into the per-agent image — drivers no longer need a base_url
-    # argument. ``cwd`` is the per-run sandbox-side dir we just
-    # minted; the orchestrator runs the agent from there so cwd-side
-    # state (Hermes auto-injecting AGENTS.md, etc.) is isolated.
     driver_kwargs: dict = {"sandbox": sandbox, "cwd": sandbox_cwd, "model": model}
     driver = get_driver(agent, **driver_kwargs)
     tasks = read_tasks_txt(tasks_file)

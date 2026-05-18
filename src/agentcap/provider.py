@@ -1,25 +1,9 @@
-"""Detect the inference backend behind ``--upstream``.
+"""Identify the inference backend behind an upstream URL.
 
-Most OpenAI-compat servers expose richer self-description than just
-``/v1/models``. :func:`probe` issues a small set of parallel GETs to
-well-known introspection endpoints, unions whatever returns, and
-classifies via distinctive markers:
-
-- llama.cpp:  ``GET /props``    — chat template, n_ctx, model alias
-- TGI:        ``GET /info``     — model_id, model_sha, dtype, version
-- vLLM:       ``GET /version``  — engine version
-- HF Router:  ``GET /v1/models`` returns ids with ``:<sub-provider>``
-- OpenAI:     ``GET /v1/models`` returns ``gpt-*`` / ``o*-*`` ids
-- generic:    ``GET /v1/models`` only
-
-Result lands verbatim in ``<trace_dir>/_meta.json`` so consumers and
-the export pipeline see the same fingerprint the orchestrator saw at
-run time. :func:`flatten_for_parquet` picks the small set of fields
-worth promoting to parquet columns.
-
-Never raises: an unreachable upstream returns ``{"provider": …
-hostname fallback …, "endpoints": {}}`` so ``agentcap run`` doesn't
-abort on probe failure.
+Hostname classification (:func:`_hostname_fallback`) +
+HF Router sub-provider pin (:func:`refine_for_sub_provider`).
+:func:`probe` is the richer (network) variant — issues parallel
+GETs to well-known introspection endpoints, never raises.
 """
 
 from __future__ import annotations
@@ -33,9 +17,7 @@ from urllib.parse import urlparse
 import httpx
 
 
-# Hostnames that map to a known provider when probing fails or returns
-# nothing classifiable. Reverse proxies / custom domains won't match;
-# probing covers those.
+# Reverse proxies / custom domains won't match; the probe path catches those.
 _HOSTNAME_TO_PROVIDER: dict[str, str] = {
     "router.huggingface.co": "hf-router",
     "api.openai.com": "openai",
@@ -48,8 +30,8 @@ _HOSTNAME_TO_PROVIDER: dict[str, str] = {
 
 
 def _base_root(upstream_url: str) -> str:
-    """Strip a trailing ``/v1`` to get the server root that introspection
-    endpoints (``/props``, ``/info``, …) live under."""
+    # Introspection endpoints (/props, /info, ...) live under the
+    # server root, not /v1.
     base = upstream_url.rstrip("/")
     if base.endswith("/v1"):
         base = base[:-3]
@@ -74,8 +56,6 @@ def _hostname_fallback(upstream_url: str) -> str:
 
 
 def _try_get(url: str, headers: dict, timeout: float) -> dict | None:
-    """One probe. Returns ``{"body": json_or_None, "text": ..., "headers": ...}``
-    on a 2xx, ``None`` otherwise (or on any transport error)."""
     try:
         r = httpx.get(url, headers=headers, timeout=timeout)
     except (httpx.HTTPError, OSError):
@@ -88,7 +68,6 @@ def _try_get(url: str, headers: dict, timeout: float) -> dict | None:
         if "json" in ct:
             out["body"] = r.json()
         else:
-            # Prometheus / plain-text endpoints (llama.cpp + vLLM metrics)
             out["text"] = r.text[:4096]
     except Exception:
         return None
@@ -101,16 +80,15 @@ def probe(
     api_key: str | None = None,
     timeout: float = 3.0,
 ) -> dict:
-    """Probe an OpenAI-compat upstream and return a self-describing
-    metadata dict — always returns, never raises."""
+    """Probe an OpenAI-compat upstream. Never raises."""
     root = _base_root(upstream_url)
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     targets = {
         "props":   f"{root}/props",          # llama.cpp
         "info":    f"{root}/info",           # TGI
         "version": f"{root}/version",        # vLLM
-        "models":  f"{root}/v1/models",      # universal OpenAI-compat
-        "metrics": f"{root}/metrics",        # llama.cpp + vLLM (text)
+        "models":  f"{root}/v1/models",
+        "metrics": f"{root}/metrics",
     }
     endpoints: dict[str, dict] = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(targets)) as pool:
@@ -138,13 +116,9 @@ def _classify(endpoints: dict, upstream_url: str) -> str:
     models_body = (endpoints.get("models") or {}).get("body") or {}
     model_ids = [m.get("id", "") for m in (models_body.get("data") or [])]
 
-    # HF Router: ``meta-llama/Llama-3.3-70B-Instruct:fireworks-ai`` —
-    # the ``:provider`` suffix is unique to it.
+    # HF Router model ids carry a ``:<sub-provider>`` suffix.
     if any(":" in i for i in model_ids):
         return "hf-router"
-
-    # llama.cpp's /props endpoint exposes a chat template and is unique
-    # to it among OpenAI-compat backends.
     if endpoints.get("props") is not None:
         return "local-llama-server"
 
@@ -163,77 +137,8 @@ def _classify(endpoints: dict, upstream_url: str) -> str:
 
 
 def refine_for_sub_provider(provider: str, model: str | None) -> str:
-    """HF Router lets you pin a sub-provider in the model id itself
-    (``meta-llama/Llama-3.3-70B-Instruct:fireworks-ai``). Surface
-    that pin as ``hf-router/<sub>`` so the parquet's provider column
-    distinguishes captures routed through different sub-providers."""
+    """Surface HF Router's ``meta-llama/...:fireworks-ai`` pin as
+    ``hf-router/fireworks-ai`` in the provider slug."""
     if provider == "hf-router" and model and ":" in model:
         return f"hf-router/{model.split(':', 1)[1]}"
     return provider
-
-
-def flatten_for_parquet(meta: dict) -> dict:
-    """Pick the small set of probe fields worth promoting to columns.
-
-    Explicit top-level keys (``server_version``, ``served_model_id``)
-    win over endpoint-derived values — this lets retroactive scripts
-    that rebuild ``_meta.json`` for historical captures inject a known
-    version without having to fake the full endpoint structure.
-
-    For multi-tenant routers (``hf-router``), ``served_model_id`` is
-    inherently per-request, not per-deployment — the catalog from
-    ``/v1/models`` lists thousands of models, so falling back to its
-    first entry would be misleading. Pin it to the requested model
-    instead, which matches what every ``request.body.model`` will say
-    for that run.
-
-    The raw ``endpoints`` dict stays in ``_meta.json`` for forensics."""
-    endpoints = meta.get("endpoints") or {}
-    provider = meta.get("provider", "unknown")
-    served_model_id = meta.get("served_model_id")
-    if not served_model_id:
-        if provider.startswith("hf-router"):
-            served_model_id = meta.get("model") or ""
-        else:
-            served_model_id = _extract_served_model(endpoints)
-    return {
-        "provider": provider,
-        "upstream_url": meta.get("upstream_url", ""),
-        "server_version": (
-            meta.get("server_version")
-            or _extract_server_version(endpoints)
-        ),
-        "served_model_id": served_model_id,
-    }
-
-
-def _extract_server_version(endpoints: dict) -> str:
-    info = (endpoints.get("info") or {}).get("body") or {}
-    if isinstance(info, dict) and info.get("version"):
-        return f"tgi {info['version']}"
-    version = (endpoints.get("version") or {}).get("body") or {}
-    if isinstance(version, dict) and version.get("version"):
-        return f"vllm {version['version']}"
-    metrics = (endpoints.get("metrics") or {}).get("text") or ""
-    # llama.cpp metrics include a build-version comment near the top.
-    for line in metrics.splitlines()[:50]:
-        s = line.strip()
-        if s.startswith("# HELP") and "llamacpp" in s.lower():
-            return "llama.cpp"
-    return ""
-
-
-def _extract_served_model(endpoints: dict) -> str:
-    info = (endpoints.get("info") or {}).get("body") or {}
-    if isinstance(info, dict) and info.get("model_id"):
-        return info["model_id"]
-    props = (endpoints.get("props") or {}).get("body") or {}
-    if isinstance(props, dict):
-        gen = props.get("default_generation_settings") or {}
-        if isinstance(gen, dict) and gen.get("model"):
-            return gen["model"]
-    models = (endpoints.get("models") or {}).get("body") or {}
-    data = models.get("data") or []
-    if data and isinstance(data[0], dict) and data[0].get("id"):
-        return data[0]["id"]
-    return ""

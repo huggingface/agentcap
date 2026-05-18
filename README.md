@@ -217,9 +217,10 @@ Each run lands as a unique parquet file under the supplied prefix.
 The default filename embeds the agent and model so a single bucket
 prefix can hold many `(agent, model)` tuples without aliasing —
 `train-<agent>-<model>-YYYYMMDDTHHMMSS-HEX6.parquet`. Agent is
-auto-detected from `<trace-dir>/_meta.json` (written by `agentcap
-run`); pass `--agent <name>` if you're exporting traces captured
-outside the orchestrator. Consumers read the union via
+auto-detected from `<trace-dir>/_proxy.json` (written by the
+capture proxy at startup when invoked by `agentcap run`); pass
+`--agent <name>` if you're exporting traces captured outside the
+orchestrator. Consumers read the union via
 `load_dataset("hf://buckets/.../my-prefix/")`.
 
 Dataset repos aren't a `--push` target on purpose: their semantics

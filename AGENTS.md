@@ -118,8 +118,8 @@ explicitly first.
     you what's inside —
     `train-<agent>-<model>-YYYYMMDDTHHMMSS-HEX6.parquet`. Agent is
     optional and falls through to `train-<model>-…` when absent
-    (older trace dirs); the orchestrator persists it to
-    `<trace-dir>/_meta.json` so `agentcap export` recovers it
+    (older trace dirs); the capture proxy persists it to
+    `<trace-dir>/_proxy.json` so `agentcap export` recovers it
     automatically. An explicit `filename=` opts back into
     overwrite-in-place — used only for "latest" pointer files.
 

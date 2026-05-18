@@ -1,14 +1,13 @@
 """Pure-Python tests for ``agentcap.provider`` — classifier + hostname
-fallback + parquet flattening. The actual network probe is tested
-implicitly via the live integration suite; here we feed synthetic
-``endpoints`` dicts to exercise the classification logic."""
+fallback + HF Router sub-provider refinement. The actual network probe
+is tested implicitly via the live integration suite; here we feed
+synthetic ``endpoints`` dicts to exercise the classification logic."""
 
 from __future__ import annotations
 
 from agentcap.provider import (
     _classify,
     _hostname_fallback,
-    flatten_for_parquet,
     refine_for_sub_provider,
 )
 
@@ -107,61 +106,3 @@ def test_refine_noop_without_colon_or_non_hf_router():
     assert refine_for_sub_provider("local", "anything:fireworks-ai") == "local"
 
 
-# ---------------------------------------------------------------------------
-# flatten_for_parquet
-# ---------------------------------------------------------------------------
-
-
-def test_flatten_promotes_tgi_version_and_model_id():
-    meta = {
-        "upstream_url": "http://10.0.0.5:8000",
-        "provider": "tgi",
-        "endpoints": {
-            "info": {"body": {
-                "model_id": "meta-llama/Llama-3.3-70B-Instruct",
-                "version": "2.4.1",
-            }},
-        },
-    }
-    out = flatten_for_parquet(meta)
-    assert out["provider"] == "tgi"
-    assert out["upstream_url"] == "http://10.0.0.5:8000"
-    assert out["server_version"] == "tgi 2.4.1"
-    assert out["served_model_id"] == "meta-llama/Llama-3.3-70B-Instruct"
-
-
-def test_flatten_promotes_vllm_version_and_models_first_id():
-    meta = {
-        "upstream_url": "http://10.0.0.5:8000",
-        "provider": "vllm",
-        "endpoints": {
-            "version": {"body": {"version": "0.7.0"}},
-            "models": {"body": {"data": [{"id": "served-model"}]}},
-        },
-    }
-    out = flatten_for_parquet(meta)
-    assert out["server_version"] == "vllm 0.7.0"
-    assert out["served_model_id"] == "served-model"
-
-
-def test_flatten_handles_empty_endpoints():
-    out = flatten_for_parquet({"provider": "local", "upstream_url": "http://x"})
-    assert out["provider"] == "local"
-    assert out["upstream_url"] == "http://x"
-    assert out["server_version"] == ""
-    assert out["served_model_id"] == ""
-
-
-def test_flatten_honors_explicit_top_level_fields():
-    """Retroactive _meta.json writers can pre-populate the columns
-    directly instead of synthesizing endpoint structures."""
-    meta = {
-        "provider": "local-llama-server",
-        "upstream_url": "",
-        "server_version": "llama.cpp version: 9039 (4f04476e5)",
-        "served_model_id": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
-        "endpoints": {},
-    }
-    out = flatten_for_parquet(meta)
-    assert out["server_version"] == "llama.cpp version: 9039 (4f04476e5)"
-    assert out["served_model_id"] == "Qwen/Qwen3-Coder-30B-A3B-Instruct"

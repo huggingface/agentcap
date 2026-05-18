@@ -1,17 +1,9 @@
-"""Transparent OpenAI-compat HTTP capture proxy.
+"""Capture proxy for OpenAI-compat chat completions.
 
-Sits between an agent CLI and a model server. For every POST to
-``/v1/chat/completions``, persists the raw request body and the
-response body to ``<trace_dir>/<request_id>.{request,response}.json``.
-Other paths (e.g. ``/v1/models``) pass through transparently with no
-capture.
-
-Streaming responses are forwarded chunk-by-chunk to the client and the
-assembled raw bytes are persisted at end-of-stream.
-
-The capture layer is intentionally "dumb": no tokenisation, no
-chat-template render, no per-token metadata. Manifest computation is
-the export layer's job, run offline against a captured trace dir.
+Captures ``POST /v1/chat/completions`` to
+``<trace_dir>/<request_id>.{request,response}.json``; other paths
+pass through. Streaming responses are forwarded chunk-by-chunk and
+the assembled bytes persisted at end-of-stream.
 """
 
 from __future__ import annotations
@@ -25,10 +17,8 @@ from typing import Any, AsyncIterator, Optional
 import httpx
 
 
-# Bind address for the in-process proxy started by ``agentcap run``.
-# Held constant so the per-agent Containerfiles can bake the proxy URL
-# into the agent's config files (no per-run config rewriting needed).
-# The standalone ``agentcap proxy`` subcommand still accepts --listen.
+# Constant so per-agent Containerfiles can bake the proxy URL into
+# the agent's config files without per-run rewriting.
 IN_PROCESS_PROXY_HOST = "127.0.0.1"
 IN_PROCESS_PROXY_PORT = 8001
 from starlette.applications import Starlette
@@ -39,9 +29,8 @@ from starlette.routing import Route
 
 CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
 
-# Hop-by-hop headers we never forward. RFC 7230 §6.1 plus a couple of
-# pragmatic additions (content-length / content-encoding will be
-# recomputed by the framework and would clash with our re-emitted body).
+# Hop-by-hop (RFC 7230 §6.1) plus content-length / content-encoding
+# which the framework recomputes from the re-emitted body.
 _HOP_BY_HOP = frozenset({
     "host",
     "content-length",
@@ -70,16 +59,53 @@ def _safe_json_loads(raw: bytes) -> Any:
         return {"_unparsed_raw": raw.decode("utf-8", errors="replace")}
 
 
+def _lower_headers(headers: Any) -> dict[str, str]:
+    try:
+        return {k.lower(): v for k, v in headers.items()}
+    except AttributeError:
+        return {}
+
+
+def _extract_model_from_sse(raw: bytes) -> str | None:
+    """Find a ``"model"`` field in the first parseable SSE data line."""
+    for line in raw.splitlines():
+        if not line.startswith(b"data:"):
+            continue
+        payload = line[len(b"data:"):].strip()
+        if not payload or payload == b"[DONE]":
+            continue
+        try:
+            obj = json.loads(payload)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(obj, dict):
+            m = obj.get("model")
+            if isinstance(m, str) and m:
+                return m
+    return None
+
+
+def _response_fingerprint(headers: Any, body_obj: Any) -> dict[str, str | None]:
+    h = _lower_headers(headers)
+    served_model: str | None = None
+    if isinstance(body_obj, dict):
+        m = body_obj.get("model")
+        if isinstance(m, str) and m:
+            served_model = m
+    return {
+        "server": h.get("server") or None,
+        "x_served_by": h.get("x-served-by") or None,
+        "via": h.get("via") or None,
+        "build_info": h.get("x-build-info") or None,
+        "served_model": served_model,
+    }
+
+
 class CaptureProxy:
-    """The capture proxy as a Starlette-compatible handler bundle.
+    """Capture proxy as a Starlette handler bundle.
 
-    ``upstream`` is the base URL of the model server — no path prefix,
-    e.g. ``http://127.0.0.1:8000``. The proxy mirrors the incoming
-    request path verbatim onto ``upstream``.
-
-    Pass a custom ``client`` (typically an ``httpx.AsyncClient`` with an
-    ``ASGITransport``) to wire the proxy against a mock upstream in
-    tests.
+    Pass a custom ``client`` (typically ``httpx.AsyncClient`` with
+    ``ASGITransport``) to wire against a mock upstream in tests.
     """
 
     def __init__(
@@ -97,8 +123,7 @@ class CaptureProxy:
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
-            # No timeout: agent calls can be long. The agent is in
-            # control of when to give up; we just relay.
+            # No timeout: agent calls can be long, agent decides when to give up.
             self._client = httpx.AsyncClient(timeout=None)
         return self._client
 
@@ -111,6 +136,7 @@ class CaptureProxy:
         record = {
             "request_id": request_id,
             "captured_at": captured_at,
+            "upstream_url": self.upstream,
             "body": _safe_json_loads(body_bytes),
         }
         path.write_text(json.dumps(record, indent=2))
@@ -121,14 +147,18 @@ class CaptureProxy:
         status_code: int,
         body_bytes: bytes,
         captured_at: int,
+        upstream_headers: Any,
     ) -> None:
+        body = _safe_json_loads(body_bytes)
+        fp = _response_fingerprint(upstream_headers, body)
         path = self.trace_dir / f"{request_id}.response.json"
         record = {
             "request_id": request_id,
             "captured_at_resp": captured_at,
             "stream": False,
             "status_code": status_code,
-            "body": _safe_json_loads(body_bytes),
+            "body": body,
+            "upstream_fingerprint": fp,
         }
         path.write_text(json.dumps(record, indent=2))
 
@@ -138,7 +168,11 @@ class CaptureProxy:
         status_code: int,
         raw_bytes: bytes,
         captured_at: int,
+        upstream_headers: Any,
     ) -> None:
+        sse_model = _extract_model_from_sse(raw_bytes)
+        synthetic_body = {"model": sse_model} if sse_model else None
+        fp = _response_fingerprint(upstream_headers, synthetic_body)
         path = self.trace_dir / f"{request_id}.response.json"
         record = {
             "request_id": request_id,
@@ -146,6 +180,7 @@ class CaptureProxy:
             "stream": True,
             "status_code": status_code,
             "raw": raw_bytes.decode("utf-8", errors="replace"),
+            "upstream_fingerprint": fp,
         }
         path.write_text(json.dumps(record, indent=2))
 
@@ -184,6 +219,7 @@ class CaptureProxy:
             upstream_resp.status_code,
             resp_bytes,
             int(time.time()),
+            upstream_resp.headers,
         )
         return Response(
             content=resp_bytes,
@@ -206,11 +242,13 @@ class CaptureProxy:
         async def streamer() -> AsyncIterator[bytes]:
             chunks: list[bytes] = []
             status_code = 502
+            upstream_headers: Any = {}
             try:
                 async with client.stream(
                     "POST", url, content=body_bytes, headers=fwd_headers
                 ) as upstream_resp:
                     status_code = upstream_resp.status_code
+                    upstream_headers = upstream_resp.headers
                     async for chunk in upstream_resp.aiter_bytes():
                         chunks.append(chunk)
                         yield chunk
@@ -220,17 +258,12 @@ class CaptureProxy:
                     status_code,
                     b"".join(chunks),
                     int(time.time()),
+                    upstream_headers,
                 )
 
-        # Probe upstream for headers first by issuing a HEAD-like
-        # round-trip is expensive; SSE handlers usually emit
-        # ``text/event-stream``. Default to that and let the upstream
-        # override via the wrapping app's machinery.
         return StreamingResponse(streamer(), media_type="text/event-stream")
 
     async def passthrough(self, request: Request) -> Response:
-        """Transparent forward for any path other than chat completions.
-        No capture."""
         url = f"{self.upstream}{request.url.path}"
         if request.url.query:
             url = f"{url}?{request.url.query}"
@@ -278,8 +311,6 @@ def make_app(
             await proxy.aclose()
 
     app = Starlette(routes=routes, lifespan=lifespan)
-    # Stash the proxy so callers (esp. tests) can reach it for
-    # introspection without poking through Starlette internals.
     app.state.proxy = proxy
     return app
 
@@ -290,7 +321,6 @@ def serve(
     host: str = "127.0.0.1",
     port: int = 8001,
 ) -> None:
-    """Run the proxy under uvicorn. Production entrypoint."""
     import uvicorn
 
     app = make_app(upstream, trace_dir)
@@ -298,7 +328,7 @@ def serve(
 
 
 class ProxyHandle:
-    """A running in-process proxy. Use as a context manager."""
+    """Running in-process proxy. Use as a context manager."""
 
     def __init__(self, server, thread, host: str, port: int) -> None:
         self._server = server
@@ -330,11 +360,7 @@ def serve_in_thread(
     log_level: str = "warning",
     startup_timeout: float = 10.0,
 ) -> ProxyHandle:
-    """Start the proxy on a daemon thread and return a handle.
-
-    Blocks until the underlying uvicorn server reports ``started``, so
-    callers can immediately point an agent at the returned ``base_url``.
-    """
+    """Start the proxy on a daemon thread; block until uvicorn is bound."""
     import threading
     import time
 

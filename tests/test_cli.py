@@ -290,8 +290,7 @@ def test_export_auto_detects_model_from_traces(tmp_path: Path):
     )
 
     runner = CliRunner()
-    with patch("agentcap.export.load_processor", return_value=object()), \
-         patch("agentcap.export.export_local", return_value=1):
+    with patch("agentcap.export.export_local", return_value=1):
         result = runner.invoke(
             cli, ["export", str(trace), "--output", str(tmp_path / "out.parquet")]
         )
@@ -349,9 +348,9 @@ def test_export_mixed_models_fail_even_with_model_flag(tmp_path: Path):
 
 
 def test_export_explicit_model_uses_override_when_traces_uniform(tmp_path: Path):
-    """If the trace dir is uniform but --model differs, the override wins
-    (it's the tokenizer that gets loaded, and the value written into row
-    columns)."""
+    """If the trace dir is uniform but --model differs, the override is
+    accepted (--model is now only a bucket-filename hint; the parquet's
+    per-row ``model`` column still reflects the captured body.model)."""
     import json
 
     trace = tmp_path / "trace"
@@ -365,15 +364,13 @@ def test_export_explicit_model_uses_override_when_traces_uniform(tmp_path: Path)
     )
 
     runner = CliRunner()
-    with patch("agentcap.export.load_processor", return_value=object()) as mock_load, \
-         patch("agentcap.export.export_local", return_value=1):
+    with patch("agentcap.export.export_local", return_value=1):
         result = runner.invoke(
             cli,
             ["export", str(trace), "--model", "override-model",
              "--output", str(tmp_path / "out.parquet")],
         )
     assert result.exit_code == 0, result.output
-    mock_load.assert_called_once_with("override-model")
     # No auto-detect log when --model is explicit
     assert "auto-detected" not in result.output
 

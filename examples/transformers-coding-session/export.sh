@@ -11,7 +11,7 @@
 # Prereqs:
 #   1. A trace dir from `run.sh` (i.e. <WORKDIR>/traces with one
 #      *.request.json + *.response.json pair per captured request, and
-#      ideally <WORKDIR>/traces/_meta.json so the agent name is
+#      ideally <WORKDIR>/traces/_proxy.json so the agent name is
 #      auto-detected).
 #   2. No GPU-bound model server active on the same host. transformers'
 #      CUDA init during tokenizer/processor load crashes a co-running
