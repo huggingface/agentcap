@@ -3,7 +3,7 @@
 Strategy: stand up a mock upstream Starlette app and wire the proxy's
 internal httpx client to it via ``ASGITransport``. Then drive the
 proxy via Starlette's ``TestClient`` and assert on (a) what bytes the
-agent-side client sees, and (b) what files land on disk in the trace
+agent-side client sees, and (b) what files land on disk in the capture
 dir.
 
 End-to-end network sockets are not used — everything runs in-process.
@@ -88,14 +88,14 @@ def spy() -> UpstreamSpy:
 
 
 @pytest.fixture
-def trace_dir(tmp_path: Path) -> Path:
-    d = tmp_path / "trace"
+def capture_dir(tmp_path: Path) -> Path:
+    d = tmp_path / "capture"
     d.mkdir()
     return d
 
 
 @pytest.fixture
-def proxy_client(spy: UpstreamSpy, trace_dir: Path):
+def proxy_client(spy: UpstreamSpy, capture_dir: Path):
     """A TestClient hitting the proxy, where the proxy talks to the
     mock upstream via ASGITransport."""
     upstream_app = _build_upstream(spy)
@@ -103,7 +103,7 @@ def proxy_client(spy: UpstreamSpy, trace_dir: Path):
     upstream_client = httpx.AsyncClient(
         transport=upstream_transport, base_url="http://upstream"
     )
-    proxy_app = make_app("http://upstream", trace_dir, client=upstream_client)
+    proxy_app = make_app("http://upstream", capture_dir, client=upstream_client)
     with TestClient(proxy_app) as client:
         yield client
 
@@ -114,7 +114,7 @@ def proxy_client(spy: UpstreamSpy, trace_dir: Path):
 
 
 def test_chat_nonstreaming_captures_request_and_response(
-    spy: UpstreamSpy, trace_dir: Path, proxy_client: TestClient
+    spy: UpstreamSpy, capture_dir: Path, proxy_client: TestClient
 ):
     async def responder(request):
         return JSONResponse(
@@ -146,8 +146,8 @@ def test_chat_nonstreaming_captures_request_and_response(
     assert spy.received_paths == [CHAT_COMPLETIONS_PATH]
 
     # Trace dir has exactly one request + response pair
-    req_files = sorted(trace_dir.glob("*.request.json"))
-    resp_files = sorted(trace_dir.glob("*.response.json"))
+    req_files = sorted(capture_dir.glob("*.request.json"))
+    resp_files = sorted(capture_dir.glob("*.response.json"))
     assert len(req_files) == 1
     assert len(resp_files) == 1
     assert req_files[0].stem.split(".")[0] == resp_files[0].stem.split(".")[0]
@@ -164,7 +164,7 @@ def test_chat_nonstreaming_captures_request_and_response(
 
 
 def test_chat_streaming_forwards_chunks_and_captures_raw(
-    spy: UpstreamSpy, trace_dir: Path, proxy_client: TestClient
+    spy: UpstreamSpy, capture_dir: Path, proxy_client: TestClient
 ):
     sse_chunks = [
         b'data: {"choices":[{"delta":{"role":"assistant"}}]}\n\n',
@@ -194,8 +194,8 @@ def test_chat_streaming_forwards_chunks_and_captures_raw(
     # The agent-side client got the bytes the upstream produced
     assert received == b"".join(sse_chunks)
 
-    # The trace's response.json captured the assembled stream + status
-    resp_files = list(trace_dir.glob("*.response.json"))
+    # The capture's response.json captured the assembled stream + status
+    resp_files = list(capture_dir.glob("*.response.json"))
     assert len(resp_files) == 1
     record = json.loads(resp_files[0].read_text())
     assert record["stream"] is True
@@ -204,7 +204,7 @@ def test_chat_streaming_forwards_chunks_and_captures_raw(
 
 
 def test_passthrough_models_endpoint_is_not_captured(
-    spy: UpstreamSpy, trace_dir: Path, proxy_client: TestClient
+    spy: UpstreamSpy, capture_dir: Path, proxy_client: TestClient
 ):
     resp = proxy_client.get("/v1/models")
     assert resp.status_code == 200
@@ -214,12 +214,12 @@ def test_passthrough_models_endpoint_is_not_captured(
     }
     # Upstream saw the call
     assert "/v1/models" in spy.received_paths
-    # But nothing was written to the trace dir
-    assert list(trace_dir.iterdir()) == []
+    # But nothing was written to the capture dir
+    assert list(capture_dir.iterdir()) == []
 
 
 def test_arbitrary_passthrough_path(
-    spy: UpstreamSpy, trace_dir: Path, proxy_client: TestClient
+    spy: UpstreamSpy, capture_dir: Path, proxy_client: TestClient
 ):
     resp = proxy_client.get("/unrelated/path?x=1")
     assert resp.status_code == 200
@@ -227,11 +227,11 @@ def test_arbitrary_passthrough_path(
     assert body["path"] == "/unrelated/path"
     assert body["method"] == "GET"
     # Trace dir untouched
-    assert list(trace_dir.iterdir()) == []
+    assert list(capture_dir.iterdir()) == []
 
 
 def test_two_requests_get_distinct_request_ids(
-    spy: UpstreamSpy, trace_dir: Path, proxy_client: TestClient
+    spy: UpstreamSpy, capture_dir: Path, proxy_client: TestClient
 ):
     async def responder(request):
         return JSONResponse({"id": "x", "choices": []})
@@ -242,14 +242,14 @@ def test_two_requests_get_distinct_request_ids(
     proxy_client.post(CHAT_COMPLETIONS_PATH, json=body)
     proxy_client.post(CHAT_COMPLETIONS_PATH, json=body)
 
-    req_files = sorted(trace_dir.glob("*.request.json"))
+    req_files = sorted(capture_dir.glob("*.request.json"))
     assert len(req_files) == 2
     ids = {json.loads(p.read_text())["request_id"] for p in req_files}
     assert len(ids) == 2  # distinct
 
 
 def test_malformed_request_body_still_captured(
-    spy: UpstreamSpy, trace_dir: Path, proxy_client: TestClient
+    spy: UpstreamSpy, capture_dir: Path, proxy_client: TestClient
 ):
     async def responder(request):
         return JSONResponse({"choices": []})
@@ -264,7 +264,7 @@ def test_malformed_request_body_still_captured(
     # Whether upstream accepts it is upstream's problem; we just relay.
     assert resp.status_code == 200
 
-    req_files = list(trace_dir.glob("*.request.json"))
+    req_files = list(capture_dir.glob("*.request.json"))
     assert len(req_files) == 1
     record = json.loads(req_files[0].read_text())
     # Body is preserved as a placeholder dict instead of crashing
@@ -272,7 +272,7 @@ def test_malformed_request_body_still_captured(
 
 
 def test_upstream_500_is_forwarded_and_captured(
-    spy: UpstreamSpy, trace_dir: Path, proxy_client: TestClient
+    spy: UpstreamSpy, capture_dir: Path, proxy_client: TestClient
 ):
     async def responder(request):
         return JSONResponse({"error": {"message": "boom"}}, status_code=500)
@@ -284,7 +284,7 @@ def test_upstream_500_is_forwarded_and_captured(
     assert resp.status_code == 500
     assert resp.json()["error"]["message"] == "boom"
 
-    resp_files = list(trace_dir.glob("*.response.json"))
+    resp_files = list(capture_dir.glob("*.response.json"))
     assert len(resp_files) == 1
     record = json.loads(resp_files[0].read_text())
     assert record["status_code"] == 500
@@ -292,7 +292,7 @@ def test_upstream_500_is_forwarded_and_captured(
 
 
 def test_request_id_is_consistent_across_request_and_response_files(
-    spy: UpstreamSpy, trace_dir: Path, proxy_client: TestClient
+    spy: UpstreamSpy, capture_dir: Path, proxy_client: TestClient
 ):
     async def responder(request):
         return JSONResponse({"choices": []})
@@ -303,8 +303,8 @@ def test_request_id_is_consistent_across_request_and_response_files(
         CHAT_COMPLETIONS_PATH,
         json={"model": "m", "messages": [{"role": "user", "content": "."}]},
     )
-    req_files = list(trace_dir.glob("*.request.json"))
-    resp_files = list(trace_dir.glob("*.response.json"))
+    req_files = list(capture_dir.glob("*.request.json"))
+    resp_files = list(capture_dir.glob("*.response.json"))
     assert len(req_files) == 1
     assert len(resp_files) == 1
     rid_from_req = json.loads(req_files[0].read_text())["request_id"]
@@ -315,8 +315,8 @@ def test_request_id_is_consistent_across_request_and_response_files(
     assert resp_files[0].name.startswith(rid_from_req)
 
 
-def test_trace_dir_is_created_if_missing(tmp_path: Path, spy: UpstreamSpy):
-    """make_app should create the trace dir on init."""
+def test_capture_dir_is_created_if_missing(tmp_path: Path, spy: UpstreamSpy):
+    """make_app should create the capture dir on init."""
     target = tmp_path / "does" / "not" / "exist"
     upstream_app = _build_upstream(spy)
     upstream_transport = httpx.ASGITransport(app=upstream_app)

@@ -46,8 +46,8 @@ def _build_upstream(spy: UpstreamSpy) -> Starlette:
 
 
 @pytest.fixture
-def trace_dir(tmp_path: Path) -> Path:
-    d = tmp_path / "trace"
+def capture_dir(tmp_path: Path) -> Path:
+    d = tmp_path / "capture"
     d.mkdir()
     return d
 
@@ -58,12 +58,12 @@ def spy() -> UpstreamSpy:
 
 
 @pytest.fixture
-def proxy_app(spy: UpstreamSpy, trace_dir: Path):
+def proxy_app(spy: UpstreamSpy, capture_dir: Path):
     upstream_transport = httpx.ASGITransport(app=_build_upstream(spy))
     upstream_client = httpx.AsyncClient(
         transport=upstream_transport, base_url="http://upstream"
     )
-    return make_app("http://upstream", trace_dir, client=upstream_client)
+    return make_app("http://upstream", capture_dir, client=upstream_client)
 
 
 # ---------------------------------------------------------------------------
@@ -72,7 +72,7 @@ def proxy_app(spy: UpstreamSpy, trace_dir: Path):
 
 
 def test_request_stamps_upstream_url(
-    spy: UpstreamSpy, trace_dir: Path, proxy_app
+    spy: UpstreamSpy, capture_dir: Path, proxy_app
 ):
     """Every ``.request.json`` carries the URL the proxy was forwarding
     to. Export derives the provider classification from this stamp
@@ -87,16 +87,16 @@ def test_request_stamps_upstream_url(
             json={"model": "m", "messages": [{"role": "user", "content": "."}]},
         )
 
-    req_files = list(trace_dir.glob("*.request.json"))
+    req_files = list(capture_dir.glob("*.request.json"))
     assert len(req_files) == 1
     rec = json.loads(req_files[0].read_text())
     assert rec["upstream_url"] == "http://upstream"
 
 
 def test_no_metadata_file_written(
-    spy: UpstreamSpy, trace_dir: Path, proxy_app
+    spy: UpstreamSpy, capture_dir: Path, proxy_app
 ):
-    """The trace dir contains only per-request capture files — no
+    """The capture dir contains only per-request capture files — no
     ``_proxy.json``, no ``_meta.json``, nothing else."""
     async def responder(request):
         return JSONResponse({"id": "x", "model": "m", "choices": []})
@@ -108,7 +108,7 @@ def test_no_metadata_file_written(
             json={"model": "m", "messages": [{"role": "user", "content": "."}]},
         )
 
-    names = sorted(p.name for p in trace_dir.iterdir())
+    names = sorted(p.name for p in capture_dir.iterdir())
     # One .request.json + one .response.json, nothing else.
     assert len(names) == 2
     assert all(
@@ -123,7 +123,7 @@ def test_no_metadata_file_written(
 
 
 def test_response_fingerprint_extracted_from_upstream_headers(
-    spy: UpstreamSpy, trace_dir: Path, proxy_app
+    spy: UpstreamSpy, capture_dir: Path, proxy_app
 ):
     async def responder(request):
         return JSONResponse(
@@ -143,7 +143,7 @@ def test_response_fingerprint_extracted_from_upstream_headers(
         )
         assert resp.status_code == 200
 
-    resp_files = list(trace_dir.glob("*.response.json"))
+    resp_files = list(capture_dir.glob("*.response.json"))
     assert len(resp_files) == 1
     rec = json.loads(resp_files[0].read_text())
     fp = rec["upstream_fingerprint"]
@@ -154,7 +154,7 @@ def test_response_fingerprint_extracted_from_upstream_headers(
 
 
 def test_streaming_response_fingerprint_picks_model_from_first_chunk(
-    spy: UpstreamSpy, trace_dir: Path, proxy_app
+    spy: UpstreamSpy, capture_dir: Path, proxy_app
 ):
     """For SSE responses the body isn't a single dict; extract ``model``
     from the first parseable ``data:`` payload."""
@@ -184,7 +184,7 @@ def test_streaming_response_fingerprint_picks_model_from_first_chunk(
             for _ in resp.iter_bytes():
                 pass
 
-    rec = json.loads(next(trace_dir.glob("*.response.json")).read_text())
+    rec = json.loads(next(capture_dir.glob("*.response.json")).read_text())
     assert rec["stream"] is True
     assert rec["upstream_fingerprint"]["served_model"] == "qwen-served"
     assert rec["upstream_fingerprint"]["server"] == "llama.cpp"
@@ -198,15 +198,15 @@ def test_streaming_response_fingerprint_picks_model_from_first_chunk(
 def test_detect_provider_columns_derives_from_request_stamp(tmp_path: Path):
     from agentcap.export import detect_provider_columns
 
-    trace = tmp_path / "t"
-    trace.mkdir()
-    (trace / "rid.request.json").write_text(json.dumps({
+    capture = tmp_path / "t"
+    capture.mkdir()
+    (capture / "rid.request.json").write_text(json.dumps({
         "request_id": "rid",
         "captured_at": 1,
         "upstream_url": "https://router.huggingface.co",
         "body": {"model": "meta-llama/Llama-3.3-70B:fireworks-ai", "messages": []},
     }))
-    cols = detect_provider_columns(trace)
+    cols = detect_provider_columns(capture)
     assert cols["upstream_url"] == "https://router.huggingface.co"
     assert cols["provider"] == "hf-router/fireworks-ai"
 
@@ -214,37 +214,37 @@ def test_detect_provider_columns_derives_from_request_stamp(tmp_path: Path):
 def test_detect_provider_columns_local_upstream(tmp_path: Path):
     from agentcap.export import detect_provider_columns
 
-    trace = tmp_path / "t"
-    trace.mkdir()
-    (trace / "rid.request.json").write_text(json.dumps({
+    capture = tmp_path / "t"
+    capture.mkdir()
+    (capture / "rid.request.json").write_text(json.dumps({
         "request_id": "rid",
         "captured_at": 1,
         "upstream_url": "http://127.0.0.1:8000",
         "body": {"model": "qwen-test", "messages": []},
     }))
-    cols = detect_provider_columns(trace)
+    cols = detect_provider_columns(capture)
     assert cols["provider"] == "local"
 
 
-def test_detect_provider_columns_empty_for_legacy_trace(tmp_path: Path):
+def test_detect_provider_columns_empty_for_legacy_capture(tmp_path: Path):
     """Trace dir from before the proxy started stamping upstream_url —
     no way to derive the column, return empty so the parquet schema
     just omits it."""
     from agentcap.export import detect_provider_columns
 
-    trace = tmp_path / "t"
-    trace.mkdir()
-    (trace / "rid.request.json").write_text(json.dumps({
+    capture = tmp_path / "t"
+    capture.mkdir()
+    (capture / "rid.request.json").write_text(json.dumps({
         "request_id": "rid",
         "captured_at": 1,
         "body": {"model": "m", "messages": []},
     }))
-    assert detect_provider_columns(trace) == {}
+    assert detect_provider_columns(capture) == {}
 
 
 def test_detect_provider_columns_no_requests(tmp_path: Path):
     from agentcap.export import detect_provider_columns
 
-    trace = tmp_path / "t"
-    trace.mkdir()
-    assert detect_provider_columns(trace) == {}
+    capture = tmp_path / "t"
+    capture.mkdir()
+    assert detect_provider_columns(capture) == {}

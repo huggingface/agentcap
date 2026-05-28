@@ -158,5 +158,5 @@ fi
 
 agentcap run "${ARGS[@]}"
 
-echo "done. traces in $WORKDIR/traces, summary in $WORKDIR/run.json"
+echo "done. captures in $WORKDIR/captures, summary in $WORKDIR/run.json"
 echo "next: $HERE/export.sh \"$WORKDIR\"   # render + push to the corpus bucket"

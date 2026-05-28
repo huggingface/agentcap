@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Render the traces from a `run.sh` workdir into parquet and (by
+# Render the captures from a `run.sh` workdir into parquet and (by
 # default) push to the agentcap-traces Storage Bucket. Wraps `agentcap
 # export` with the conventions this corpus has settled on:
 #
@@ -9,7 +9,7 @@
 #     <prefix>/train-<agent>-<model>-<provider>-<ts>-<hex>.parquet
 #
 # Prereqs:
-#   1. A trace dir from `run.sh` (i.e. <WORKDIR>/traces with one
+#   1. A capture dir from `run.sh` (i.e. <WORKDIR>/captures with one
 #      *.request.json + *.response.json pair per captured request).
 #      <WORKDIR>/run.json carries the agent name; this script reads
 #      it for the --agent argument.
@@ -19,7 +19,7 @@
 #   ./export.sh [WORKDIR] [--agent <name>] [--model <id>] [--output <path> | --push <uri>]
 #
 # Examples:
-#   # Push the latest run's traces to the default corpus bucket:
+#   # Push the latest run's captures to the default corpus bucket:
 #   ./export.sh
 #
 #   # Specific workdir, explicit HF model id (override or fill-in when
@@ -77,9 +77,9 @@ if [[ -z "$WORKDIR" ]]; then
     echo "auto-selected latest workdir: $WORKDIR" >&2
 fi
 
-TRACES="$WORKDIR/traces"
-if [[ ! -d "$TRACES" ]]; then
-    echo "ERROR: $TRACES is not a directory." >&2
+CAPTURES="$WORKDIR/captures"
+if [[ ! -d "$CAPTURES" ]]; then
+    echo "ERROR: $CAPTURES is not a directory." >&2
     exit 2
 fi
 
@@ -92,7 +92,7 @@ if [[ -z "$OUTPUT" && -z "$PUSH" ]]; then
     PUSH="$BUCKET"
 fi
 
-ARGS=("$TRACES")
+ARGS=("$CAPTURES")
 [[ -n "$AGENT"  ]] && ARGS+=(--agent  "$AGENT")
 [[ -n "$MODEL"  ]] && ARGS+=(--model  "$MODEL")
 [[ -n "$OUTPUT" ]] && ARGS+=(--output "$OUTPUT")

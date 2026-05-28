@@ -30,9 +30,3 @@ otherwise set `TRANSFORMERS_CHECKOUT=<path>`.
 ```
 
 `./run.sh --help` and `./export.sh --help` for the env-var knobs.
-
-## Browse the parquets
-
-[`tools/viz/browse-parquets.ipynb`](../../tools/viz/browse-parquets.ipynb)
-— load a bucket prefix with `load_dataset` and walk through a
-captured chat-completion call.

@@ -140,7 +140,7 @@ def _build_upstream(spy: UpstreamSpy) -> Starlette:
 
 
 # ---------------------------------------------------------------------------
-# Fixtures — two real uvicorn servers + a clean trace dir per test
+# Fixtures — two real uvicorn servers + a clean capture dir per test
 # ---------------------------------------------------------------------------
 
 
@@ -150,8 +150,8 @@ def spy() -> UpstreamSpy:
 
 
 @pytest.fixture
-def trace_dir(tmp_path: Path) -> Path:
-    d = tmp_path / "trace"
+def capture_dir(tmp_path: Path) -> Path:
+    d = tmp_path / "capture"
     d.mkdir()
     return d
 
@@ -165,10 +165,10 @@ def upstream(spy: UpstreamSpy):
 
 
 @pytest.fixture
-def proxy(upstream: UvicornThreadServer, trace_dir: Path):
+def proxy(upstream: UvicornThreadServer, capture_dir: Path):
     # Real proxy → real upstream URL. No client injection: the proxy
     # creates its own httpx.AsyncClient and dials over TCP loopback.
-    proxy_app = make_app(upstream.url, trace_dir)
+    proxy_app = make_app(upstream.url, capture_dir)
     server = UvicornThreadServer(proxy_app)
     server.start()
     yield server
@@ -181,7 +181,7 @@ def proxy(upstream: UvicornThreadServer, trace_dir: Path):
 
 
 def test_chat_nonstreaming_over_real_http(
-    spy: UpstreamSpy, trace_dir: Path, proxy: UvicornThreadServer
+    spy: UpstreamSpy, capture_dir: Path, proxy: UvicornThreadServer
 ):
     async def responder(request):
         return JSONResponse(
@@ -208,8 +208,8 @@ def test_chat_nonstreaming_over_real_http(
     assert spy.received_bodies == [body]
 
     # Trace dir got both files
-    req_files = list(trace_dir.glob("*.request.json"))
-    resp_files = list(trace_dir.glob("*.response.json"))
+    req_files = list(capture_dir.glob("*.request.json"))
+    resp_files = list(capture_dir.glob("*.response.json"))
     assert len(req_files) == 1 and len(resp_files) == 1
     assert json.loads(req_files[0].read_text())["body"] == body
     assert (
@@ -219,7 +219,7 @@ def test_chat_nonstreaming_over_real_http(
 
 
 def test_chat_streaming_over_real_http(
-    spy: UpstreamSpy, trace_dir: Path, proxy: UvicornThreadServer
+    spy: UpstreamSpy, capture_dir: Path, proxy: UvicornThreadServer
 ):
     sse_chunks = [
         b'data: {"choices":[{"delta":{"role":"assistant"}}]}\n\n',
@@ -253,7 +253,7 @@ def test_chat_streaming_over_real_http(
     expected = b"".join(sse_chunks)
     assert bytes(received) == expected
 
-    resp_files = list(trace_dir.glob("*.response.json"))
+    resp_files = list(capture_dir.glob("*.response.json"))
     assert len(resp_files) == 1
     record = json.loads(resp_files[0].read_text())
     assert record["stream"] is True
@@ -262,7 +262,7 @@ def test_chat_streaming_over_real_http(
 
 
 def test_passthrough_over_real_http_does_not_capture(
-    spy: UpstreamSpy, trace_dir: Path, proxy: UvicornThreadServer
+    spy: UpstreamSpy, capture_dir: Path, proxy: UvicornThreadServer
 ):
     with httpx.Client(timeout=10.0) as client:
         resp = client.get(f"{proxy.url}/v1/models")
@@ -271,6 +271,6 @@ def test_passthrough_over_real_http_does_not_capture(
         "object": "list",
         "data": [{"id": "real-mock", "object": "model"}],
     }
-    # Upstream got the call, trace dir untouched
+    # Upstream got the call, capture dir untouched
     assert "/v1/models" in spy.received_paths
-    assert list(trace_dir.iterdir()) == []
+    assert list(capture_dir.iterdir()) == []

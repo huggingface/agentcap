@@ -18,7 +18,7 @@ The loop:
 
 Each stage is independently usable. The capture proxy can sit in
 front of any agent you drive yourself. The export reads any
-agentcap-compatible trace dir. The corpus is just a `tasks.txt`.
+agentcap-compatible capture dir. The corpus is just a `tasks.txt`.
 
 ## What this repo provides
 
@@ -35,7 +35,7 @@ agentcap-compatible trace dir. The corpus is just a `tasks.txt`.
    that speaks `/v1/chat/completions`. Capture is intentionally
    dumb — no tokenizer, no rendering, just persist the bytes.
 3. **Dataset export** (`agentcap export`) — bundles the captured
-   trace dir into a parquet, one row per chat-completion request.
+   capture dir into a parquet, one row per chat-completion request.
    Push directly to a Hugging Face Storage Bucket, append-by-prefix,
    Xet-deduplicated. The default filename embeds `(agent, model,
    provider)` so a single prefix holds many tuples without aliasing.
@@ -56,7 +56,7 @@ A consumer side, separately:
   │  corpus ──► [agent CLI inside sandbox] ──HTTP──► [capture proxy] ──┐ │
   │       ▲             │                                  │            ▼│
   │       │             ▼                                  ▼       [model│
-  │       │   final response text          <trace-dir>/*.{req,resp}.json server]
+  │       │   final response text          <capture-dir>/*.{req,resp}.json server]
   │       │             │                                          ▲     │
   │       │             ▼                                          │     │
   │       └── [follow-up synthesizer] ─────── HTTP (bypasses proxy)┘     │
@@ -73,7 +73,7 @@ A consumer side, separately:
 ```
 
 The synthesizer talks to the model server **directly**, around the
-capture proxy, so the trace stays a clean record of agent ↔ model
+capture proxy, so the capture stays a clean record of agent ↔ model
 interaction; the synthesizer's own LLM calls are an orchestration
 detail and never land in the dataset.
 
@@ -89,7 +89,7 @@ in this repo.
 ## Why model + agent identity matters
 
 Two different models running the same agent produce **different**
-traces: the chat template is model-specific, so token boundaries,
+captures: the chat template is model-specific, so token boundaries,
 special tokens, and tools-schema injection points all differ. The
 agent's system prompt and tools also vary by build (Hermes, OpenCode,
 Goose, … each emit their own).
@@ -175,7 +175,7 @@ agentcap run \
     --turns 4 --followup synthesized \
     --workdir runs/router-qwen3/
 
-agentcap export runs/run-001/traces \
+agentcap export runs/run-001/captures \
     --output runs/run-001.parquet
 ```
 
@@ -200,8 +200,8 @@ Bucket](https://huggingface.co/docs/hub/storage-buckets) — mutable,
 append-by-prefix, Xet-deduplicated:
 
 ```bash
-agentcap export <trace-dir> \
-    --push hf://buckets/my-org/my-traces/<corpus>/ \
+agentcap export <capture-dir> \
+    --push hf://buckets/my-org/my-captures/<corpus>/ \
     --agent hermes
 ```
 
@@ -209,7 +209,7 @@ Each run lands as a unique parquet file under the supplied prefix.
 The default filename embeds `(agent, model, provider)` so a single
 bucket prefix can hold many tuples without aliasing —
 `train-<agent>-<model>-<provider>-YYYYMMDDTHHMMSS-HEX6.parquet`.
-`--agent` is supplied by the caller (the trace dir has no in-band
+`--agent` is supplied by the caller (the capture dir has no in-band
 source for it); `<model>` and `<provider>` are derived from the
 captured requests. Consumers read the union via
 `load_dataset("hf://buckets/.../<prefix>/")`.
@@ -221,7 +221,7 @@ time. To publish a curated cut to a Dataset repo, render to
 
 ## What lands on disk
 
-Per chat-completion request, two files in `<trace-dir>/`:
+Per chat-completion request, two files in `<capture-dir>/`:
 
 - `<request_id>.request.json` — `{request_id, captured_at,
   upstream_url, body}` where `body` is the raw OpenAI request.

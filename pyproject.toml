@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
-keywords = ["llm", "agent", "trace", "dataset", "huggingface", "kv-cache"]
+keywords = ["llm", "agent", "capture", "dataset", "huggingface", "kv-cache"]
 authors = [
     { name = "David Corvoysier", email = "david@huggingface.co" },
 ]

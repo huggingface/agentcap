@@ -16,7 +16,7 @@ Three built-in strategies, in increasing order of cost / realism:
   - ``synthesized``: feeds (original task + agent's last response)
     into a separate model call to produce a realistic follow-up. The
     synthesizer call **bypasses the capture proxy** by design — its
-    requests are not part of the agent trace.
+    requests are not part of the capture.
 """
 
 from __future__ import annotations

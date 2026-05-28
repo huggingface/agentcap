@@ -52,7 +52,7 @@ Inference Providers), and any agent-specific gotchas that surfaced.
 When reporting a bug, include:
 
 - The full `agentcap` command line.
-- The trace dir's `run.json` (it has the agent, upstream, turn count).
+- The capture dir's `run.json` (it has the agent, upstream, turn count).
 - A single `.request.json` / `.response.json` pair from the failing
   turn if the issue is capture-related — the bodies are the source
   of truth.

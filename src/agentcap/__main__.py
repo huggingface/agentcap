@@ -2,7 +2,7 @@
 
 Subcommands:
 - ``agentcap proxy``  — run the capture proxy in front of a model server.
-- ``agentcap export`` — render a captured trace dir into a JSONL dataset.
+- ``agentcap export`` — render a captured capture dir into a JSONL dataset.
 - ``agentcap run``    — drive an agent CLI through a corpus.
 """
 
@@ -22,7 +22,7 @@ from .drivers import known_drivers as _known_drivers
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
 @click.version_option(__version__, prog_name="agentcap")
 def cli() -> None:
-    """agentcap: capture LLM-agent chat-completion traces."""
+    """agentcap: capture LLM-agent chat-completion bytes."""
 
 
 def _parse_listen(listen: str) -> tuple[str, int]:
@@ -90,27 +90,27 @@ def _resolve_api_key(
     help="HOST:PORT to bind the proxy on.",
 )
 @click.option(
-    "--trace-dir",
+    "--capture-dir",
     required=True,
     type=click.Path(file_okay=False, dir_okay=True, writable=True),
     help="Directory to write captured request/response JSON files into.",
 )
-def proxy_cmd(upstream: str, listen: str, trace_dir: str) -> None:
+def proxy_cmd(upstream: str, listen: str, capture_dir: str) -> None:
     """Run the capture proxy in front of a model server."""
     from .proxy import serve
 
     host, port = _parse_listen(listen)
     click.echo(
         f"agentcap proxy: forwarding {host}:{port} -> {upstream}, "
-        f"capturing to {trace_dir}",
+        f"capturing to {capture_dir}",
         err=True,
     )
-    serve(upstream=upstream, trace_dir=trace_dir, host=host, port=port)
+    serve(upstream=upstream, capture_dir=capture_dir, host=host, port=port)
 
 
 @cli.command("export")
 @click.argument(
-    "trace_dir",
+    "capture_dir",
     type=click.Path(exists=True, file_okay=False, dir_okay=True),
 )
 @click.option(
@@ -138,13 +138,13 @@ def proxy_cmd(upstream: str, listen: str, trace_dir: str) -> None:
     "in-band source for this; supply when known, leave unset otherwise.",
 )
 def export_cmd(
-    trace_dir: str,
+    capture_dir: str,
     model: str | None,
     output: str | None,
     push: str | None,
     agent: str | None,
 ) -> None:
-    """Render a captured trace dir into a parquet dataset."""
+    """Render a captured capture dir into a parquet dataset."""
     from .export import (
         _BUCKET_PREFIX,
         detect_model,
@@ -165,14 +165,14 @@ def export_cmd(
     # detect_model enforces the no-mixed-models invariant; --model
     # cannot bypass it.
     try:
-        detected = detect_model(trace_dir)
+        detected = detect_model(capture_dir)
     except ValueError as exc:
         raise click.UsageError(str(exc))
 
     if model is None:
         if detected is None:
             raise click.UsageError(
-                f"trace dir {trace_dir} has no captured requests with a "
+                f"capture dir {capture_dir} has no captured requests with a "
                 f"model field; pass --model explicitly."
             )
         model = detected
@@ -182,12 +182,12 @@ def export_cmd(
         )
 
     if output:
-        n_rows = export_local(trace_dir, output)
+        n_rows = export_local(capture_dir, output)
         click.echo(
             f"agentcap export: wrote {n_rows} rows to {output}", err=True
         )
     else:
-        n_rows = push_bucket(trace_dir, push, model=model, agent=agent)
+        n_rows = push_bucket(capture_dir, push, model=model, agent=agent)
         click.echo(
             f"agentcap export: wrote {n_rows} rows to bucket {push}", err=True
         )
@@ -206,7 +206,7 @@ def export_cmd(
     help="Model id the agent uses in its outbound requests (and that "
     "the capture proxy records as the ``model`` field). Required for "
     "all drivers — hermes used to default to its own built-in id, but "
-    "that made captured traces lie about which model was actually run.",
+    "that made captures lie about which model was actually run.",
 )
 @click.option(
     "--upstream",
@@ -236,7 +236,7 @@ def export_cmd(
     "--workdir",
     required=True,
     type=click.Path(file_okay=False, dir_okay=True),
-    help="Output directory for traces, sessions logs, and the run summary.",
+    help="Output directory for captures, session logs, and the run summary.",
 )
 @click.option(
     "--workspace",
@@ -318,7 +318,7 @@ def run_cmd(
     synth_model: str | None,
     timeout: float,
 ) -> None:
-    """Drive an agent CLI through a corpus, capture traces, summarise."""
+    """Drive an agent CLI through a corpus, capture, summarise."""
     import json
 
     from .drivers import get_driver
@@ -383,9 +383,9 @@ def run_cmd(
         click.echo(f"  [sandbox] {msg}", err=True)
 
     workdir_p = Path(workdir)
-    traces = workdir_p / "traces"
+    captures = workdir_p / "captures"
     sessions = workdir_p / "sessions"
-    traces.mkdir(parents=True, exist_ok=True)
+    captures.mkdir(parents=True, exist_ok=True)
     sessions.mkdir(parents=True, exist_ok=True)
     # Hostname classification — used by the sandbox env to pick the
     # agent's credential channel (env-var auth vs no-auth).
@@ -439,7 +439,7 @@ def run_cmd(
     orch = Orchestrator(driver, fu, sessions_dir=sessions, on_event=_on_event)
 
     try:
-        with serve_in_thread(upstream, traces, host=host, port=port):
+        with serve_in_thread(upstream, captures, host=host, port=port):
             results = orch.run_corpus(tasks, turns_per_task=turns, timeout=timeout)
     finally:
         close = getattr(driver, "close", None)

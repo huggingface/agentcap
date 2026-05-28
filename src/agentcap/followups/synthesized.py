@@ -5,7 +5,7 @@ LLM and uses the response as the next user message.
 
 By design the synthesizer call **bypasses the capture proxy** — it
 talks to the model server (or a different endpoint) directly. The
-agent trace must remain a clean record of agent↔model interaction;
+capture must remain a clean record of agent↔model interaction;
 the synthesizer is just a way to produce realistic next user inputs.
 """
 

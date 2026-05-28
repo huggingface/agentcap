@@ -200,7 +200,7 @@ def test_lima_vm_can_reach_host_server(lima_vm_for, mock_http_server):
     """End-to-end: a process inside the Lima VM can reach a server
     running on the Mac host via ``host.lima.internal``. This is the
     same network path the capture proxy will use when the agent
-    runs inside the VM — without it, the captured-trace flow is
+    runs inside the VM — without it, the capture flow is
     structurally impossible. Asserts both that the VM-side HTTP call
     succeeds AND that the host-side process saw the request."""
     vm = lima_vm_for(_SANDBOX_TEST_AGENT)

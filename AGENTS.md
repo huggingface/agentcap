@@ -46,7 +46,7 @@ explicitly first.
    per-request routing.
 
 6. **Only `/v1/chat/completions` POST is captured.** All other paths
-   pass through transparently with no trace files.
+   pass through transparently with no capture files.
 
 7. **Streaming responses: forward chunk-by-chunk, persist the
    assembled raw bytes at end-of-stream.** SSE parsing into discrete
@@ -109,7 +109,7 @@ explicitly first.
     (`<workdir>/sandbox/`), not from agentcap's invocation cwd.
     Hermes auto-injects `AGENTS.md` / `CLAUDE.md` / `.cursorrules`
     from the cwd into every system prompt; running from a project
-    dir leaks those files into every captured trace, contaminating
+    dir leaks those files into every capture, contaminating
     the dataset's "stable" prefix.
 
 11. **`--push` only writes to Storage Buckets, never to Dataset
@@ -125,7 +125,7 @@ explicitly first.
     alone tells you what's inside —
     `train-<agent>-<model>-<provider>-YYYYMMDDTHHMMSS-HEX6.parquet`.
     Each part is optional and is omitted when unknown; `agent` is
-    supplied by the caller (trace dirs have no in-band source for
+    supplied by the caller (capture dirs have no in-band source for
     it), `model` and `provider` are derived from the captured
     requests. An explicit `filename=` opts back into overwrite-in-
     place — used only for "latest" pointer files.

@@ -33,7 +33,7 @@ def test_version_flag():
     assert __version__ in result.output
 
 
-def test_proxy_requires_upstream_and_trace_dir():
+def test_proxy_requires_upstream_and_capture_dir():
     runner = CliRunner()
     result = runner.invoke(cli, ["proxy"])
     assert result.exit_code != 0
@@ -206,10 +206,10 @@ def test_run_invokes_orchestrator_under_proxy(tmp_path: Path, monkeypatch, fake_
 
 
 def test_export_requires_output_or_push(tmp_path: Path):
-    trace = tmp_path / "trace"
-    trace.mkdir()
+    capture = tmp_path / "capture"
+    capture.mkdir()
     runner = CliRunner()
-    result = runner.invoke(cli, ["export", str(trace), "--model", "m"])
+    result = runner.invoke(cli, ["export", str(capture), "--model", "m"])
     assert result.exit_code != 0
     assert "--output" in result.output or "--push" in result.output
 
@@ -271,14 +271,14 @@ def test_run_hf_router_api_key_auto_from_hf_token_env(
     assert "HF Router token source=HF_TOKEN" in result.output
 
 
-def test_export_auto_detects_model_from_traces(tmp_path: Path):
-    """When --model is omitted, the CLI infers it from the trace dir."""
+def test_export_auto_detects_model_from_captures(tmp_path: Path):
+    """When --model is omitted, the CLI infers it from the capture dir."""
     import json
 
-    trace = tmp_path / "trace"
-    trace.mkdir()
+    capture = tmp_path / "capture"
+    capture.mkdir()
     # One captured request with the model field populated.
-    (trace / "rid.request.json").write_text(
+    (capture / "rid.request.json").write_text(
         json.dumps({
             "request_id": "rid",
             "captured_at": 1,
@@ -292,7 +292,7 @@ def test_export_auto_detects_model_from_traces(tmp_path: Path):
     runner = CliRunner()
     with patch("agentcap.export.export_local", return_value=1):
         result = runner.invoke(
-            cli, ["export", str(trace), "--output", str(tmp_path / "out.parquet")]
+            cli, ["export", str(capture), "--output", str(tmp_path / "out.parquet")]
         )
     assert result.exit_code == 0, result.output
     assert "using model 'google/gemma-4-E4B-it' (auto-detected)" in result.output
@@ -302,10 +302,10 @@ def test_export_auto_detect_fails_on_mixed_models(tmp_path: Path):
     """If captures span multiple models, --model becomes mandatory."""
     import json
 
-    trace = tmp_path / "trace"
-    trace.mkdir()
+    capture = tmp_path / "capture"
+    capture.mkdir()
     for rid, model in [("a", "model-1"), ("b", "model-2")]:
-        (trace / f"{rid}.request.json").write_text(
+        (capture / f"{rid}.request.json").write_text(
             json.dumps({
                 "request_id": rid,
                 "captured_at": 1,
@@ -315,7 +315,7 @@ def test_export_auto_detect_fails_on_mixed_models(tmp_path: Path):
 
     runner = CliRunner()
     result = runner.invoke(
-        cli, ["export", str(trace), "--output", str(tmp_path / "out.jsonl")]
+        cli, ["export", str(capture), "--output", str(tmp_path / "out.jsonl")]
     )
     assert result.exit_code != 0
     assert "multiple models" in result.output
@@ -323,13 +323,13 @@ def test_export_auto_detect_fails_on_mixed_models(tmp_path: Path):
 
 def test_export_mixed_models_fail_even_with_model_flag(tmp_path: Path):
     """Datasets never mix models — --model cannot bypass the uniqueness
-    check when the trace dir itself spans multiple models."""
+    check when the capture dir itself spans multiple models."""
     import json
 
-    trace = tmp_path / "trace"
-    trace.mkdir()
+    capture = tmp_path / "capture"
+    capture.mkdir()
     for rid, model in [("a", "model-1"), ("b", "model-2")]:
-        (trace / f"{rid}.request.json").write_text(
+        (capture / f"{rid}.request.json").write_text(
             json.dumps({
                 "request_id": rid,
                 "captured_at": 1,
@@ -340,26 +340,26 @@ def test_export_mixed_models_fail_even_with_model_flag(tmp_path: Path):
     runner = CliRunner()
     result = runner.invoke(
         cli,
-        ["export", str(trace), "--model", "explicit-model",
+        ["export", str(capture), "--model", "explicit-model",
          "--output", str(tmp_path / "out.jsonl")],
     )
     assert result.exit_code != 0
     assert "multiple models" in result.output
 
 
-def test_export_explicit_model_uses_override_when_traces_uniform(tmp_path: Path):
-    """If the trace dir is uniform but --model differs, the override is
+def test_export_explicit_model_uses_override_when_captures_uniform(tmp_path: Path):
+    """If the capture dir is uniform but --model differs, the override is
     accepted (--model is now only a bucket-filename hint; the parquet's
     per-row ``model`` column still reflects the captured body.model)."""
     import json
 
-    trace = tmp_path / "trace"
-    trace.mkdir()
-    (trace / "rid.request.json").write_text(
+    capture = tmp_path / "capture"
+    capture.mkdir()
+    (capture / "rid.request.json").write_text(
         json.dumps({
             "request_id": "rid",
             "captured_at": 1,
-            "body": {"model": "trace-model", "messages": []},
+            "body": {"model": "capture-model", "messages": []},
         })
     )
 
@@ -367,7 +367,7 @@ def test_export_explicit_model_uses_override_when_traces_uniform(tmp_path: Path)
     with patch("agentcap.export.export_local", return_value=1):
         result = runner.invoke(
             cli,
-            ["export", str(trace), "--model", "override-model",
+            ["export", str(capture), "--model", "override-model",
              "--output", str(tmp_path / "out.parquet")],
         )
     assert result.exit_code == 0, result.output
@@ -375,13 +375,13 @@ def test_export_explicit_model_uses_override_when_traces_uniform(tmp_path: Path)
     assert "auto-detected" not in result.output
 
 
-def test_export_no_model_in_traces_requires_model_flag(tmp_path: Path):
+def test_export_no_model_in_captures_requires_model_flag(tmp_path: Path):
     """Trace dir with no model field at all → --model becomes mandatory."""
     import json
 
-    trace = tmp_path / "trace"
-    trace.mkdir()
-    (trace / "rid.request.json").write_text(
+    capture = tmp_path / "capture"
+    capture.mkdir()
+    (capture / "rid.request.json").write_text(
         json.dumps({
             "request_id": "rid",
             "captured_at": 1,
@@ -391,7 +391,7 @@ def test_export_no_model_in_traces_requires_model_flag(tmp_path: Path):
 
     runner = CliRunner()
     result = runner.invoke(
-        cli, ["export", str(trace), "--output", str(tmp_path / "out.jsonl")]
+        cli, ["export", str(capture), "--output", str(tmp_path / "out.jsonl")]
     )
     assert result.exit_code != 0
     assert "no captured requests with a model field" in result.output
@@ -402,9 +402,9 @@ def test_export_push_rejects_dataset_repo_uri(tmp_path: Path):
     fail with a message pointing at the local-export workflow."""
     import json
 
-    trace = tmp_path / "trace"
-    trace.mkdir()
-    (trace / "rid.request.json").write_text(
+    capture = tmp_path / "capture"
+    capture.mkdir()
+    (capture / "rid.request.json").write_text(
         json.dumps({
             "request_id": "rid",
             "captured_at": 1,
@@ -414,7 +414,7 @@ def test_export_push_rejects_dataset_repo_uri(tmp_path: Path):
 
     runner = CliRunner()
     result = runner.invoke(
-        cli, ["export", str(trace), "--push", "hf://org/some-dataset"]
+        cli, ["export", str(capture), "--push", "hf://org/some-dataset"]
     )
     assert result.exit_code != 0
     assert "bucket URIs" in result.output
@@ -425,9 +425,9 @@ def test_export_rejects_both_output_and_push(tmp_path: Path):
     """The two destinations are mutually exclusive."""
     import json
 
-    trace = tmp_path / "trace"
-    trace.mkdir()
-    (trace / "rid.request.json").write_text(
+    capture = tmp_path / "capture"
+    capture.mkdir()
+    (capture / "rid.request.json").write_text(
         json.dumps({
             "request_id": "rid",
             "captured_at": 1,
@@ -438,7 +438,7 @@ def test_export_rejects_both_output_and_push(tmp_path: Path):
     runner = CliRunner()
     result = runner.invoke(
         cli,
-        ["export", str(trace),
+        ["export", str(capture),
          "--output", str(tmp_path / "out.parquet"),
          "--push", "hf://buckets/me/b/x"],
     )

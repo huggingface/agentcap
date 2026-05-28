@@ -1,7 +1,7 @@
 """Capture proxy for OpenAI-compat chat completions.
 
 Captures ``POST /v1/chat/completions`` to
-``<trace_dir>/<request_id>.{request,response}.json``; other paths
+``<capture_dir>/<request_id>.{request,response}.json``; other paths
 pass through. Streaming responses are forwarded chunk-by-chunk and
 the assembled bytes persisted at end-of-stream.
 """
@@ -51,7 +51,7 @@ def _filter_headers(headers: Any) -> dict[str, str]:
 
 def _safe_json_loads(raw: bytes) -> Any:
     """Parse JSON; on failure, return a {"raw": <decoded>} placeholder so
-    the trace stays well-formed even on malformed input."""
+    the capture stays well-formed even on malformed input."""
     try:
         return json.loads(raw)
     except (json.JSONDecodeError, ValueError):
@@ -110,13 +110,13 @@ class CaptureProxy:
     def __init__(
         self,
         upstream: str,
-        trace_dir: Path | str,
+        capture_dir: Path | str,
         *,
         client: Optional[httpx.AsyncClient] = None,
     ) -> None:
         self.upstream = upstream.rstrip("/")
-        self.trace_dir = Path(trace_dir)
-        self.trace_dir.mkdir(parents=True, exist_ok=True)
+        self.capture_dir = Path(capture_dir)
+        self.capture_dir.mkdir(parents=True, exist_ok=True)
         self._client = client
         self._owns_client = client is None
 
@@ -131,7 +131,7 @@ class CaptureProxy:
             await self._client.aclose()
 
     def _persist_request(self, request_id: str, body_bytes: bytes, captured_at: int) -> None:
-        path = self.trace_dir / f"{request_id}.request.json"
+        path = self.capture_dir / f"{request_id}.request.json"
         record = {
             "request_id": request_id,
             "captured_at": captured_at,
@@ -150,7 +150,7 @@ class CaptureProxy:
     ) -> None:
         body = _safe_json_loads(body_bytes)
         fp = _response_fingerprint(upstream_headers, body)
-        path = self.trace_dir / f"{request_id}.response.json"
+        path = self.capture_dir / f"{request_id}.response.json"
         record = {
             "request_id": request_id,
             "captured_at_resp": captured_at,
@@ -172,7 +172,7 @@ class CaptureProxy:
         sse_model = _extract_model_from_sse(raw_bytes)
         synthetic_body = {"model": sse_model} if sse_model else None
         fp = _response_fingerprint(upstream_headers, synthetic_body)
-        path = self.trace_dir / f"{request_id}.response.json"
+        path = self.capture_dir / f"{request_id}.response.json"
         record = {
             "request_id": request_id,
             "captured_at_resp": captured_at,
@@ -285,12 +285,12 @@ class CaptureProxy:
 
 def make_app(
     upstream: str,
-    trace_dir: Path | str,
+    capture_dir: Path | str,
     *,
     client: Optional[httpx.AsyncClient] = None,
 ) -> Starlette:
     """Build the Starlette ASGI app wrapping a CaptureProxy."""
-    proxy = CaptureProxy(upstream, trace_dir, client=client)
+    proxy = CaptureProxy(upstream, capture_dir, client=client)
     routes = [
         Route(CHAT_COMPLETIONS_PATH, proxy.chat_completions, methods=["POST"]),
         Route(
@@ -316,13 +316,13 @@ def make_app(
 
 def serve(
     upstream: str,
-    trace_dir: Path | str,
+    capture_dir: Path | str,
     host: str = "127.0.0.1",
     port: int = 8001,
 ) -> None:
     import uvicorn
 
-    app = make_app(upstream, trace_dir)
+    app = make_app(upstream, capture_dir)
     uvicorn.run(app, host=host, port=port)
 
 
@@ -352,7 +352,7 @@ class ProxyHandle:
 
 def serve_in_thread(
     upstream: str,
-    trace_dir: Path | str,
+    capture_dir: Path | str,
     host: str = "127.0.0.1",
     port: int = 8001,
     *,
@@ -365,7 +365,7 @@ def serve_in_thread(
 
     import uvicorn
 
-    app = make_app(upstream, trace_dir)
+    app = make_app(upstream, capture_dir)
     config = uvicorn.Config(app, host=host, port=port, log_level=log_level)
     server = uvicorn.Server(config)
 

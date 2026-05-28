@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Render traces from an `hf-hub-session/run.sh` workdir into parquet
+# Render captures from an `hf-hub-session/run.sh` workdir into parquet
 # and push to the agentcap-traces Storage Bucket under the
 # `hf-hub-session/` prefix. Wraps `agentcap export` with the
 # corpus-specific defaults.
 #
 # Prereqs:
-#   1. A trace dir from run.sh.
+#   1. A capture dir from run.sh.
 #   2. `hf auth login` (read+write) for the target bucket.
 #
 # Usage:
@@ -57,9 +57,9 @@ if [[ -z "$WORKDIR" ]]; then
     echo "auto-selected latest workdir: $WORKDIR" >&2
 fi
 
-TRACES="$WORKDIR/traces"
-if [[ ! -d "$TRACES" ]]; then
-    echo "ERROR: $TRACES is not a directory." >&2
+CAPTURES="$WORKDIR/captures"
+if [[ ! -d "$CAPTURES" ]]; then
+    echo "ERROR: $CAPTURES is not a directory." >&2
     exit 2
 fi
 
@@ -72,7 +72,7 @@ if [[ -z "$OUTPUT" && -z "$PUSH" ]]; then
     PUSH="$BUCKET"
 fi
 
-ARGS=("$TRACES")
+ARGS=("$CAPTURES")
 [[ -n "$AGENT"  ]] && ARGS+=(--agent  "$AGENT")
 [[ -n "$MODEL"  ]] && ARGS+=(--model  "$MODEL")
 [[ -n "$OUTPUT" ]] && ARGS+=(--output "$OUTPUT")

@@ -21,11 +21,11 @@ from .provider import _hostname_fallback, refine_for_sub_provider
 _BUCKET_PREFIX = "hf://buckets/"
 
 
-def detect_provider_columns(trace_dir: Path | str) -> dict:
+def detect_provider_columns(capture_dir: Path | str) -> dict:
     """Derive ``provider`` + ``upstream_url`` from the per-request
-    ``upstream_url`` stamp. Empty dict for legacy trace dirs missing
+    ``upstream_url`` stamp. Empty dict for legacy capture dirs missing
     the stamp."""
-    for req_path in sorted(Path(trace_dir).glob("*.request.json")):
+    for req_path in sorted(Path(capture_dir).glob("*.request.json")):
         try:
             rec = json.loads(req_path.read_text())
         except (OSError, json.JSONDecodeError):
@@ -42,13 +42,13 @@ def detect_provider_columns(trace_dir: Path | str) -> dict:
     return {}
 
 
-def detect_model(trace_dir: Path | str) -> str | None:
+def detect_model(capture_dir: Path | str) -> str | None:
     """Unique ``body.model`` across all captured requests, or ``None``.
     Raises ``ValueError`` on mixed models (datasets never mix models).
     ``@revision`` suffixes are stripped."""
-    trace_dir = Path(trace_dir)
+    capture_dir = Path(capture_dir)
     seen: set[str] = set()
-    for req_path in sorted(trace_dir.glob("*.request.json")):
+    for req_path in sorted(capture_dir.glob("*.request.json")):
         try:
             rec = json.loads(req_path.read_text())
         except (OSError, json.JSONDecodeError):
@@ -58,9 +58,9 @@ def detect_model(trace_dir: Path | str) -> str | None:
             seen.add(_bare_model_id(m))
     if len(seen) > 1:
         raise ValueError(
-            f"trace dir contains requests for multiple models: "
+            f"capture dir contains requests for multiple models: "
             f"{sorted(seen)}. Datasets never mix models — split into "
-            f"separate trace dirs and export each one independently."
+            f"separate capture dirs and export each one independently."
         )
     return seen.pop() if seen else None
 
@@ -72,16 +72,16 @@ def _bare_model_id(model: str) -> str:
 
 
 def _iter_pairs(
-    trace_dir: Path,
+    capture_dir: Path,
 ) -> Iterator[tuple[str, dict, dict | None, int, dict]]:
     """Yield (request_id, request_body, response_body, captured_at,
     upstream_fingerprint) per captured request, in filename order."""
-    for req_path in sorted(trace_dir.glob("*.request.json")):
+    for req_path in sorted(capture_dir.glob("*.request.json")):
         rec = json.loads(req_path.read_text())
         rid = rec.get("request_id") or req_path.stem.split(".")[0]
         captured_at = int(rec.get("captured_at", 0))
         body = rec.get("body") or {}
-        resp_path = trace_dir / f"{rid}.response.json"
+        resp_path = capture_dir / f"{rid}.response.json"
         resp_body: dict | None = None
         upstream_fp: dict = {}
         if resp_path.exists():
@@ -124,38 +124,38 @@ def _row(
 
 
 def export_local(
-    trace_dir: Path | str,
+    capture_dir: Path | str,
     output: Path | str,
     *,
     batch_size: int = 32,
     progress: bool = True,
     provider_columns: dict | None = None,
 ) -> int:
-    """Stream the trace dir into a single parquet. Returns row count.
+    """Stream the capture dir into a single parquet. Returns row count.
     Batches via ``ParquetWriter`` so a mid-render kill leaves a valid
     parquet up to the last flushed batch."""
     import pyarrow as pa
     import pyarrow.parquet as pq
 
-    trace_dir = Path(trace_dir)
+    capture_dir = Path(capture_dir)
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     if provider_columns is None:
-        provider_columns = detect_provider_columns(trace_dir)
+        provider_columns = detect_provider_columns(capture_dir)
 
-    request_files = sorted(trace_dir.glob("*.request.json"))
+    request_files = sorted(capture_dir.glob("*.request.json"))
     total = len(request_files)
     if total == 0:
-        raise ValueError(f"no captured requests in {trace_dir}")
+        raise ValueError(f"no captured requests in {capture_dir}")
 
-    pairs_iter = _iter_pairs(trace_dir)
+    pairs_iter = _iter_pairs(capture_dir)
     if progress:
         try:
             from tqdm import tqdm
             pairs_iter = tqdm(
                 pairs_iter,
                 total=total,
-                desc=f"export {trace_dir.name}",
+                desc=f"export {capture_dir.name}",
                 unit="row",
             )
         except ImportError:
@@ -251,7 +251,7 @@ def _default_bucket_filename(
 
 
 def push_bucket(
-    trace_dir: Path | str,
+    capture_dir: Path | str,
     bucket_uri: str,
     *,
     model: str | None = None,
@@ -267,7 +267,7 @@ def push_bucket(
 
     bucket_id, prefix = parse_bucket_uri(bucket_uri)
     prefix = prefix.rstrip("/")
-    provider_columns = detect_provider_columns(trace_dir)
+    provider_columns = detect_provider_columns(capture_dir)
     if filename is None:
         filename = _default_bucket_filename(
             agent=agent,
@@ -279,7 +279,7 @@ def push_bucket(
     with tempfile.TemporaryDirectory() as tmpdir:
         local_file = Path(tmpdir) / filename
         n_rows = export_local(
-            trace_dir, local_file, provider_columns=provider_columns,
+            capture_dir, local_file, provider_columns=provider_columns,
         )
         batch_bucket_files(bucket_id, add=[(str(local_file), remote_path)])
 

@@ -224,7 +224,7 @@ def live_proxy_base_url():
         from agentcap.proxy import serve_in_thread
         upstream = f"http://127.0.0.1:{port}"
         proxy_port = _free_port()
-        trace_dir = tempfile.mkdtemp(prefix="agentcap-pytest-traces-")
+        capture_dir = tempfile.mkdtemp(prefix="agentcap-pytest-captures-")
         agent_url = (
             f"http://{_agent_reachable_host()}:{proxy_port}/v1"
         )
@@ -233,7 +233,7 @@ def live_proxy_base_url():
             f"-> {upstream} (agents reach it at {agent_url})"
         )
         with serve_in_thread(
-            upstream, trace_dir,
+            upstream, capture_dir,
             host="0.0.0.0", port=proxy_port,
         ):
             yield agent_url

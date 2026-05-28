@@ -2,7 +2,7 @@
 
 The export layer is a pure data shuffle — no rendering, no tokenization
 — so the tests only need to assert that captured request/response files
-in the trace dir come out as parquet rows with the expected metadata
+in the capture dir come out as parquet rows with the expected metadata
 columns. No fake processor needed.
 """
 
@@ -24,7 +24,7 @@ from agentcap.export import (
 
 
 def _write_capture(
-    trace_dir: Path,
+    capture_dir: Path,
     rid: str,
     body: dict,
     response: dict,
@@ -32,7 +32,7 @@ def _write_capture(
     upstream_url: str = "http://127.0.0.1:8000",
     upstream_fingerprint: dict | None = None,
 ) -> None:
-    (trace_dir / f"{rid}.request.json").write_text(
+    (capture_dir / f"{rid}.request.json").write_text(
         json.dumps({
             "request_id": rid,
             "captured_at": 1000,
@@ -40,7 +40,7 @@ def _write_capture(
             "body": body,
         })
     )
-    (trace_dir / f"{rid}.response.json").write_text(
+    (capture_dir / f"{rid}.response.json").write_text(
         json.dumps({
             "request_id": rid,
             "captured_at_resp": 1001,
@@ -112,45 +112,45 @@ def test_row_empty_response_serialises_to_empty_object():
 
 
 def test_detect_model_returns_unique_model(tmp_path: Path):
-    trace = tmp_path / "trace"
-    trace.mkdir()
+    capture = tmp_path / "capture"
+    capture.mkdir()
     body = {"model": "google/gemma-4-E4B-it", "messages": []}
-    _write_capture(trace, "a", body, {"choices": []})
-    _write_capture(trace, "b", body, {"choices": []})
-    assert detect_model(trace) == "google/gemma-4-E4B-it"
+    _write_capture(capture, "a", body, {"choices": []})
+    _write_capture(capture, "b", body, {"choices": []})
+    assert detect_model(capture) == "google/gemma-4-E4B-it"
 
 
 def test_detect_model_strips_revision_suffix(tmp_path: Path):
-    trace = tmp_path / "trace"
-    trace.mkdir()
-    _write_capture(trace, "a", {"model": "google/gemma-4-E4B-it", "messages": []}, {})
-    _write_capture(trace, "b", {"model": "google/gemma-4-E4B-it@main", "messages": []}, {})
-    assert detect_model(trace) == "google/gemma-4-E4B-it"
+    capture = tmp_path / "capture"
+    capture.mkdir()
+    _write_capture(capture, "a", {"model": "google/gemma-4-E4B-it", "messages": []}, {})
+    _write_capture(capture, "b", {"model": "google/gemma-4-E4B-it@main", "messages": []}, {})
+    assert detect_model(capture) == "google/gemma-4-E4B-it"
 
 
 def test_detect_model_raises_on_mixed_models(tmp_path: Path):
-    trace = tmp_path / "trace"
-    trace.mkdir()
-    _write_capture(trace, "a", {"model": "google/gemma-4-E4B-it", "messages": []}, {})
-    _write_capture(trace, "b", {"model": "Qwen/Qwen3-7B", "messages": []}, {})
+    capture = tmp_path / "capture"
+    capture.mkdir()
+    _write_capture(capture, "a", {"model": "google/gemma-4-E4B-it", "messages": []}, {})
+    _write_capture(capture, "b", {"model": "Qwen/Qwen3-7B", "messages": []}, {})
     with pytest.raises(ValueError) as exc_info:
-        detect_model(trace)
+        detect_model(capture)
     assert "multiple models" in str(exc_info.value)
 
 
-def test_detect_model_returns_none_on_empty_trace_dir(tmp_path: Path):
-    trace = tmp_path / "trace"
-    trace.mkdir()
-    assert detect_model(trace) is None
+def test_detect_model_returns_none_on_empty_capture_dir(tmp_path: Path):
+    capture = tmp_path / "capture"
+    capture.mkdir()
+    assert detect_model(capture) is None
 
 
 def test_detect_model_returns_none_when_no_request_has_model_field(tmp_path: Path):
-    trace = tmp_path / "trace"
-    trace.mkdir()
-    (trace / "rid.request.json").write_text(
+    capture = tmp_path / "capture"
+    capture.mkdir()
+    (capture / "rid.request.json").write_text(
         json.dumps({"request_id": "rid", "captured_at": 1, "body": {"messages": []}})
     )
-    assert detect_model(trace) is None
+    assert detect_model(capture) is None
 
 
 # ---------------------------------------------------------------------------
@@ -159,37 +159,37 @@ def test_detect_model_returns_none_when_no_request_has_model_field(tmp_path: Pat
 
 
 def test_detect_provider_columns_hostname_classification(tmp_path: Path):
-    trace = tmp_path / "trace"
-    trace.mkdir()
+    capture = tmp_path / "capture"
+    capture.mkdir()
     _write_capture(
-        trace, "rid", _BODY, {},
+        capture, "rid", _BODY, {},
         upstream_url="http://127.0.0.1:8000",
     )
-    cols = detect_provider_columns(trace)
+    cols = detect_provider_columns(capture)
     assert cols == {"provider": "local", "upstream_url": "http://127.0.0.1:8000"}
 
 
 def test_detect_provider_columns_hf_router_sub_provider_refinement(tmp_path: Path):
-    trace = tmp_path / "trace"
-    trace.mkdir()
+    capture = tmp_path / "capture"
+    capture.mkdir()
     _write_capture(
-        trace, "rid",
+        capture, "rid",
         {"model": "meta-llama/Llama-3.3-70B:fireworks-ai", "messages": []},
         {},
         upstream_url="https://router.huggingface.co",
     )
-    cols = detect_provider_columns(trace)
+    cols = detect_provider_columns(capture)
     assert cols["provider"] == "hf-router/fireworks-ai"
     assert cols["upstream_url"] == "https://router.huggingface.co"
 
 
 def test_detect_provider_columns_empty_when_no_upstream_stamp(tmp_path: Path):
-    trace = tmp_path / "trace"
-    trace.mkdir()
-    (trace / "rid.request.json").write_text(
+    capture = tmp_path / "capture"
+    capture.mkdir()
+    (capture / "rid.request.json").write_text(
         json.dumps({"request_id": "rid", "captured_at": 1, "body": _BODY})
     )
-    assert detect_provider_columns(trace) == {}
+    assert detect_provider_columns(capture) == {}
 
 
 # ---------------------------------------------------------------------------
@@ -224,10 +224,10 @@ def test_push_bucket_writes_parquet_to_prefix(tmp_path: Path, monkeypatch):
 
     import pyarrow.parquet as pq
 
-    trace = tmp_path / "trace"
-    trace.mkdir()
-    _write_capture(trace, "rid1", _BODY, {"choices": []})
-    _write_capture(trace, "rid2", _BODY, {"choices": []})
+    capture = tmp_path / "capture"
+    capture.mkdir()
+    _write_capture(capture, "rid1", _BODY, {"choices": []})
+    _write_capture(capture, "rid2", _BODY, {"choices": []})
 
     captured: dict = {}
 
@@ -248,7 +248,7 @@ def test_push_bucket_writes_parquet_to_prefix(tmp_path: Path, monkeypatch):
     )
 
     push_bucket(
-        trace, "hf://buckets/me/my-bucket/runs/abc",
+        capture, "hf://buckets/me/my-bucket/runs/abc",
         model="google/gemma-4-E4B-it",
     )
 
@@ -274,9 +274,9 @@ def test_push_bucket_default_filenames_are_unique_across_calls(
     tmp_path: Path, monkeypatch
 ):
     """Two consecutive pushes to the same prefix must not collide."""
-    trace = tmp_path / "trace"
-    trace.mkdir()
-    _write_capture(trace, "rid", _BODY, {})
+    capture = tmp_path / "capture"
+    capture.mkdir()
+    _write_capture(capture, "rid", _BODY, {})
 
     seen_paths: list[str] = []
 
@@ -289,16 +289,16 @@ def test_push_bucket_default_filenames_are_unique_across_calls(
     )
 
     for _ in range(3):
-        push_bucket(trace, "hf://buckets/me/b/prefix", model="m")
+        push_bucket(capture, "hf://buckets/me/b/prefix", model="m")
     assert len(set(seen_paths)) == 3, f"filenames collided: {seen_paths}"
 
 
 def test_push_bucket_explicit_filename_overrides_default(
     tmp_path: Path, monkeypatch
 ):
-    trace = tmp_path / "trace"
-    trace.mkdir()
-    _write_capture(trace, "rid", _BODY, {})
+    capture = tmp_path / "capture"
+    capture.mkdir()
+    _write_capture(capture, "rid", _BODY, {})
 
     captured: dict = {}
 
@@ -310,7 +310,7 @@ def test_push_bucket_explicit_filename_overrides_default(
     )
 
     push_bucket(
-        trace, "hf://buckets/me/my-bucket/runs",
+        capture, "hf://buckets/me/my-bucket/runs",
         model="m", filename="latest.parquet",
     )
     assert captured["remote_paths"] == ["runs/latest.parquet"]
@@ -321,9 +321,9 @@ def test_push_bucket_default_filename_embeds_agent_and_slugs_model(
 ):
     import re
 
-    trace = tmp_path / "trace"
-    trace.mkdir()
-    _write_capture(trace, "rid", _BODY, {})
+    capture = tmp_path / "capture"
+    capture.mkdir()
+    _write_capture(capture, "rid", _BODY, {})
 
     captured: dict = {}
 
@@ -335,7 +335,7 @@ def test_push_bucket_default_filename_embeds_agent_and_slugs_model(
     )
 
     push_bucket(
-        trace, "hf://buckets/me/my-bucket/runs",
+        capture, "hf://buckets/me/my-bucket/runs",
         model="google/gemma-4-E4B-it",
         agent="goose",
     )
@@ -357,16 +357,16 @@ def test_export_local_round_trip(tmp_path: Path):
     that request JSON survives serialisation."""
     import pyarrow.parquet as pq
 
-    trace = tmp_path / "trace"
-    trace.mkdir()
+    capture = tmp_path / "capture"
+    capture.mkdir()
     _write_capture(
-        trace, "ra", _BODY, {"choices": [{"index": 0}]},
+        capture, "ra", _BODY, {"choices": [{"index": 0}]},
         upstream_fingerprint={"x_served_by": "pod-7", "served_model": "gemma"},
     )
-    _write_capture(trace, "rb", _BODY, {"choices": [{"index": 0}]})
+    _write_capture(capture, "rb", _BODY, {"choices": [{"index": 0}]})
 
     out = tmp_path / "rows.parquet"
-    n_rows = export_local(trace, out, progress=False)
+    n_rows = export_local(capture, out, progress=False)
     assert n_rows == 2
 
     table = pq.read_table(out)

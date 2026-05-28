@@ -15,7 +15,7 @@ record.
   via `transformers.AutoTokenizer.apply_chat_template`. The raw
   request and response bytes are preserved verbatim per row so
   consumers can re-render on their own terms.
-- `_proxy.json` and the in-trace-dir metadata file dropped. The
+- `_proxy.json` and the in-capture-dir metadata file dropped. The
   capture proxy now stamps `upstream_url` onto every
   `.request.json` and the export layer derives `provider` from
   that. Agent identity is supplied at export time via
