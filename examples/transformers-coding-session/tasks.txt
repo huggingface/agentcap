@@ -1,6 +1,9 @@
 # 30 transformers-issue-style prompts. Open-ended planning /
 # diagnostic questions over huggingface/transformers that are
 # realistic to drive an agent through several turns of follow-up.
+#
+# Drafted by an LLM from open issues and pull requests in
+# huggingface/transformers.
 
 I want to add a new model architecture with a custom attention variant. Walk me through where it has to plug in across modeling code, tokenizer, and the auto-classes.
 We're seeing a regression in `generate()` throughput after a recent refactor. How would I bisect to find the offending change?

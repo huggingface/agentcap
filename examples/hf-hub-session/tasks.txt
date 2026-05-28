@@ -3,6 +3,9 @@
 # expected to use `hf` CLI tools, the `huggingface_hub` SDK, or HTTPS
 # calls to https://huggingface.co/api/... and webfetch on the Hub
 # docs at https://huggingface.co/docs/hub.
+#
+# Drafted by an LLM from the Hub docs and the HF Forum
+# (https://discuss.huggingface.co/).
 
 I want to upload my first model to the Hub. Walk me through the steps from `hf auth login` to the final push.
 We're building a Gradio Space that loads a Hub-hosted model. Plan the repo layout and the SDK choice.
