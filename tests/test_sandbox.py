@@ -10,7 +10,6 @@ from __future__ import annotations
 import platform
 import shutil
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 

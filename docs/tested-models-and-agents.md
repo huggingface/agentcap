@@ -4,7 +4,7 @@ What has been verified end-to-end through agentcap. Each cell is one
 observed (model, agent) tuple at a single point in time — re-run if
 the model card or agent revs.
 
-| model (Q4_K_M)                  | Hermes | Goose | pi-mono | OpenCode |
+| model (Q4_K_M)                  | hermes | goose | pi | opencode |
 |---|:-:|:-:|:-:|:-:|
 | `Qwen3-Coder-30B-A3B-Instruct`  | ✅¹ | — | — | — |
 | `Qwen3.6-35B-A3B`               | ✅ | ✅ | ✅ | ✅ |

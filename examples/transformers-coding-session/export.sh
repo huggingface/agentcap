@@ -4,22 +4,19 @@
 # export` with the conventions this corpus has settled on:
 #
 #   - bucket prefix per corpus (`transformers-coding-session/`)
-#   - default filename embeds (agent, model) so a single prefix can
-#     hold many tuples side by side: render lands at
-#     <prefix>/train-<agent>-<model>-<ts>-<hex>.parquet
+#   - default filename embeds (agent, model, provider) so a single
+#     prefix can hold many tuples side by side:
+#     <prefix>/train-<agent>-<model>-<provider>-<ts>-<hex>.parquet
 #
 # Prereqs:
 #   1. A trace dir from `run.sh` (i.e. <WORKDIR>/traces with one
-#      *.request.json + *.response.json pair per captured request, and
-#      ideally <WORKDIR>/traces/_proxy.json so the agent name is
-#      auto-detected).
-#   2. No GPU-bound model server active on the same host. transformers'
-#      CUDA init during tokenizer/processor load crashes a co-running
-#      llama-server. Tear down the capture run before exporting.
-#   3. `hf auth login` (read+write) for the target bucket.
+#      *.request.json + *.response.json pair per captured request).
+#      <WORKDIR>/run.json carries the agent name; this script reads
+#      it for the --agent argument.
+#   2. `hf auth login` (read+write) for the target bucket.
 #
 # Usage:
-#   ./export.sh [WORKDIR] [--model <id>] [--output <path> | --push <uri>]
+#   ./export.sh [WORKDIR] [--agent <name>] [--model <id>] [--output <path> | --push <uri>]
 #
 # Examples:
 #   # Push the latest run's traces to the default corpus bucket:
@@ -33,11 +30,13 @@
 #   # Local parquet instead of bucket push:
 #   ./export.sh --output /tmp/run.parquet
 #
+# --agent is read from <WORKDIR>/run.json when present (run.sh writes
+# it there); pass --agent explicitly to override.
+#
 # Env knobs:
-#   BUCKET         default `--push` URI when --push/--output not given.
-#                  hf://buckets/dacorvo/agentcap-traces/transformers-coding-session/
-#   WORKERS        parallel render workers (default 8).
-#   AGENTCAP       path to the agentcap binary; default: `agentcap` on PATH
+#   BUCKET    default `--push` URI when --push/--output not given.
+#             hf://buckets/dacorvo/agentcap-traces/transformers-coding-session/
+#   AGENTCAP  path to the agentcap binary; default: `agentcap` on PATH
 
 set -euo pipefail
 
@@ -45,14 +44,15 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 DEFAULT_BUCKET="hf://buckets/dacorvo/agentcap-traces/transformers-coding-session/"
 AGENTCAP="${AGENTCAP:-agentcap}"
 BUCKET="${BUCKET:-$DEFAULT_BUCKET}"
-WORKERS="${WORKERS:-8}"
 
 WORKDIR=""
+AGENT=""
 MODEL=""
 OUTPUT=""
 PUSH=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --agent)  AGENT="$2"; shift 2 ;;
         --model)  MODEL="$2"; shift 2 ;;
         --output) OUTPUT="$2"; shift 2 ;;
         --push)   PUSH="$2"; shift 2 ;;
@@ -83,11 +83,17 @@ if [[ ! -d "$TRACES" ]]; then
     exit 2
 fi
 
+# Recover --agent from run.json (run.sh wrote it) unless caller overrode.
+if [[ -z "$AGENT" && -f "$WORKDIR/run.json" ]]; then
+    AGENT="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("agent",""))' "$WORKDIR/run.json" 2>/dev/null || true)"
+fi
+
 if [[ -z "$OUTPUT" && -z "$PUSH" ]]; then
     PUSH="$BUCKET"
 fi
 
-ARGS=("$TRACES" --workers "$WORKERS")
+ARGS=("$TRACES")
+[[ -n "$AGENT"  ]] && ARGS+=(--agent  "$AGENT")
 [[ -n "$MODEL"  ]] && ARGS+=(--model  "$MODEL")
 [[ -n "$OUTPUT" ]] && ARGS+=(--output "$OUTPUT")
 [[ -n "$PUSH"   ]] && ARGS+=(--push   "$PUSH")

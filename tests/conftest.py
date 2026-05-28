@@ -1,36 +1,12 @@
-"""Shared fixtures.
+"""Shared pytest fixtures.
 
-The ``agentcap_image_for`` fixture (per-agent buildah image lifecycle)
-is registered via ``pytest_plugins`` below; its body and the matching
-CLI ``python tests/fixtures/sandbox_images.py`` both live in
-``tests/fixtures/sandbox_images.py``.
+Live tests run when prereqs are present, skip otherwise. Prereqs:
 
-Live driver tests need an agent binary plus a reachable OpenAI-compat
-``/v1`` endpoint. Both are env-gated; missing prereqs mean the test
-skips. See README ``Running tests`` for full setup.
-
-Endpoint resolution, in order:
-
-  1. ``AGENTCAP_TEST_LLM_URL`` set         -> use it as-is.
-  2. ``llama-server`` on PATH              -> spin a session-scoped
-                                              llama-server. The GGUF
-                                              is fetched from HF Hub
-                                              (cached) if not given.
-  3. otherwise                             -> skip.
-
-By default, the fixture fetches ``unsloth/gemma-4-E4B-it-GGUF``
-(smallest tool-call-capable model on the reference rig) via
-``huggingface_hub.hf_hub_download``; HF caches it in
-``~/.cache/huggingface/`` so subsequent runs are instant.
-
-Env-var overrides:
-
-  ``AGENTCAP_TEST_LLM_URL``     OpenAI-compat /v1 base URL (skips llama-server)
-  ``AGENTCAP_TEST_GGUF``        local GGUF path (skip the HF fetch)
-  ``AGENTCAP_TEST_LLAMA_BIN``   llama-server path (overrides PATH lookup)
-  ``AGENTCAP_TEST_NGL``         ``--n-gpu-layers`` (default 999; 0=CPU)
-  ``AGENTCAP_TEST_CTX_SIZE``    llama-server ctx-size (default 8192)
-  ``AGENTCAP_TEST_MODEL``       model alias agents send (default gemma-4-E4B-it)
+  - Agent binary present in the per-agent sandbox
+    (``agentcap run --agent <name>`` once provisions it).
+  - A ``/v1`` endpoint reachable — set ``AGENTCAP_TEST_LLM_URL`` or
+    have ``llama-server`` executable on PATH so the fixture spawns
+    one.
 """
 
 from __future__ import annotations

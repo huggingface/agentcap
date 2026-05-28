@@ -15,17 +15,16 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Optional
 
 import httpx
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import Response, StreamingResponse
+from starlette.routing import Route
 
 
 # Constant so per-agent Containerfiles can bake the proxy URL into
 # the agent's config files without per-run rewriting.
 IN_PROCESS_PROXY_HOST = "127.0.0.1"
 IN_PROCESS_PROXY_PORT = 8001
-from starlette.applications import Starlette
-from starlette.requests import Request
-from starlette.responses import Response, StreamingResponse
-from starlette.routing import Route
-
 
 CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
 

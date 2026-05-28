@@ -57,7 +57,7 @@ def parse_response_text(stdout: str) -> str:
             last = i
     body_lines = lines[last + 1 :] if last >= 0 else lines
     cleaned = [
-        l for l in body_lines if not _SESSION_ID_RE.match(l.strip())
+        ln for ln in body_lines if not _SESSION_ID_RE.match(ln.strip())
     ]
     return "\n".join(cleaned).strip()
 

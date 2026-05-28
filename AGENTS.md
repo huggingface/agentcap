@@ -13,21 +13,29 @@ explicitly first.
    No tokenisation, no chat-template render at capture time. The
    capture path must work without the model's tokenizer being loaded.
 
-2. **Manifest is offline and dumb.** All token-level metadata
-   (`tok_range`, `tools_injection_tokens`, `token_role`) is computed
-   at *export* time by re-rendering through the model's chat template.
-   The runtime path produces no manifest sidecar.
+2. **Export is a dumb data shuffle.** No tokenizer, no chat-template
+   render, no per-token labels. Export pairs `<rid>.request.json`
+   with `<rid>.response.json`, serialises each as a JSON string into
+   a parquet row, and stamps a couple of constant provider columns
+   plus per-row `served_by` / `served_build_info` / `served_model`
+   from the response fingerprint. The capture path doesn't need the
+   model's tokenizer loaded; neither does the export path.
 
-3. **No hashable identifiers in manifest rows.** Rows expose the raw
-   `request` body, structural `sections`, and the rendered token
-   sequence (`rendered_tokens`, `token_role`). Hashable derivatives
-   — prefix ids, args hashes, "agent build" ids — stay consumer-side;
-   different consumers want different definitions, and shipping one
-   in rows means everyone computes both ours and theirs.
-   `rendered_tokens` is the carve-out: consumer-side recompute requires
-   `_normalize_for_render` (Qwen3-Coder templates crash on list-typed
-   content / string-typed tool_call.arguments), which isn't a public
-   API; shipping the ids removes that coupling at ~10× row-size cost.
+3. **No hashable identifiers, no rendered tokens in rows.** The
+   parquet exposes the raw `request` and `response` bodies as JSON
+   strings. Token-level analysis is consumer-side: render
+   `request.messages` through the model's chat template via
+   `transformers.AutoTokenizer.apply_chat_template` and compute
+   whatever ids you want. Reasons:
+   - Different consumers want different definitions of "prefix id",
+     "args hash", "agent build id". Shipping one in rows means
+     everyone computes both ours and theirs.
+   - Some templates (Qwen3-Coder, Gemma-4) crash on list-typed
+     `content` or string-typed `tool_call.arguments` from real
+     captures and need normalisation before render. Owning that
+     normalisation in the producer locks consumers into our exact
+     normaliser; leaving render consumer-side lets each consumer
+     handle template quirks on their own terms.
 
 4. **Capture is via a transparent HTTP proxy, not via patches to the
    serving stack.** Compatibility with any OpenAI-compat backend is
@@ -75,9 +83,12 @@ explicitly first.
    CPU/small-model runs.
 
    Skills used by the corpus (e.g. `huggingface/skills` for the
-   `hf-hub-session` runs) are not injected by the runner anymore.
-   They live in the agentcap-hermes VM, installed at provisioning
-   or via `hermes skills install` once.
+   `hf-hub-session` runs) are injected per-run via
+   `agentcap run --skills <dir>`. The runner bind-mounts the dir
+   read-only into the sandbox and exposes it as
+   `AGENTCAP_SKILLS_DIR`; the per-agent image entrypoint symlinks
+   it into the agent's discovery path (`~/.hermes/skills/` for
+   hermes; `AGENTS.md` + `skills/` in cwd for opencode/goose/pi).
 
    **Lifecycle is per-`agentcap run` invocation, not per-task.** The
    overlay is built once when the driver is constructed and reused
@@ -101,11 +112,7 @@ explicitly first.
     dir leaks those files into every captured trace, contaminating
     the dataset's "stable" prefix.
 
-11. **`stable=True` only for leading system messages.** Once any
-    non-system message appears, no later section is `stable`, even if
-    a later message has `role=system`.
-
-12. **`--push` only writes to Storage Buckets, never to Dataset
+11. **`--push` only writes to Storage Buckets, never to Dataset
     repos.** Buckets are append-by-prefix — the natural shape for a
     corpus that grows. Dataset repos are atomic-replace via
     `push_to_hub`, which doesn't fit. To publish a curated cut to a
@@ -113,25 +120,26 @@ explicitly first.
     "load-concat-repush to fake append on a Dataset repo" pattern is
     explicitly rejected.
 
-13. **Each `push_bucket` call writes a unique parquet filename by
-    default** that embeds (agent, model) so the filename alone tells
-    you what's inside —
-    `train-<agent>-<model>-YYYYMMDDTHHMMSS-HEX6.parquet`. Agent is
-    optional and falls through to `train-<model>-…` when absent
-    (older trace dirs); the capture proxy persists it to
-    `<trace-dir>/_proxy.json` so `agentcap export` recovers it
-    automatically. An explicit `filename=` opts back into
-    overwrite-in-place — used only for "latest" pointer files.
+12. **Each `push_bucket` call writes a unique parquet filename by
+    default** that embeds `(agent, model, provider)` so the filename
+    alone tells you what's inside —
+    `train-<agent>-<model>-<provider>-YYYYMMDDTHHMMSS-HEX6.parquet`.
+    Each part is optional and is omitted when unknown; `agent` is
+    supplied by the caller (trace dirs have no in-band source for
+    it), `model` and `provider` are derived from the captured
+    requests. An explicit `filename=` opts back into overwrite-in-
+    place — used only for "latest" pointer files.
 
-14. **One output format only: parquet.** Single file via `--output`
+13. **One output format only: parquet.** Single file via `--output`
     (local) or single file under a bucket prefix via `--push`. JSONL
     was dropped — it's a one-liner away from a parquet via
-    `Dataset.from_parquet(...).to_json(...)`. Rendered token IDs
-    (`rendered_tokens`) were dropped from rows for the same reason
-    — deterministic from `(text, model)` and a 5-line recompute via
-    `apply_chat_template`.
+    `Dataset.from_parquet(...).to_json(...)`. Rendered token ids and
+    per-message structural metadata are likewise consumer-side: a
+    5-line recompute via `apply_chat_template` keeps rows small and
+    avoids pinning consumers to our exact normalisation of the
+    template-input shape (see decision 3).
 
-15. **Inference backend must deliver tool calls in `message.content`,
+14. **Inference backend must deliver tool calls in `message.content`,
     not `message.reasoning_content`.** Hermes (and presumably other
     agents) parses tool calls from the OpenAI-spec `content` field.
     Reasoning-by-default models (Qwen 3.5+, etc.) on llama.cpp put
@@ -155,29 +163,7 @@ explicitly first.
 3. **vLLM backend smoke test.** llama.cpp is the validated default;
    verify the proxy stays transparent against vLLM too.
 
-4. **Per-agent compaction knob.** Tool-heavy multi-turn runs hit the
-   model server's context limit (e.g. pi at ~70K tokens after one
-   loop on a 64K-ctx server). Several agents expose native
-   compaction — pi `/compact`, opencode `/compact`, goose
-   `session-compact` — surface a `Driver.compact(session_id)`
-   method and let the orchestrator call it when the previous turn's
-   prompt-token count is approaching the configured ceiling.
-
-5. **Agent install in the Lima templates is incomplete.** The
-   per-agent Lima templates at `scripts/lima/agentcap-<agent>.yaml`
-   install opencode and goose via their upstream `curl … | bash`
-   installers, but the hermes and pi templates contain `TODO`
-   placeholders that fail provisioning loud. Drop in the canonical
-   install commands for each so `limactl start --name=agentcap-<agent>
-   scripts/lima/agentcap-<agent>.yaml` succeeds without manual
-   intervention. The driver + test wiring is already sandbox-aware:
-   the live tests probe each agent's binary via
-   `sandbox.run(["command", "-v", <agent>], check=False)` and skip
-   with a clear "provision the agentcap-<agent> VM" hint if it's
-   missing, so an unprovisioned agent doesn't manifest as a
-   confusing test failure.
-
-6. **Corpus-specific VM mounts.** With the default `mounts: []`,
+4. **Corpus-specific VM mounts.** With the default `mounts: []`,
    corpora that need specific host content inside the VM — e.g.
    `transformers-coding-session`'s transformers source tree — must
    either ship a corpus-specific Lima template variant (mounting
