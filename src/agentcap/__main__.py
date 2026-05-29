@@ -154,6 +154,12 @@ def export_cmd(targets: tuple[str, ...], all_runs: bool, push: str) -> None:
         except ValueError as exc:
             raise click.UsageError(str(exc))
         if model is None:
+            # Empty capture dir (e.g. a run that died before the proxy
+            # received anything). Under --all, skip with a note; under
+            # explicit targets, hard error since the user asked for it.
+            if all_runs:
+                click.echo(f"  [{t}] skipped (no captures)", err=True)
+                continue
             raise click.UsageError(
                 f"{cap_dir} has no captured requests with a model field"
             )
@@ -161,6 +167,8 @@ def export_cmd(targets: tuple[str, ...], all_runs: bool, push: str) -> None:
         click.echo(
             f"  [{t}] (agent={agent or '?'}, model={model})", err=True,
         )
+    if not items:
+        raise click.UsageError("no runs with captures to export")
 
     n_rows_list = push_dataset(items, push)
     click.echo(
