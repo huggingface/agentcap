@@ -320,9 +320,21 @@ def run_cmd(
     workdir_p = _default_workdir(agent, provider_slug)
     captures = workdir_p / "captures"
     sessions = workdir_p / "sessions"
+    traces = workdir_p / "traces"
     captures.mkdir(parents=True, exist_ok=True)
     sessions.mkdir(parents=True, exist_ok=True)
+    traces.mkdir(parents=True, exist_ok=True)
     click.echo(f"  [workdir] {workdir_p}", err=True)
+
+    # Resolve --sandbox up front: it joins the per-VM mount set
+    # alongside --skills (RO) and the traces dir (RW), so the Lima
+    # backend can configure all three at provision time.
+    if sandbox_dir is not None:
+        sandbox_cwd = str(Path(sandbox_dir).resolve())
+    else:
+        default_sandbox = workdir_p / "sandbox"
+        default_sandbox.mkdir(parents=True, exist_ok=True)
+        sandbox_cwd = str(default_sandbox)
 
     tasks = read_tasks_txt(tasks_file)
     if not tasks:
@@ -345,6 +357,7 @@ def run_cmd(
             "AGENTCAP_PROXY_URL": proxy_url,
             "AGENTCAP_MODEL": model,
             "AGENTCAP_PROVIDER": provider_slug,
+            "AGENTCAP_TRACES_DIR": str(traces.resolve()),
         }
         if api_key:
             sandbox_env["AGENTCAP_API_KEY"] = api_key
@@ -353,23 +366,17 @@ def run_cmd(
             skills_abs = Path(skills_dir).resolve()
             sandbox_env["AGENTCAP_SKILLS_DIR"] = str(skills_abs)
             sandbox_ro.append(skills_abs)
+        sandbox_rw: list[Path] = [
+            traces.resolve(),
+            Path(sandbox_cwd).resolve(),
+        ]
         # First call per agent builds/boots the image; can take minutes.
         sandbox = require_sandbox_or_die(
             agent=agent, command="agentcap run", log=_sb_log,
             env=sandbox_env,
             readonly_paths=sandbox_ro,
+            writable_paths=sandbox_rw,
         )
-
-        # ``--sandbox`` is the host directory the agent sees as cwd.
-        # When omitted, default to an empty ``sandbox/`` next to
-        # ``captures/`` under the auto-derived run dir — mirrors the
-        # convention examples/transformers-coding-session/run.sh uses.
-        if sandbox_dir is not None:
-            sandbox_cwd = str(Path(sandbox_dir).resolve())
-        else:
-            default_sandbox = workdir_p / "sandbox"
-            default_sandbox.mkdir(parents=True, exist_ok=True)
-            sandbox_cwd = str(default_sandbox)
 
         driver_kwargs: dict = {
             "sandbox": sandbox, "cwd": sandbox_cwd, "model": model,

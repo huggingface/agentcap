@@ -109,6 +109,22 @@ def known_drivers() -> tuple[str, ...]:
     return tuple(DRIVER_REGISTRY)
 
 
+# Map of agent name -> in-container path where its native session
+# files live. ``agentcap run`` bind-mounts ``<workdir>/traces/`` to
+# this path so the agent's own trace lands next to the proxy
+# captures, surviving even a crashed run.
+#
+# Pi is the vertical slice; other agents will join as their
+# session-dir conventions are characterised.
+SESSIONS_PATH_IN_CONTAINER: dict[str, str] = {
+    "pi": "/opt/pi-config/sessions",
+}
+
+
+def sessions_path_for(agent: str) -> str | None:
+    return SESSIONS_PATH_IN_CONTAINER.get(agent)
+
+
 def get_driver(name: str, **kwargs) -> AgentDriver:
     """Lookup a driver by short name."""
     try:

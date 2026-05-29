@@ -45,8 +45,20 @@ def template_path(agent: str) -> Path:
     return _TEMPLATE_DIR / f"agentcap-{agent}.yaml"
 
 
-def _template_hash(template: Path) -> str:
-    return hashlib.sha256(template.read_bytes()).hexdigest()
+def _template_hash(
+    template: Path,
+    *,
+    readonly_paths: list[Path] | None = None,
+    writable_paths: list[Path] | None = None,
+) -> str:
+    h = hashlib.sha256(template.read_bytes())
+    # Per-run mount paths are injected via ``limactl start --mount``;
+    # a change to any of them must invalidate the cached VM so the
+    # next ensure_vm() rebuilds with the right mount set.
+    for tag, paths in (("ro", readonly_paths), ("rw", writable_paths)):
+        for p in paths or []:
+            h.update(f"\n{tag}:{Path(p).resolve()}".encode())
+    return h.hexdigest()
 
 
 def _hash_file(vm: str) -> Path:
@@ -74,13 +86,25 @@ def _vm_info(vm: str) -> dict | None:
     return None
 
 
-def _vm_is_from_current_template(vm: str, template: Path) -> bool:
+def _vm_is_from_current_template(
+    vm: str,
+    template: Path,
+    *,
+    readonly_paths: list[Path] | None = None,
+    writable_paths: list[Path] | None = None,
+) -> bool:
     """``True`` iff a hash file exists *and* matches the current
-    template. Missing-or-different hash → treat as stale."""
+    template + per-run mount set. Missing-or-different hash → treat
+    as stale."""
     hf = _hash_file(vm)
     if not hf.is_file():
         return False
-    return hf.read_text().strip() == _template_hash(template)
+    expected = _template_hash(
+        template,
+        readonly_paths=readonly_paths,
+        writable_paths=writable_paths,
+    )
+    return hf.read_text().strip() == expected
 
 
 def _vm_shell(vm: str, shell_cmd: str, *, timeout: float = 60) -> None:
@@ -143,6 +167,8 @@ def ensure_vm(
     agent: str,
     *,
     log: callable = lambda msg: None,
+    readonly_paths: list[Path] | None = None,
+    writable_paths: list[Path] | None = None,
 ) -> str:
     """Bring the ``agentcap-<agent>`` VM to a Running state from the
     current ``scripts/lima/agentcap-<agent>.yaml`` template; return
@@ -167,7 +193,10 @@ def ensure_vm(
     info = _vm_info(vm)
     status = info.get("status") if info else None
 
-    if status is not None and not _vm_is_from_current_template(vm, template):
+    if status is not None and not _vm_is_from_current_template(
+        vm, template,
+        readonly_paths=readonly_paths, writable_paths=writable_paths,
+    ):
         log(f"{vm} is stale (template hash mismatch or missing); recreating…")
         subprocess.run(
             ["limactl", "stop", "--force", vm],
@@ -181,12 +210,23 @@ def ensure_vm(
 
     if status is None:
         log(f"creating + starting {vm} (cold boot can take 30s+)…")
-        r = subprocess.run(
-            ["limactl", "start", f"--name={vm}", "--tty=false", str(template)],
-            capture_output=True, text=True, timeout=900,
-        )
+        cmd = ["limactl", "start", f"--name={vm}", "--tty=false"]
+        # Mirror agentcap's --sandbox / --skills (and now traces) into
+        # the VM as per-VM mounts. Lima preserves host paths inside
+        # the VM, so the agent and init script reference the same
+        # absolute paths they would on bwrap.
+        for p in readonly_paths or []:
+            cmd.extend(["--mount", f"{Path(p).resolve()}:ro"])
+        for p in writable_paths or []:
+            cmd.extend(["--mount", f"{Path(p).resolve()}:writable"])
+        cmd.append(str(template))
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
         if r.returncode == 0:
-            _hash_file(vm).write_text(_template_hash(template))
+            _hash_file(vm).write_text(_template_hash(
+                template,
+                readonly_paths=readonly_paths,
+                writable_paths=writable_paths,
+            ))
     elif status != "Running":
         log(f"starting {vm} (was {status})…")
         subprocess.run(

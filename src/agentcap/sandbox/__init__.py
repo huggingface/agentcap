@@ -69,6 +69,7 @@ def get_sandbox(
     prefer: str | None = None,
     env: dict[str, str] | None = None,
     readonly_paths: list[Path] | None = None,
+    writable_paths: list[Path] | None = None,
 ) -> Sandbox:
     """Pick the sandbox backend for the current host. Pure: does not
     build images or boot VMs.
@@ -95,11 +96,17 @@ def get_sandbox(
 
     if backend == "bwrap":
         return BwrapSandbox(
-            image=image_tag(agent), env=env, readonly_paths=readonly_paths,
+            image=image_tag(agent), env=env,
+            readonly_paths=readonly_paths,
+            writable_paths=writable_paths,
         )
 
     if backend == "lima":
-        return LimaSandbox(vm=lima_vm_name(agent), env=env)
+        return LimaSandbox(
+            vm=lima_vm_name(agent), env=env,
+            readonly_paths=readonly_paths,
+            writable_paths=writable_paths,
+        )
 
     raise ValueError(
         f"unknown sandbox backend {backend!r}; expected 'bwrap' or 'lima'"
@@ -125,6 +132,7 @@ def require_sandbox_or_die(
     log=lambda msg: None,
     env: dict[str, str] | None = None,
     readonly_paths: list[Path] | None = None,
+    writable_paths: list[Path] | None = None,
 ) -> "Sandbox":
     """Return a real sandbox for the current host, or exit 2 with an
     install hint. Triggers an image / VM build on first use.
@@ -151,7 +159,11 @@ def require_sandbox_or_die(
             sys.exit(2)
         from .image_provisioning import ensure_image
         ensure_image(agent, log=log)
-        return get_sandbox(agent=agent, env=env, readonly_paths=readonly_paths)
+        return get_sandbox(
+            agent=agent, env=env,
+            readonly_paths=readonly_paths,
+            writable_paths=writable_paths,
+        )
     if system == "Darwin":
         if not shutil.which("limactl"):
             sys.stderr.write(
@@ -160,8 +172,16 @@ def require_sandbox_or_die(
             )
             sys.exit(2)
         from .lima_provisioning import ensure_vm
-        ensure_vm(agent, log=log)
-        return get_sandbox(agent=agent, env=env, readonly_paths=readonly_paths)
+        ensure_vm(
+            agent, log=log,
+            readonly_paths=readonly_paths,
+            writable_paths=writable_paths,
+        )
+        return get_sandbox(
+            agent=agent, env=env,
+            readonly_paths=readonly_paths,
+            writable_paths=writable_paths,
+        )
     raise NotImplementedError(
         f"agentcap sandboxing is only supported on Linux (bwrap) and "
         f"macOS (lima); host is {system!r}."

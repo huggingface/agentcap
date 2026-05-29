@@ -75,6 +75,10 @@ def build_models_json(
 
 class PiDriver(AgentDriver):
     name = "pi"
+    # In-container path where pi writes its native session files.
+    # Bind-mounted to ``<workdir>/traces/`` by ``agentcap run`` so the
+    # agent's own trace ends up next to the proxy captures.
+    sessions_path = "/opt/pi-config/sessions"
 
     def __init__(
         self,

@@ -56,12 +56,19 @@ class LimaSandbox:
         vm: str = _DEFAULT_VM,
         workdir: Path | str | None = None,
         env: dict[str, str] | None = None,
+        readonly_paths: list[Path] | None = None,
+        writable_paths: list[Path] | None = None,
     ) -> None:
-        # ``env`` is the sandbox-wide baked env (e.g. AGENTCAP_PROXY_URL
-        # from ``agentcap run``); merged with per-call env at run time.
+        # ``env`` is the sandbox-wide baked env merged with per-call
+        # env at run time. ``readonly_paths`` / ``writable_paths`` are
+        # mirrored here for API parity with ``BwrapSandbox``; the
+        # actual mounts are configured at VM provision time (see
+        # :func:`lima_provisioning.ensure_vm`).
         self.vm = vm
         self.workdir = workdir
         self._baked_env: dict[str, str] = dict(env or {})
+        self._readonly_paths: list[Path] = list(readonly_paths or [])
+        self._writable_paths: list[Path] = list(writable_paths or [])
 
     def wrap(
         self,

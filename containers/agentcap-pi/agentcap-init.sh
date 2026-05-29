@@ -16,6 +16,17 @@ export PI_LOCAL_API_KEY="${AGENTCAP_API_KEY:-dummy}"
 url="${AGENTCAP_PROXY_URL:-http://127.0.0.1:8001/v1}"
 sed -i "s|@@AGENTCAP_PROXY_URL@@|${url}|g" /opt/pi-config/models.json
 
+# Surface pi's native session log to the host. Both backends mount
+# AGENTCAP_TRACES_DIR at the same host path inside the sandbox; we
+# symlink pi's baked session dir at it so traces land there.
+if [ -n "${AGENTCAP_TRACES_DIR:-}" ] && [ -d "$AGENTCAP_TRACES_DIR" ]; then
+    if [ "$(readlink "$PI_CODING_AGENT_SESSION_DIR" 2>/dev/null)" \
+         != "$AGENTCAP_TRACES_DIR" ]; then
+        rm -rf "$PI_CODING_AGENT_SESSION_DIR"
+        ln -sfn "$AGENTCAP_TRACES_DIR" "$PI_CODING_AGENT_SESSION_DIR"
+    fi
+fi
+
 # Skills: AGENTS.md + skills/ symlinked into cwd (where pi looks).
 if [ -n "${AGENTCAP_SKILLS_DIR:-}" ] && [ -d "$AGENTCAP_SKILLS_DIR" ]; then
     [ -f "$AGENTCAP_SKILLS_DIR/agents/AGENTS.md" ] && \

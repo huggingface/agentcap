@@ -157,6 +157,7 @@ class BwrapSandbox:
         *,
         env: dict[str, str] | None = None,
         readonly_paths: list[Path] | None = None,
+        writable_paths: list[Path] | None = None,
     ) -> None:
         """``image`` is a buildah image tag, e.g.
         ``agentcap-goose:latest``. Build with
@@ -171,6 +172,12 @@ class BwrapSandbox:
         path, read-only). Use for things like ``--skills <dir>``
         where the agent must see the dir but shouldn't modify it.
 
+        ``writable_paths`` are sandbox-lifetime writable binds,
+        applied to every ``run()`` in addition to whatever the
+        per-call ``run(writable_paths=…)`` carries. Used for the
+        agent's host-visible scratch — e.g. the trace directory the
+        agent's session log is symlinked into.
+
         The image's baked ENTRYPOINT (if any) is prepended to every
         ``run()``'s argv so the image's startup wrapper (e.g.
         ``agentcap-init``) gets a chance to render config files
@@ -183,6 +190,7 @@ class BwrapSandbox:
         self._container_id: str | None = None
         self._extra_env: dict[str, str] = dict(env or {})
         self._readonly_paths: list[Path] = list(readonly_paths or [])
+        self._writable_paths: list[Path] = list(writable_paths or [])
         self._baked_env: dict[str, str] | None = None
         self._entrypoint: list[str] | None = None
 
@@ -240,7 +248,7 @@ class BwrapSandbox:
         return build_command(
             final_argv,
             container_id=self._ensure_container(),
-            writable_paths=writable_paths,
+            writable_paths=list(writable_paths) + self._writable_paths,
             readonly_paths=self._readonly_paths,
             deny_network=deny_network,
             env=full_env,
