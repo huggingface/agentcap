@@ -6,8 +6,11 @@
 #   ./start_llama_cpp_server.sh <hf-repo>[:<quant>]
 #
 # Example:
+#   ./start_llama_cpp_server.sh ggml-org/gemma-4-E4B-it-GGUF
 #   ./start_llama_cpp_server.sh unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF
-#   ./start_llama_cpp_server.sh unsloth/gemma-4-E4B-it-GGUF:Q5_K_M
+#
+# Prefer ggml-org/ repos (the llama.cpp team's canonical quants);
+# fall back to unsloth/ for models ggml-org hasn't published.
 #
 # Env (sensible defaults):
 #   HOST=0.0.0.0  PORT=8000  CTX_SIZE=32768  REASONING=auto
