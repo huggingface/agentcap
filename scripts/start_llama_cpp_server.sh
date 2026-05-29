@@ -15,6 +15,8 @@
 # Env (sensible defaults):
 #   HOST=0.0.0.0  PORT=8000  CTX_SIZE=32768  REASONING=auto
 #   N_GPU_LAYERS=999  TENSOR_SPLIT=1,1,1,1
+#   FIT=off  (auto-fit hits GGML_SCHED_MAX_SPLIT_INPUTS on multi-GPU
+#            for some models; ``on`` re-enables it)
 
 set -euo pipefail
 
@@ -32,4 +34,5 @@ exec llama serve \
     --reasoning "${REASONING:-auto}" \
     --n-gpu-layers "${N_GPU_LAYERS:-999}" \
     --tensor-split "${TENSOR_SPLIT:-1,1,1,1}" \
+    --fit "${FIT:-off}" \
     --jinja
