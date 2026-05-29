@@ -24,12 +24,7 @@ from starlette.routing import Route
 # Constant so per-agent Containerfiles can bake the proxy URL into
 # the agent's config files without per-run rewriting.
 IN_PROCESS_PROXY_HOST = "127.0.0.1"
-# 0 = let the kernel pick a free ephemeral port. The actual bound
-# value is read back from the socket in serve_in_thread and surfaced
-# as ProxyHandle.port — callers wire it into AGENTCAP_PROXY_URL after
-# startup. Concurrent ``agentcap run`` invocations on the same host
-# no longer collide.
-IN_PROCESS_PROXY_PORT = 0
+IN_PROCESS_PROXY_PORT = 0  # kernel-assigned ephemeral; read back via ProxyHandle.port
 
 CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
 
@@ -366,10 +361,8 @@ def serve_in_thread(
 ) -> ProxyHandle:
     """Start the proxy on a daemon thread; block until uvicorn is bound.
 
-    ``port=0`` (the default) asks the kernel for an ephemeral port; the
-    actual bound port is read back from the live socket and exposed as
-    ``ProxyHandle.port`` so callers can build the agent-facing URL
-    after startup.
+    With ``port=0`` the kernel-assigned port is read back into
+    ``ProxyHandle.port``.
     """
     import threading
     import time
@@ -393,14 +386,9 @@ def serve_in_thread(
             )
         time.sleep(0.05)
 
-    # uvicorn populates ``server.servers`` during startup; each entry
-    # is an asyncio Server with a ``sockets`` list. Read the actual
-    # bound (host, port) tuple back so ``port=0`` callers see the
-    # ephemeral port the kernel picked.
     bound_host, bound_port = host, port
     try:
-        sockname = server.servers[0].sockets[0].getsockname()
-        bound_host, bound_port = sockname[0], sockname[1]
+        bound_host, bound_port = server.servers[0].sockets[0].getsockname()[:2]
     except (AttributeError, IndexError, TypeError):
         pass
 

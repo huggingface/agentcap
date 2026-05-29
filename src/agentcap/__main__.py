@@ -24,6 +24,12 @@ def _is_hf_router_upstream(upstream: str) -> bool:
     return host == "router.huggingface.co"
 
 
+def _is_lima_host() -> bool:
+    import platform
+    import shutil
+    return platform.system() == "Darwin" and shutil.which("limactl") is not None
+
+
 def _read_hf_token_cache() -> str | None:
     token_path = Path.home() / ".cache" / "huggingface" / "token"
     try:
@@ -317,12 +323,14 @@ def run_cmd(
     def _on_event(event: str, **kw):
         click.echo(f"  [{event}] " + " ".join(f"{k}={v}" for k, v in kw.items()), err=True)
 
-    # Start the proxy first so we know which ephemeral port the kernel
-    # assigned before baking AGENTCAP_PROXY_URL into the sandbox env.
-    # Concurrent ``agentcap run`` invocations don't collide on :8001
-    # any more.
-    with serve_in_thread(upstream, captures) as proxy:
-        proxy_url = f"http://{proxy.host}:{proxy.port}/v1"
+    # Lima VM sees 127.0.0.1 as its own loopback — bind on all ifs and
+    # advertise the host bridge instead.
+    bind_host, agent_host = (
+        ("0.0.0.0", "host.lima.internal") if _is_lima_host()
+        else ("127.0.0.1", "127.0.0.1")
+    )
+    with serve_in_thread(upstream, captures, host=bind_host) as proxy:
+        proxy_url = f"http://{agent_host}:{proxy.port}/v1"
         click.echo(f"  [proxy] {proxy_url}", err=True)
 
         sandbox_env = {
