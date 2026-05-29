@@ -16,7 +16,7 @@ the model card or agent revs.
 1. Validated end-to-end through the full 30-prompt × 4-turn
    `examples/transformers-coding-session` corpus. Parquets live under
    the `transformers-coding-session/` prefix in
-   `dacorvo/agentcap-traces` (private bucket). A few 26 B runs lost
+   `dacorvo/agentcap-captures` (private dataset). A few 26 B runs lost
    1 task to a 1200 s timeout; the rest of the corpus rendered
    cleanly.
 

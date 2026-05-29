@@ -21,7 +21,7 @@ dependencies = [
     # Host header poisons request.url.path; path-based middleware can be bypassed.
     "starlette>=1.0.1",
     "uvicorn>=0.30",
-    "huggingface_hub>=1.13",  # used directly by push_bucket; bucket APIs landed in 1.13
+    "huggingface_hub>=1.13",  # HfApi.upload_file with repo_type="dataset"
     "pyyaml>=6",  # used by HermesDriver to overlay context_length / base_url into config.yaml
     "click>=8.1",
     "pyarrow>=15",  # streaming ParquetWriter in export_local

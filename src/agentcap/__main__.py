@@ -1,10 +1,4 @@
-"""CLI entrypoint.
-
-Subcommands:
-- ``agentcap proxy``  — run the capture proxy in front of a model server.
-- ``agentcap export`` — render a captured capture dir into a JSONL dataset.
-- ``agentcap run``    — drive an agent CLI through a corpus.
-"""
+"""CLI entrypoint. See ``agentcap --help`` for the subcommand list."""
 
 from __future__ import annotations
 
@@ -58,6 +52,20 @@ def _read_hf_token_cache() -> str | None:
     return token or None
 
 
+_WORKSPACE_DIR = ".agentcap"
+
+
+def _workspace_root() -> Path:
+    return Path(os.environ.get("AGENTCAP_WORKSPACE", os.getcwd())) / _WORKSPACE_DIR
+
+
+def _default_workdir(agent: str, provider_slug: str) -> Path:
+    import time
+    utc = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+    slug = provider_slug.replace("/", "-")
+    return _workspace_root() / f"{agent}-{slug}-{utc}"
+
+
 def _resolve_api_key(
     *, upstream: str, explicit_api_key: str | None
 ) -> tuple[str | None, str | None]:
@@ -77,120 +85,102 @@ def _resolve_api_key(
     return None, None
 
 
-@cli.command("proxy")
-@click.option(
-    "--upstream",
-    required=True,
-    help="Base URL of the model server (e.g. http://127.0.0.1:8000).",
-)
-@click.option(
-    "--listen",
-    default="127.0.0.1:8001",
-    show_default=True,
-    help="HOST:PORT to bind the proxy on.",
-)
-@click.option(
-    "--capture-dir",
-    required=True,
-    type=click.Path(file_okay=False, dir_okay=True, writable=True),
-    help="Directory to write captured request/response JSON files into.",
-)
-def proxy_cmd(upstream: str, listen: str, capture_dir: str) -> None:
-    """Run the capture proxy in front of a model server."""
-    from .proxy import serve
-
-    host, port = _parse_listen(listen)
-    click.echo(
-        f"agentcap proxy: forwarding {host}:{port} -> {upstream}, "
-        f"capturing to {capture_dir}",
-        err=True,
-    )
-    serve(upstream=upstream, capture_dir=capture_dir, host=host, port=port)
-
-
 @cli.command("export")
-@click.argument(
-    "capture_dir",
-    type=click.Path(exists=True, file_okay=False, dir_okay=True),
-)
+@click.argument("targets", nargs=-1)
 @click.option(
-    "--model",
-    default=None,
-    help="Override the model id used in the bucket filename. Captured "
-    "``body.model`` remains the source of truth in the parquet itself.",
-)
-@click.option(
-    "--output",
-    type=click.Path(dir_okay=False),
-    default=None,
-    help="Local parquet file to write.",
+    "--all", "all_runs", is_flag=True,
+    help="Export every run in the workspace (mutually exclusive with positional run-ids).",
 )
 @click.option(
     "--push",
-    default=None,
-    help="Storage Bucket URI to push to: hf://buckets/<owner>/<name>[/<prefix>]. "
-    "Dataset repos aren't accepted — render to --output and use `hf upload` instead.",
+    required=True,
+    help="Hugging Face Dataset repo to push to: <owner>/<name>[/<subdir>] "
+    "(or hf://datasets/<owner>/<name>[/<subdir>]). The repo is created "
+    "if it doesn't exist; the parquet lands under data/[<subdir>/]<file>.parquet "
+    "so the Hub Dataset Viewer picks it up automatically.",
 )
-@click.option(
-    "--agent",
-    default=None,
-    help="Agent name to embed in the bucket filename. Trace dir has no "
-    "in-band source for this; supply when known, leave unset otherwise.",
-)
-def export_cmd(
-    capture_dir: str,
-    model: str | None,
-    output: str | None,
-    push: str | None,
-    agent: str | None,
-) -> None:
-    """Render a captured capture dir into a parquet dataset."""
-    from .export import (
-        _BUCKET_PREFIX,
-        detect_model,
-        export_local,
-        push_bucket,
-    )
+def export_cmd(targets: tuple[str, ...], all_runs: bool, push: str) -> None:
+    """Render captured runs into parquet files and push to a Dataset repo.
 
-    if not output and not push:
-        raise click.UsageError("one of --output or --push is required")
-    if output and push:
-        raise click.UsageError("pass --output OR --push, not both")
-    if push and not push.startswith(_BUCKET_PREFIX):
-        raise click.UsageError(
-            f"--push only accepts bucket URIs ({_BUCKET_PREFIX}<owner>/<name>...). "
-            f"For Dataset repos, render to --output and use `hf upload`."
-        )
+    ``TARGETS`` is one or more run-ids (resolved against the workspace)
+    or paths to a workdir/capture-dir. Use ``--all`` to export every
+    run in the workspace.
+    """
+    import json as _json
 
-    # detect_model enforces the no-mixed-models invariant; --model
-    # cannot bypass it.
+    from .export import detect_model, parse_dataset_uri, push_dataset
+
     try:
-        detected = detect_model(capture_dir)
+        parse_dataset_uri(push)
     except ValueError as exc:
         raise click.UsageError(str(exc))
+    if all_runs and targets:
+        raise click.UsageError("pass --all OR positional run-ids, not both")
+    if not all_runs and not targets:
+        raise click.UsageError("specify one or more run-ids/paths, or pass --all")
 
-    if model is None:
-        if detected is None:
+    workspace = _workspace_root()
+    if all_runs:
+        if not workspace.is_dir():
+            raise click.UsageError(f"no workspace at {workspace}")
+        targets = tuple(
+            d.name for d in sorted(workspace.iterdir())
+            if d.is_dir() and (d / "run.json").is_file()
+        )
+        if not targets:
+            raise click.UsageError(f"no runs in {workspace}")
+
+    def _resolve(t: str) -> tuple[Path, str | None]:
+        """Return (capture_dir, agent_from_run_json) for a target."""
+        # 1. run-id in the workspace.
+        candidate = workspace / t
+        if (candidate / "captures").is_dir():
+            agent_from = None
+            meta = candidate / "run.json"
+            if meta.is_file():
+                try:
+                    agent_from = _json.loads(meta.read_text()).get("agent")
+                except (OSError, _json.JSONDecodeError):
+                    pass
+            return candidate / "captures", agent_from
+        # 2. an arbitrary workdir path with captures/ subdir.
+        p = Path(t)
+        if (p / "captures").is_dir():
+            agent_from = None
+            meta = p / "run.json"
+            if meta.is_file():
+                try:
+                    agent_from = _json.loads(meta.read_text()).get("agent")
+                except (OSError, _json.JSONDecodeError):
+                    pass
+            return p / "captures", agent_from
+        # 3. a path that *is* a capture dir.
+        if p.is_dir() and any(p.glob("*.request.json")):
+            return p, None
+        raise click.UsageError(f"can't resolve {t!r} to a capture dir")
+
+    items: list[dict] = []
+    for t in targets:
+        cap_dir, agent = _resolve(t)
+        try:
+            model = detect_model(cap_dir)
+        except ValueError as exc:
+            raise click.UsageError(str(exc))
+        if model is None:
             raise click.UsageError(
-                f"capture dir {capture_dir} has no captured requests with a "
-                f"model field; pass --model explicitly."
+                f"{cap_dir} has no captured requests with a model field"
             )
-        model = detected
+        items.append({"capture_dir": cap_dir, "model": model, "agent": agent})
         click.echo(
-            f"agentcap export: using model {model!r} (auto-detected)",
-            err=True,
+            f"  [{t}] (agent={agent or '?'}, model={model})", err=True,
         )
 
-    if output:
-        n_rows = export_local(capture_dir, output)
-        click.echo(
-            f"agentcap export: wrote {n_rows} rows to {output}", err=True
-        )
-    else:
-        n_rows = push_bucket(capture_dir, push, model=model, agent=agent)
-        click.echo(
-            f"agentcap export: wrote {n_rows} rows to bucket {push}", err=True
-        )
+    n_rows_list = push_dataset(items, push)
+    click.echo(
+        f"agentcap export: pushed {sum(n_rows_list)} rows across "
+        f"{len(items)} run(s) in 1 commit -> {push}",
+        err=True,
+    )
 
 
 @cli.command("run")
@@ -234,9 +224,11 @@ def export_cmd(
 )
 @click.option(
     "--workdir",
-    required=True,
+    default=None,
     type=click.Path(file_okay=False, dir_okay=True),
-    help="Output directory for captures, session logs, and the run summary.",
+    help="Output directory for captures, session logs, and the run summary. "
+    "Defaults to ``$AGENTCAP_WORKSPACE/.agentcap/<agent>-<provider>-<utc>/`` "
+    "(or under cwd if AGENTCAP_WORKSPACE is unset).",
 )
 @click.option(
     "--workspace",
@@ -382,17 +374,22 @@ def run_cmd(
     def _sb_log(msg: str) -> None:
         click.echo(f"  [sandbox] {msg}", err=True)
 
+    # Hostname classification — used by the sandbox env to pick the
+    # agent's credential channel (env-var auth vs no-auth) and as part
+    # of the auto-generated workdir name.
+    provider_slug = refine_for_sub_provider(
+        _hostname_fallback(upstream), model
+    )
+    click.echo(f"  [provider] {provider_slug}", err=True)
+
+    if workdir is None:
+        workdir = str(_default_workdir(agent, provider_slug))
     workdir_p = Path(workdir)
     captures = workdir_p / "captures"
     sessions = workdir_p / "sessions"
     captures.mkdir(parents=True, exist_ok=True)
     sessions.mkdir(parents=True, exist_ok=True)
-    # Hostname classification — used by the sandbox env to pick the
-    # agent's credential channel (env-var auth vs no-auth).
-    provider_slug = refine_for_sub_provider(
-        _hostname_fallback(upstream), model
-    )
-    click.echo(f"  [provider] {provider_slug}", err=True)
+    click.echo(f"  [workdir] {workdir_p}", err=True)
 
     # First call per agent builds/boots the image; can take minutes.
     # Env vars consumed by the image entrypoint to render configs.
@@ -452,6 +449,8 @@ def run_cmd(
 
     summary = {
         "agent": agent,
+        "model": model,
+        "provider": provider_slug,
         "upstream": upstream,
         "proxy_listen": f"{host}:{port}",
         "turns_per_task": turns,
@@ -481,6 +480,91 @@ def run_cmd(
         f"summary -> {workdir_p / 'run.json'}",
         err=True,
     )
+
+
+@cli.command("ls")
+@click.option(
+    "--long", "-l", "long_form", is_flag=True,
+    help="Long form: include upstream and per-run task counts.",
+)
+def ls_cmd(long_form: bool) -> None:
+    """List runs in the workspace (``$AGENTCAP_WORKSPACE/.agentcap/`` or
+    ``./.agentcap/`` if AGENTCAP_WORKSPACE is unset)."""
+    import json as _json
+
+    root = _workspace_root()
+    if not root.is_dir():
+        click.echo(f"no workspace at {root}; run `agentcap run` first.", err=True)
+        return
+
+    rows: list[dict] = []
+    for run_dir in sorted(root.iterdir()):
+        meta_path = run_dir / "run.json"
+        if not run_dir.is_dir() or not meta_path.is_file():
+            continue
+        try:
+            meta = _json.loads(meta_path.read_text())
+        except (OSError, _json.JSONDecodeError):
+            continue
+        captures = run_dir / "captures"
+        n_caps = (
+            len(list(captures.glob("*.request.json"))) if captures.is_dir() else 0
+        )
+        tasks = meta.get("tasks") or []
+        turns = meta.get("turns_per_task", 1)
+        n_ok = sum(1 for t in tasks if t.get("completed_turns") == turns)
+        rows.append({
+            "run_id": run_dir.name,
+            "agent": meta.get("agent") or "?",
+            "model": (meta.get("model") or "?").split("/")[-1],
+            "provider": meta.get("provider") or "?",
+            "upstream": meta.get("upstream") or "?",
+            "n_tasks": len(tasks),
+            "n_ok": n_ok,
+            "n_caps": n_caps,
+        })
+
+    if not rows:
+        click.echo(f"no runs in {root}.", err=True)
+        return
+
+    if long_form:
+        cols = ["run_id", "agent", "model", "provider", "tasks", "captures", "upstream"]
+        widths = [
+            max(len("run_id"), max(len(r["run_id"]) for r in rows)),
+            max(len("agent"), max(len(r["agent"]) for r in rows)),
+            max(len("model"), max(len(r["model"]) for r in rows)),
+            max(len("provider"), max(len(r["provider"]) for r in rows)),
+            len("tasks"),
+            len("captures"),
+            max(len("upstream"), max(len(r["upstream"]) for r in rows)),
+        ]
+    else:
+        cols = ["run_id", "agent", "model", "tasks", "captures"]
+        widths = [
+            max(len("run_id"), max(len(r["run_id"]) for r in rows)),
+            max(len("agent"), max(len(r["agent"]) for r in rows)),
+            max(len("model"), max(len(r["model"]) for r in rows)),
+            len("tasks"),
+            len("captures"),
+        ]
+
+    def _fmt(cells: list[str]) -> str:
+        return "  ".join(c.ljust(w) for c, w in zip(cells, widths))
+
+    click.echo(_fmt([c.upper() for c in cols]))
+    for r in rows:
+        tasks_cell = f"{r['n_ok']}/{r['n_tasks']}"
+        if long_form:
+            click.echo(_fmt([
+                r["run_id"], r["agent"], r["model"], r["provider"],
+                tasks_cell, str(r["n_caps"]), r["upstream"],
+            ]))
+        else:
+            click.echo(_fmt([
+                r["run_id"], r["agent"], r["model"],
+                tasks_cell, str(r["n_caps"]),
+            ]))
 
 
 def main() -> int:

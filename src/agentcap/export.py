@@ -1,12 +1,11 @@
-"""Trace dir → parquet export.
+"""Capture dir → parquet export.
 
 For each ``<request_id>.request.json``, pair with the matching
 ``<request_id>.response.json`` and emit one parquet row.
 
-Destinations: ``--output FILE.parquet`` (local) or
-``--push hf://buckets/owner/name/prefix/`` (Storage Bucket;
-append-by-prefix). Dataset repos are not a destination — they're
-replace-only on push; render locally and ``hf upload`` instead.
+Destination: ``--push <owner>/<name>[/<subdir>]`` — uploaded into a
+Hugging Face Dataset repo. Files under ``data/`` get the Hub Dataset
+Viewer automatically.
 """
 
 from __future__ import annotations
@@ -16,9 +15,6 @@ from pathlib import Path
 from typing import Iterator
 
 from .provider import _hostname_fallback, refine_for_sub_provider
-
-
-_BUCKET_PREFIX = "hf://buckets/"
 
 
 def detect_provider_columns(capture_dir: Path | str) -> dict:
@@ -197,21 +193,18 @@ def export_local(
     return n_written
 
 
-def parse_bucket_uri(uri: str) -> tuple[str, str]:
-    """Split ``hf://buckets/<owner>/<name>[/<path>]`` into
-    ``("<owner>/<name>", "<path>")``."""
-    if not uri.startswith(_BUCKET_PREFIX):
-        raise ValueError(f"not a bucket URI: {uri!r}")
-    rest = uri[len(_BUCKET_PREFIX) :]
-    parts = rest.split("/", 2)
+def parse_dataset_uri(uri: str) -> tuple[str, str]:
+    """Split ``<owner>/<name>[/<subdir>]`` (optionally prefixed with
+    ``hf://datasets/``) into ``("<owner>/<name>", "<subdir>")``."""
+    s = uri.removeprefix("hf://datasets/")
+    parts = s.split("/", 2)
     if len(parts) < 2 or not parts[0] or not parts[1]:
         raise ValueError(
-            f"bucket URI must be hf://buckets/<owner>/<name>[/<path>], "
-            f"got {uri!r}"
+            f"dataset URI must be <owner>/<name>[/<subdir>], got {uri!r}"
         )
-    bucket_id = f"{parts[0]}/{parts[1]}"
-    path_in_bucket = parts[2] if len(parts) > 2 else ""
-    return bucket_id, path_in_bucket
+    repo_id = f"{parts[0]}/{parts[1]}"
+    subdir = parts[2].strip("/") if len(parts) > 2 else ""
+    return repo_id, subdir
 
 
 _FILENAME_SAFE = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_."
@@ -226,7 +219,7 @@ def _slug(s: str) -> str:
     return out.strip("-_.") or "x"
 
 
-def _default_bucket_filename(
+def _default_filename(
     agent: str | None = None,
     model: str | None = None,
     provider: str | None = None,
@@ -250,37 +243,130 @@ def _default_bucket_filename(
     return "-".join(parts) + ".parquet"
 
 
-def push_bucket(
-    capture_dir: Path | str,
-    bucket_uri: str,
-    *,
-    model: str | None = None,
-    agent: str | None = None,
-    filename: str | None = None,
-) -> int:
-    """Export to parquet and upload to ``hf://buckets/<owner>/<name>[/<prefix>]``.
-    Default filename is unique per call; pass ``filename`` to overwrite
-    in place."""
+_README_TEMPLATE = """\
+---
+license: apache-2.0
+tags:
+- agent-captures
+- agentcap
+---
+
+# {repo_id}
+
+Captured agent ↔ model interactions — one row per
+`/v1/chat/completions` call. Produced by
+[agentcap](https://github.com/huggingface/agentcap).
+
+## Loading
+
+```python
+from datasets import load_dataset
+
+ds = load_dataset("{repo_id}", split="train")
+```
+
+## Schema
+
+| column | description |
+|---|---|
+| `request_id` | UUID minted by the capture proxy |
+| `model` | Model id from the captured request body |
+| `captured_at` | Epoch seconds when the request was captured |
+| `request` | Raw OpenAI request body, JSON-stringified |
+| `response` | Raw OpenAI response body, JSON-stringified (or `{{"stream": true, "raw": ...}}` for SSE) |
+| `served_by` | Per-response `X-Served-By` header (HF Router sub-provider routing) |
+| `served_build_info` | Per-response `X-Build-Info` header |
+| `served_model` | Per-response body-echoed `model` |
+| `provider` | Derived from the proxy upstream URL (constant per file) |
+| `upstream_url` | Proxy upstream URL at capture time (constant per file) |
+
+`request` and `response` are JSON strings; consumers `json.loads(...)`
+them. To recover per-message token ranges, render `request.messages`
+through the model's chat template yourself —
+`transformers.AutoTokenizer.apply_chat_template`.
+"""
+
+
+def _dataset_readme(repo_id: str) -> str:
+    return _README_TEMPLATE.format(repo_id=repo_id)
+
+
+def push_dataset(
+    items: list[dict],
+    dataset_uri: str,
+) -> list[int]:
+    """Export N capture dirs to parquet and commit all of them to a
+    Hugging Face Dataset repo in a **single git commit**.
+
+    ``items`` is a list of dicts, each with:
+      - ``capture_dir`` (required): path to a capture dir
+      - ``model`` (required): model id used in the default filename
+      - ``agent`` (optional): agent name embedded in the default filename
+      - ``filename`` (optional): overrides the default unique name
+
+    ``dataset_uri`` is ``<owner>/<name>[/<subdir>]`` (with optional
+    ``hf://datasets/`` prefix). The repo is created on first push
+    (``exist_ok=True``); files land under
+    ``data/[<subdir>/]<filename>.parquet`` so the Hub Dataset Viewer
+    picks them up automatically. Returns row counts in input order.
+    """
     import tempfile
 
-    from huggingface_hub import batch_bucket_files
+    from huggingface_hub import CommitOperationAdd, HfApi
 
-    bucket_id, prefix = parse_bucket_uri(bucket_uri)
-    prefix = prefix.rstrip("/")
-    provider_columns = detect_provider_columns(capture_dir)
-    if filename is None:
-        filename = _default_bucket_filename(
-            agent=agent,
-            model=model,
-            provider=provider_columns.get("provider") or None,
-        )
-    remote_path = f"{prefix}/{filename}" if prefix else filename
+    repo_id, subdir = parse_dataset_uri(dataset_uri)
+    api = HfApi()
+    api.create_repo(repo_id=repo_id, repo_type="dataset", exist_ok=True)
 
+    # Seed a dataset card on first push (no README in the repo yet).
+    # Later pushes leave any existing README alone — including
+    # user-edited ones.
+    try:
+        existing = set(api.list_repo_files(repo_id, repo_type="dataset"))
+    except Exception:
+        existing = set()
+    include_readme = "README.md" not in existing
+
+    n_rows_list: list[int] = []
     with tempfile.TemporaryDirectory() as tmpdir:
-        local_file = Path(tmpdir) / filename
-        n_rows = export_local(
-            capture_dir, local_file, provider_columns=provider_columns,
-        )
-        batch_bucket_files(bucket_id, add=[(str(local_file), remote_path)])
+        operations: list[CommitOperationAdd] = []
+        if include_readme:
+            operations.append(CommitOperationAdd(
+                path_in_repo="README.md",
+                path_or_fileobj=_dataset_readme(repo_id).encode("utf-8"),
+            ))
+        for i, item in enumerate(items):
+            cap_dir = item["capture_dir"]
+            model = item["model"]
+            agent = item.get("agent")
+            filename = item.get("filename")
+            provider_columns = detect_provider_columns(cap_dir)
+            if filename is None:
+                filename = _default_filename(
+                    agent=agent,
+                    model=model,
+                    provider=provider_columns.get("provider") or None,
+                )
+            path_in_repo = "/".join(p for p in ("data", subdir, filename) if p)
+            # Disambiguate temp paths if two items happen to pick the
+            # same default filename (unlikely with the timestamp+hex
+            # suffix, but cheap to guard).
+            local_file = Path(tmpdir) / f"{i}-{filename}"
+            n_rows = export_local(
+                cap_dir, local_file, provider_columns=provider_columns,
+                progress=False,
+            )
+            n_rows_list.append(n_rows)
+            operations.append(CommitOperationAdd(
+                path_in_repo=path_in_repo,
+                path_or_fileobj=str(local_file),
+            ))
 
-    return n_rows
+        api.create_commit(
+            repo_id=repo_id,
+            repo_type="dataset",
+            operations=operations,
+            commit_message=f"agentcap export: add {len(operations)} parquet(s)",
+        )
+
+    return n_rows_list

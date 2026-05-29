@@ -1,13 +1,18 @@
 # Roadmap
 
-The producer side (runner + capture proxy + parquet export + bucket
-push) is in place. The one missing piece is the consumer side: a way
-to look at the captured parquets without writing a notebook.
+The producer side (runner + capture proxy + parquet export + dataset
+push) is in place. Pushed datasets get the Hub Dataset Viewer for
+free; a custom inspector would only earn its maintenance if it added
+something the viewer can't.
 
-## Inspector Space
+## Inspector Space (probably not needed)
 
-Public Gradio CPU Space, pure parquet reader. Loads via
-`load_dataset("hf://buckets/.../<prefix>/")`. Three views:
+The free Hub Dataset Viewer covers the common case (paginated table,
+filter, row expand). A custom Gradio Space would only earn its
+maintenance if it added something the viewer can't — chat-style
+timeline rendering, cross-`(agent, model)` comparison on the same
+task, or kv-cache-reuse prefix-stability highlighting. Three views
+the Space could host:
 
 1. **Session timeline** — chat-style thread, system prompt collapsed,
    tool calls as expandable cards showing `(tool_name, arguments,

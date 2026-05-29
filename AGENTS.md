@@ -112,26 +112,29 @@ explicitly first.
     dir leaks those files into every capture, contaminating
     the dataset's "stable" prefix.
 
-11. **`--push` only writes to Storage Buckets, never to Dataset
-    repos.** Buckets are append-by-prefix — the natural shape for a
-    corpus that grows. Dataset repos are atomic-replace via
-    `push_to_hub`, which doesn't fit. To publish a curated cut to a
-    Dataset repo, render to `--output` then `hf upload` it. The
-    "load-concat-repush to fake append on a Dataset repo" pattern is
-    explicitly rejected.
+11. **`--push` writes to Hugging Face Dataset repos.** One
+    `agentcap export` invocation produces one git commit, regardless
+    of how many runs it bundles; files land under
+    `data/[<subdir>/]<file>.parquet`. Repos are auto-created on
+    first push, and a starter dataset card is seeded then (left
+    alone on subsequent pushes). Buckets were the original target;
+    the move to Datasets was driven by the free Hub Dataset Viewer
+    that lights up automatically on `data/*.parquet`. The
+    "atomic-replace" semantics of `Dataset.push_to_hub` would
+    overwrite a growing corpus, so agentcap doesn't use it.
 
-12. **Each `push_bucket` call writes a unique parquet filename by
+12. **Each `push_dataset` call writes a unique parquet filename by
     default** that embeds `(agent, model, provider)` so the filename
     alone tells you what's inside —
     `train-<agent>-<model>-<provider>-YYYYMMDDTHHMMSS-HEX6.parquet`.
     Each part is optional and is omitted when unknown; `agent` is
-    supplied by the caller (capture dirs have no in-band source for
-    it), `model` and `provider` are derived from the captured
-    requests. An explicit `filename=` opts back into overwrite-in-
-    place — used only for "latest" pointer files.
+    read from the run's `run.json`, `model` and `provider` are
+    derived from the captured requests. An explicit `filename=` opts
+    back into overwrite-in-place — used only for "latest" pointer
+    files.
 
-13. **One output format only: parquet.** Single file via `--output`
-    (local) or single file under a bucket prefix via `--push`. JSONL
+13. **One output format only: parquet.** Single file per run, pushed
+    via `--push`. JSONL
     was dropped — it's a one-liner away from a parquet via
     `Dataset.from_parquet(...).to_json(...)`. Rendered token ids and
     per-message structural metadata are likewise consumer-side: a

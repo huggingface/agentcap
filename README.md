@@ -4,9 +4,10 @@ An end-to-end harness for running real coding agents at scale across
 `(agent × model × corpus)` and publishing every interaction as a
 [Hugging Face dataset](https://huggingface.co/docs/datasets). Drives
 the agent through a corpus of prompts, captures every chat-completion
-request and response byte-for-byte, and pushes the result to a Storage
-Bucket — so consumers can replay, render, or analyse what the agent
-actually sent and got back, without reconstructing it from a log.
+request and response byte-for-byte, and pushes the result to a
+Hugging Face Dataset repo — so consumers can replay, render, or
+analyse what the agent actually sent and got back, without
+reconstructing it from a log.
 
 The loop:
 
@@ -28,25 +29,19 @@ agentcap-compatible capture dir. The corpus is just a `tasks.txt`.
    skill injection via `--skills`; per-run sandbox (bwrap on
    Linux, lima on macOS) so agents that write absolute paths
    can't leak into the host repo.
-2. **Capture proxy** (`agentcap proxy`) — a transparent OpenAI-compat
-   HTTP proxy between the agent and the model server, dumping every
-   request/response pair to disk. Backend-agnostic: works with
-   `llama.cpp`, Inference Endpoints, Inference Providers, anything
-   that speaks `/v1/chat/completions`. Capture is intentionally
-   dumb — no tokenizer, no rendering, just persist the bytes.
+2. **Capture proxy** (internal to `agentcap run`) — a transparent
+   OpenAI-compat HTTP proxy between the agent and the model server,
+   dumping every request/response pair to disk. Backend-agnostic:
+   works with `llama.cpp`, Inference Endpoints, Inference Providers,
+   anything that speaks `/v1/chat/completions`. Capture is dumb —
+   no tokenizer, no rendering, just persist the bytes.
 3. **Dataset export** (`agentcap export`) — bundles the captured
-   capture dir into a parquet, one row per chat-completion request.
-   Push directly to a Hugging Face Storage Bucket, append-by-prefix,
-   Xet-deduplicated. The default filename embeds `(agent, model,
-   provider)` so a single prefix holds many tuples without aliasing.
-
-A consumer side, separately:
-
-4. **Inspector** (planned, hosted Space) — pure parquet reader
-   surfacing a session timeline (chat with expandable tool calls),
-   a rendered-bytes pane (the prompt as the model actually received
-   it, colour-coded per role), and cross-(agent, model) comparisons
-   on the same task. See [ROADMAP.md](ROADMAP.md).
+   capture dir into a parquet, one row per chat-completion request,
+   and pushes to a Hugging Face Dataset repo. Files land under
+   `data/` so the Hub Dataset Viewer renders them automatically;
+   consumers `load_dataset(...)`. The default filename embeds
+   `(agent, model, provider)` so a single repo holds many tuples
+   without aliasing.
 
 ## Architecture
 
@@ -66,10 +61,10 @@ A consumer side, separately:
                                agentcap export
                                        │
                                        ▼
-                       Hugging Face Storage Bucket
+                       Hugging Face Dataset repo
                                        │
                                        ▼
-                            Inspector Space / load_dataset
+                       Dataset Viewer / load_dataset
 ```
 
 The synthesizer talks to the model server **directly**, around the
@@ -152,31 +147,33 @@ pip install -e .
 GGUF_PATH=/path/to/model-Q4_K_M.gguf REASONING=off \
     ./scripts/start_llama_cpp_server.sh &
 
-# Drive Hermes through 30 prompts × 4 turns, capture, then export.
-# --followup synthesized hits a small synth model for topic-aware
-# multi-turn follow-ups (the synth call bypasses the capture proxy).
-# --followup continue is the cheaper alternative (literal "continue").
+# Drive an agent through a corpus. Each run mints a fresh subdir
+# under .agentcap/ in the workspace ($AGENTCAP_WORKSPACE or cwd):
+#   .agentcap/<agent>-<provider>-<utc>/{captures,run.json,...}
 agentcap run \
     --agent hermes \
     --model google/gemma-4-E4B-it \
     --upstream http://127.0.0.1:8000 \
     --tasks examples/transformers-coding-session/tasks.txt \
-    --turns 4 --followup synthesized \
-    --workdir runs/run-001/
+    --turns 4 --followup synthesized
 
-# HF Router flow (no extra synth flags needed).
-# If --api-key / AGENTCAP_API_KEY is unset, agentcap auto-tries
-# HF_TOKEN and ~/.cache/huggingface/token when upstream is the router.
+# Run a second agent on the same corpus, side by side.
 agentcap run \
-    --agent hermes \
-    --model Qwen/Qwen3-8B \
-    --upstream https://router.huggingface.co \
+    --agent goose \
+    --model google/gemma-4-E4B-it \
+    --upstream http://127.0.0.1:8000 \
     --tasks examples/transformers-coding-session/tasks.txt \
-    --turns 4 --followup synthesized \
-    --workdir runs/router-qwen3/
+    --turns 4 --followup synthesized
 
-agentcap export runs/run-001/captures \
-    --output runs/run-001.parquet
+# Browse what's captured.
+agentcap ls
+
+# Push everything to a Dataset repo.
+agentcap export --all --push my-org/my-captures/<corpus>
+
+# Or push selected runs only.
+agentcap export hermes-local-20260512-162345 \
+    --push my-org/my-captures/<corpus>
 ```
 
 See [docs/tested-models-and-agents.md](docs/tested-models-and-agents.md)
@@ -188,36 +185,48 @@ When `--followup synthesized` is enabled, `--synth-upstream` defaults
 to `--upstream` and `--synth-model` defaults to `--model`. Pass synth
 flags only when you intentionally want a different synth backend/model.
 
-`agentcap run` starts the capture proxy in-process and configures the
-agent to talk through it. If you'd rather drive the agent yourself,
-run `agentcap proxy` standalone and adjust your agent configuration
-to point to the proxy.
+## Workspace and `agentcap ls`
 
-## Pushing to a Storage Bucket
-
-`--push` writes the parquet directly into a [Hugging Face Storage
-Bucket](https://huggingface.co/docs/hub/storage-buckets) — mutable,
-append-by-prefix, Xet-deduplicated:
+`agentcap run` writes each invocation to
+`$AGENTCAP_WORKSPACE/.agentcap/<agent>-<provider>-<utc>/` (or cwd if
+`AGENTCAP_WORKSPACE` is unset). Pass `--workdir` to override.
 
 ```bash
-agentcap export <capture-dir> \
-    --push hf://buckets/my-org/my-captures/<corpus>/ \
-    --agent hermes
+agentcap ls                # short table
+agentcap ls --long         # add upstream + per-run capture counts
 ```
 
-Each run lands as a unique parquet file under the supplied prefix.
-The default filename embeds `(agent, model, provider)` so a single
-bucket prefix can hold many tuples without aliasing —
-`train-<agent>-<model>-<provider>-YYYYMMDDTHHMMSS-HEX6.parquet`.
-`--agent` is supplied by the caller (the capture dir has no in-band
-source for it); `<model>` and `<provider>` are derived from the
-captured requests. Consumers read the union via
-`load_dataset("hf://buckets/.../<prefix>/")`.
+## Pushing to a Dataset repo
 
-Dataset repos aren't a `--push` target on purpose: their semantics
-are *atomic replace*, which doesn't fit a corpus that grows over
-time. To publish a curated cut to a Dataset repo, render to
-`--output` first and `hf upload` it yourself.
+`agentcap export` walks one or more runs and uploads each as a parquet
+file into a Hugging Face Dataset repo (auto-created on first push).
+Files land under `data/[<subdir>/]<file>.parquet` so the Hub Dataset
+Viewer renders the parquet automatically.
+
+```bash
+# Push every run in the workspace.
+agentcap export --all --push my-org/my-captures/<corpus>
+
+# Or push selected runs (run-ids from `agentcap ls`).
+agentcap export hermes-local-20260512-162345 goose-local-20260512-170000 \
+    --push my-org/my-captures/<corpus>
+
+# Or point at an arbitrary workdir / capture dir directly.
+agentcap export ./some/workdir --push me/d
+```
+
+Each run lands as a unique parquet file. The default filename embeds
+`(agent, model, provider)` so a single repo can hold many tuples
+without aliasing —
+`train-<agent>-<model>-<provider>-YYYYMMDDTHHMMSS-HEX6.parquet`.
+`<agent>` is read from `run.json`; `<model>` and `<provider>` are
+derived from the captured requests. Consumers read the union via
+`load_dataset("my-org/my-captures")`.
+
+One `agentcap export` invocation produces one git commit, regardless
+of how many runs it bundles. On the first push to an empty repo,
+agentcap also seeds a dataset card (`README.md`); subsequent pushes
+leave any existing card untouched.
 
 ## What lands on disk
 
@@ -277,8 +286,7 @@ end-to-end, see [docs/tested-models-and-agents.md](docs/tested-models-and-agents
 
 ## Roadmap
 
-See [ROADMAP.md](ROADMAP.md) — the Inspector Space (parquet
-visualisation) is the one missing piece.
+See [ROADMAP.md](ROADMAP.md).
 
 ## Running tests
 

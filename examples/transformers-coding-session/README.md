@@ -26,7 +26,7 @@ otherwise set `TRANSFORMERS_CHECKOUT=<path>`.
 
 ```bash
 ./run.sh --agent hermes --model google/gemma-4-E4B-it
-./export.sh                    # latest workdir → corpus bucket
+./export.sh                    # latest workdir → corpus dataset
 ```
 
 `./run.sh --help` and `./export.sh --help` for the env-var knobs.

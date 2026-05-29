@@ -1,14 +1,14 @@
 """CLI smoke tests for `agentcap`.
 
 These do not actually start a uvicorn server — they patch out
-``agentcap.proxy.serve`` and assert the right kwargs are computed from
-the CLI flags. The proxy itself has its own integration test suite.
+``agentcap.proxy.serve_in_thread`` and assert the right kwargs are
+computed from the CLI flags. The proxy itself has its own integration
+test suite.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 from click.testing import CliRunner
@@ -20,7 +20,7 @@ def test_help_lists_subcommands():
     runner = CliRunner()
     result = runner.invoke(cli, ["--help"])
     assert result.exit_code == 0
-    for sub in ("proxy", "export", "run"):
+    for sub in ("export", "run"):
         assert sub in result.output
 
 
@@ -31,13 +31,6 @@ def test_version_flag():
     result = runner.invoke(cli, ["--version"])
     assert result.exit_code == 0
     assert __version__ in result.output
-
-
-def test_proxy_requires_upstream_and_capture_dir():
-    runner = CliRunner()
-    result = runner.invoke(cli, ["proxy"])
-    assert result.exit_code != 0
-    assert "--upstream" in result.output
 
 
 def test_parse_listen_ipv4():
@@ -205,13 +198,32 @@ def test_run_invokes_orchestrator_under_proxy(tmp_path: Path, monkeypatch, fake_
     assert summary["tasks"][0]["completed_turns"] == 2
 
 
-def test_export_requires_output_or_push(tmp_path: Path):
+def test_export_requires_push(tmp_path: Path):
+    runner = CliRunner()
+    result = runner.invoke(cli, ["export", str(tmp_path)])
+    assert result.exit_code != 0
+    assert "--push" in result.output
+
+
+def test_export_requires_targets_or_all(tmp_path: Path):
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["export", "--push", "me/d"]
+    )
+    assert result.exit_code != 0
+    assert "run-ids" in result.output or "--all" in result.output
+
+
+def test_export_rejects_both_targets_and_all(tmp_path: Path):
     capture = tmp_path / "capture"
     capture.mkdir()
     runner = CliRunner()
-    result = runner.invoke(cli, ["export", str(capture), "--model", "m"])
+    result = runner.invoke(
+        cli,
+        ["export", str(capture), "--all", "--push", "me/d"],
+    )
     assert result.exit_code != 0
-    assert "--output" in result.output or "--push" in result.output
+    assert "not both" in result.output
 
 
 def test_run_hf_router_api_key_auto_from_hf_token_env(
@@ -271,176 +283,110 @@ def test_run_hf_router_api_key_auto_from_hf_token_env(
     assert "HF Router token source=HF_TOKEN" in result.output
 
 
-def test_export_auto_detects_model_from_captures(tmp_path: Path):
-    """When --model is omitted, the CLI infers it from the capture dir."""
+def _write_capture(capture_dir: Path, rid: str, model: str) -> None:
     import json
+    (capture_dir / f"{rid}.request.json").write_text(json.dumps({
+        "request_id": rid, "captured_at": 1,
+        "body": {"model": model, "messages": []},
+    }))
 
+
+def test_export_auto_detects_model_from_captures(tmp_path: Path, fake_hf_api):
+    """The model auto-detected from captures lands in the committed filename."""
     capture = tmp_path / "capture"
     capture.mkdir()
-    # One captured request with the model field populated.
-    (capture / "rid.request.json").write_text(
-        json.dumps({
-            "request_id": "rid",
-            "captured_at": 1,
-            "body": {
-                "model": "google/gemma-4-E4B-it",
-                "messages": [{"role": "user", "content": "x"}],
-            },
-        })
-    )
+    _write_capture(capture, "rid", "google/gemma-4-E4B-it")
 
-    runner = CliRunner()
-    with patch("agentcap.export.export_local", return_value=1):
-        result = runner.invoke(
-            cli, ["export", str(capture), "--output", str(tmp_path / "out.parquet")]
-        )
+    result = CliRunner().invoke(
+        cli, ["export", str(capture), "--push", "me/d"],
+    )
     assert result.exit_code == 0, result.output
-    assert "using model 'google/gemma-4-E4B-it' (auto-detected)" in result.output
+    op = fake_hf_api.commits[0]["operations"][0]
+    assert "gemma-4-E4B-it" in op["path_in_repo"]
 
 
 def test_export_auto_detect_fails_on_mixed_models(tmp_path: Path):
-    """If captures span multiple models, --model becomes mandatory."""
-    import json
-
+    """Captures spanning multiple models fail loudly."""
     capture = tmp_path / "capture"
     capture.mkdir()
-    for rid, model in [("a", "model-1"), ("b", "model-2")]:
-        (capture / f"{rid}.request.json").write_text(
-            json.dumps({
-                "request_id": rid,
-                "captured_at": 1,
-                "body": {"model": model, "messages": []},
-            })
-        )
+    _write_capture(capture, "a", "model-1")
+    _write_capture(capture, "b", "model-2")
 
-    runner = CliRunner()
-    result = runner.invoke(
-        cli, ["export", str(capture), "--output", str(tmp_path / "out.jsonl")]
+    result = CliRunner().invoke(
+        cli, ["export", str(capture), "--push", "me/d"],
     )
     assert result.exit_code != 0
     assert "multiple models" in result.output
 
 
-def test_export_mixed_models_fail_even_with_model_flag(tmp_path: Path):
-    """Datasets never mix models — --model cannot bypass the uniqueness
-    check when the capture dir itself spans multiple models."""
+def test_export_no_model_in_captures_fails(tmp_path: Path):
+    """A capture dir with no model field at all is a hard error."""
     import json
-
     capture = tmp_path / "capture"
     capture.mkdir()
-    for rid, model in [("a", "model-1"), ("b", "model-2")]:
-        (capture / f"{rid}.request.json").write_text(
-            json.dumps({
-                "request_id": rid,
-                "captured_at": 1,
-                "body": {"model": model, "messages": []},
-            })
-        )
+    (capture / "rid.request.json").write_text(json.dumps({
+        "request_id": "rid", "captured_at": 1,
+        "body": {"messages": []},
+    }))
 
-    runner = CliRunner()
-    result = runner.invoke(
-        cli,
-        ["export", str(capture), "--model", "explicit-model",
-         "--output", str(tmp_path / "out.jsonl")],
-    )
-    assert result.exit_code != 0
-    assert "multiple models" in result.output
-
-
-def test_export_explicit_model_uses_override_when_captures_uniform(tmp_path: Path):
-    """If the capture dir is uniform but --model differs, the override is
-    accepted (--model is now only a bucket-filename hint; the parquet's
-    per-row ``model`` column still reflects the captured body.model)."""
-    import json
-
-    capture = tmp_path / "capture"
-    capture.mkdir()
-    (capture / "rid.request.json").write_text(
-        json.dumps({
-            "request_id": "rid",
-            "captured_at": 1,
-            "body": {"model": "capture-model", "messages": []},
-        })
-    )
-
-    runner = CliRunner()
-    with patch("agentcap.export.export_local", return_value=1):
-        result = runner.invoke(
-            cli,
-            ["export", str(capture), "--model", "override-model",
-             "--output", str(tmp_path / "out.parquet")],
-        )
-    assert result.exit_code == 0, result.output
-    # No auto-detect log when --model is explicit
-    assert "auto-detected" not in result.output
-
-
-def test_export_no_model_in_captures_requires_model_flag(tmp_path: Path):
-    """Trace dir with no model field at all → --model becomes mandatory."""
-    import json
-
-    capture = tmp_path / "capture"
-    capture.mkdir()
-    (capture / "rid.request.json").write_text(
-        json.dumps({
-            "request_id": "rid",
-            "captured_at": 1,
-            "body": {"messages": []},  # no model field
-        })
-    )
-
-    runner = CliRunner()
-    result = runner.invoke(
-        cli, ["export", str(capture), "--output", str(tmp_path / "out.jsonl")]
+    result = CliRunner().invoke(
+        cli, ["export", str(capture), "--push", "me/d"],
     )
     assert result.exit_code != 0
     assert "no captured requests with a model field" in result.output
 
 
-def test_export_push_rejects_dataset_repo_uri(tmp_path: Path):
-    """Only bucket URIs are accepted by --push; dataset repo URIs must
-    fail with a message pointing at the local-export workflow."""
-    import json
-
+def test_export_push_rejects_malformed_dataset_uri(tmp_path: Path):
     capture = tmp_path / "capture"
     capture.mkdir()
-    (capture / "rid.request.json").write_text(
-        json.dumps({
-            "request_id": "rid",
-            "captured_at": 1,
-            "body": {"model": "m", "messages": []},
-        })
-    )
+    _write_capture(capture, "rid", "m")
 
-    runner = CliRunner()
-    result = runner.invoke(
-        cli, ["export", str(capture), "--push", "hf://org/some-dataset"]
+    result = CliRunner().invoke(
+        cli, ["export", str(capture), "--push", "just-an-owner"],
     )
     assert result.exit_code != 0
-    assert "bucket URIs" in result.output
-    assert "hf upload" in result.output
+    assert "<owner>/<name>" in result.output
 
 
-def test_export_rejects_both_output_and_push(tmp_path: Path):
-    """The two destinations are mutually exclusive."""
+def test_export_resolves_workdir_layout_and_reads_agent_from_run_json(
+    tmp_path: Path, fake_hf_api
+):
+    """Pointing export at a workdir uses its captures/ subdir AND picks up
+    agent from run.json so the parquet filename embeds the agent."""
     import json
+    workdir = tmp_path / "ws" / "hermes-local-20260512-162345"
+    captures = workdir / "captures"
+    captures.mkdir(parents=True)
+    _write_capture(captures, "rid", "google/gemma-4-E4B-it")
+    (workdir / "run.json").write_text(json.dumps({"agent": "hermes"}))
 
-    capture = tmp_path / "capture"
-    capture.mkdir()
-    (capture / "rid.request.json").write_text(
-        json.dumps({
-            "request_id": "rid",
-            "captured_at": 1,
-            "body": {"model": "m", "messages": []},
-        })
+    result = CliRunner().invoke(
+        cli, ["export", str(workdir), "--push", "me/d"],
     )
+    assert result.exit_code == 0, result.output
+    op = fake_hf_api.commits[0]["operations"][0]
+    assert "hermes" in op["path_in_repo"]
 
-    runner = CliRunner()
-    result = runner.invoke(
-        cli,
-        ["export", str(capture),
-         "--output", str(tmp_path / "out.parquet"),
-         "--push", "hf://buckets/me/b/x"],
+
+def test_export_all_walks_workspace_in_one_commit(
+    tmp_path: Path, monkeypatch, fake_hf_api
+):
+    """--all enumerates every run-id in the workspace and pushes them all
+    in one git commit."""
+    import json
+    monkeypatch.setenv("AGENTCAP_WORKSPACE", str(tmp_path))
+    ws = tmp_path / ".agentcap"
+    for run_id in ("hermes-local-20260512-160000", "goose-local-20260512-170000"):
+        d = ws / run_id / "captures"
+        d.mkdir(parents=True)
+        _write_capture(d, "rid", "m")
+        (ws / run_id / "run.json").write_text(json.dumps({
+            "agent": run_id.split("-")[0],
+        }))
+
+    result = CliRunner().invoke(
+        cli, ["export", "--all", "--push", "me/d"],
     )
-    assert result.exit_code != 0
-    assert "not both" in result.output
+    assert result.exit_code == 0, result.output
+    assert len(fake_hf_api.commits) == 1
+    assert len(fake_hf_api.commits[0]["operations"]) == 2

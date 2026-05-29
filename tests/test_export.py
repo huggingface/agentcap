@@ -18,8 +18,8 @@ from agentcap.export import (
     detect_model,
     detect_provider_columns,
     export_local,
-    parse_bucket_uri,
-    push_bucket,
+    parse_dataset_uri,
+    push_dataset,
 )
 
 
@@ -193,131 +193,122 @@ def test_detect_provider_columns_empty_when_no_upstream_stamp(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# Bucket URI parsing + push_bucket
+# Dataset URI parsing + push_dataset
 # ---------------------------------------------------------------------------
 
 
-def test_parse_bucket_uri_with_prefix():
-    bucket_id, path = parse_bucket_uri("hf://buckets/owner/name/runs/x/y")
-    assert bucket_id == "owner/name"
-    assert path == "runs/x/y"
+def test_parse_dataset_uri_with_subdir():
+    repo_id, subdir = parse_dataset_uri("owner/name/runs/x/y")
+    assert repo_id == "owner/name"
+    assert subdir == "runs/x/y"
 
 
-def test_parse_bucket_uri_no_prefix():
-    bucket_id, path = parse_bucket_uri("hf://buckets/owner/name")
-    assert bucket_id == "owner/name"
-    assert path == ""
+def test_parse_dataset_uri_no_subdir():
+    repo_id, subdir = parse_dataset_uri("owner/name")
+    assert repo_id == "owner/name"
+    assert subdir == ""
 
 
-def test_parse_bucket_uri_rejects_non_bucket():
-    with pytest.raises(ValueError, match="not a bucket URI"):
-        parse_bucket_uri("hf://datasets/owner/name")
+def test_parse_dataset_uri_accepts_hf_datasets_prefix():
+    repo_id, subdir = parse_dataset_uri("hf://datasets/owner/name/runs")
+    assert repo_id == "owner/name"
+    assert subdir == "runs"
 
 
-def test_parse_bucket_uri_rejects_missing_name():
-    with pytest.raises(ValueError, match="hf://buckets/<owner>/<name>"):
-        parse_bucket_uri("hf://buckets/owner")
+def test_parse_dataset_uri_rejects_missing_name():
+    with pytest.raises(ValueError, match="<owner>/<name>"):
+        parse_dataset_uri("owner")
 
 
-def test_push_bucket_writes_parquet_to_prefix(tmp_path: Path, monkeypatch):
+def test_push_dataset_uploads_under_data_subdir(tmp_path: Path, fake_hf_api):
     import re
-
-    import pyarrow.parquet as pq
 
     capture = tmp_path / "capture"
     capture.mkdir()
     _write_capture(capture, "rid1", _BODY, {"choices": []})
     _write_capture(capture, "rid2", _BODY, {"choices": []})
 
-    captured: dict = {}
+    fake = fake_hf_api
 
-    def _fake_upload(bucket_id, *, add):
-        captured["bucket_id"] = bucket_id
-        captured["uploads"] = []
-        for local, remote in add:
-            table = pq.read_table(local)
-            captured["uploads"].append({
-                "remote": remote,
-                "n_rows": table.num_rows,
-                "columns": list(table.column_names),
-                "request_ids": list(table.column("request_id").to_pylist()),
-            })
-
-    monkeypatch.setattr(
-        "huggingface_hub.batch_bucket_files", _fake_upload, raising=False
+    push_dataset(
+        [{"capture_dir": capture, "model": "google/gemma-4-E4B-it"}],
+        "me/my-dataset/runs/abc",
     )
 
-    push_bucket(
-        capture, "hf://buckets/me/my-bucket/runs/abc",
-        model="google/gemma-4-E4B-it",
-    )
-
-    assert captured["bucket_id"] == "me/my-bucket"
-    assert len(captured["uploads"]) == 1
-    upload = captured["uploads"][0]
+    assert fake.created_repo == {
+        "repo_id": "me/my-dataset", "repo_type": "dataset", "exist_ok": True,
+    }
+    assert len(fake.commits) == 1
+    commit = fake.commits[0]
+    assert commit["repo_id"] == "me/my-dataset"
+    assert commit["repo_type"] == "dataset"
+    assert len(commit["operations"]) == 1
+    op = commit["operations"][0]
     assert re.fullmatch(
-        r"runs/abc/train-gemma-4-E4B-it-local-\d{8}T\d{6}-[0-9a-f]{6}\.parquet",
-        upload["remote"],
-    ), upload["remote"]
-    assert upload["n_rows"] == 2
-    assert sorted(upload["request_ids"]) == ["rid1", "rid2"]
-    # The schema after the manifest drop — pure data shuffle plus
-    # per-row fingerprint plus per-file provider columns.
-    assert set(upload["columns"]) == {
+        r"data/runs/abc/train-gemma-4-E4B-it-local-\d{8}T\d{6}-[0-9a-f]{6}\.parquet",
+        op["path_in_repo"],
+    ), op["path_in_repo"]
+    assert op["n_rows"] == 2
+    assert sorted(op["request_ids"]) == ["rid1", "rid2"]
+    assert set(op["columns"]) == {
         "request_id", "model", "captured_at", "request", "response",
         "served_by", "served_build_info", "served_model",
         "provider", "upstream_url",
     }
 
 
-def test_push_bucket_default_filenames_are_unique_across_calls(
-    tmp_path: Path, monkeypatch
+def test_push_dataset_batches_multiple_items_into_one_commit(
+    tmp_path: Path, fake_hf_api
 ):
-    """Two consecutive pushes to the same prefix must not collide."""
-    capture = tmp_path / "capture"
-    capture.mkdir()
-    _write_capture(capture, "rid", _BODY, {})
+    """N items → 1 create_commit call with N operations."""
+    items = []
+    for i in range(3):
+        cap = tmp_path / f"capture-{i}"
+        cap.mkdir()
+        _write_capture(cap, f"rid{i}", _BODY, {})
+        items.append({"capture_dir": cap, "model": "m", "agent": "hermes"})
 
-    seen_paths: list[str] = []
+    fake = fake_hf_api
+    n_rows = push_dataset(items, "me/d/runs")
 
-    def _fake_upload(bucket_id, *, add):
-        for _, remote in add:
-            seen_paths.append(remote)
-
-    monkeypatch.setattr(
-        "huggingface_hub.batch_bucket_files", _fake_upload, raising=False
-    )
-
-    for _ in range(3):
-        push_bucket(capture, "hf://buckets/me/b/prefix", model="m")
-    assert len(set(seen_paths)) == 3, f"filenames collided: {seen_paths}"
+    assert n_rows == [1, 1, 1]
+    assert len(fake.commits) == 1
+    assert len(fake.commits[0]["operations"]) == 3
+    paths = [op["path_in_repo"] for op in fake.commits[0]["operations"]]
+    assert len(set(paths)) == 3, f"filenames collided: {paths}"
 
 
-def test_push_bucket_explicit_filename_overrides_default(
-    tmp_path: Path, monkeypatch
+def test_push_dataset_no_subdir_lands_directly_under_data(
+    tmp_path: Path, fake_hf_api
 ):
     capture = tmp_path / "capture"
     capture.mkdir()
     _write_capture(capture, "rid", _BODY, {})
 
-    captured: dict = {}
+    fake = fake_hf_api
+    push_dataset([{"capture_dir": capture, "model": "m"}], "me/my-dataset")
 
-    def _fake_upload(bucket_id, *, add):
-        captured["remote_paths"] = [remote for _, remote in add]
+    op = fake.commits[0]["operations"][0]
+    assert op["path_in_repo"].startswith("data/train-")
 
-    monkeypatch.setattr(
-        "huggingface_hub.batch_bucket_files", _fake_upload, raising=False
+
+def test_push_dataset_explicit_filename_overrides_default(
+    tmp_path: Path, fake_hf_api
+):
+    capture = tmp_path / "capture"
+    capture.mkdir()
+    _write_capture(capture, "rid", _BODY, {})
+
+    fake = fake_hf_api
+    push_dataset(
+        [{"capture_dir": capture, "model": "m", "filename": "latest.parquet"}],
+        "me/my-dataset/runs",
     )
-
-    push_bucket(
-        capture, "hf://buckets/me/my-bucket/runs",
-        model="m", filename="latest.parquet",
-    )
-    assert captured["remote_paths"] == ["runs/latest.parquet"]
+    assert fake.commits[0]["operations"][0]["path_in_repo"] == "data/runs/latest.parquet"
 
 
-def test_push_bucket_default_filename_embeds_agent_and_slugs_model(
-    tmp_path: Path, monkeypatch
+def test_push_dataset_default_filename_embeds_agent_and_slugs_model(
+    tmp_path: Path, fake_hf_api
 ):
     import re
 
@@ -325,26 +316,57 @@ def test_push_bucket_default_filename_embeds_agent_and_slugs_model(
     capture.mkdir()
     _write_capture(capture, "rid", _BODY, {})
 
-    captured: dict = {}
-
-    def _fake_upload(bucket_id, *, add):
-        captured["remote_paths"] = [remote for _, remote in add]
-
-    monkeypatch.setattr(
-        "huggingface_hub.batch_bucket_files", _fake_upload, raising=False
+    fake = fake_hf_api
+    push_dataset(
+        [{
+            "capture_dir": capture,
+            "model": "google/gemma-4-E4B-it",
+            "agent": "goose",
+        }],
+        "me/my-dataset/runs",
     )
-
-    push_bucket(
-        capture, "hf://buckets/me/my-bucket/runs",
-        model="google/gemma-4-E4B-it",
-        agent="goose",
-    )
-
-    assert len(captured["remote_paths"]) == 1
+    op = fake.commits[0]["operations"][0]
     assert re.fullmatch(
-        r"runs/train-goose-gemma-4-E4B-it-local-\d{8}T\d{6}-[0-9a-f]{6}\.parquet",
-        captured["remote_paths"][0],
-    ), captured["remote_paths"][0]
+        r"data/runs/train-goose-gemma-4-E4B-it-local-\d{8}T\d{6}-[0-9a-f]{6}\.parquet",
+        op["path_in_repo"],
+    ), op["path_in_repo"]
+
+
+def test_push_dataset_seeds_readme_on_first_push(
+    tmp_path: Path, fake_hf_api
+):
+    """First push (empty repo) bundles a README.md in the same commit
+    as the parquet."""
+    fake_hf_api.existing_files = []  # simulate freshly-created repo
+    capture = tmp_path / "capture"
+    capture.mkdir()
+    _write_capture(capture, "rid", _BODY, {})
+
+    push_dataset([{"capture_dir": capture, "model": "m"}], "me/my-dataset")
+
+    ops = fake_hf_api.commits[0]["operations"]
+    paths = [op["path_in_repo"] for op in ops]
+    assert "README.md" in paths
+    readme_op = next(op for op in ops if op["path_in_repo"] == "README.md")
+    body = readme_op["bytes"].decode("utf-8")
+    assert "me/my-dataset" in body
+    assert "load_dataset" in body
+
+
+def test_push_dataset_skips_readme_when_one_exists(
+    tmp_path: Path, fake_hf_api
+):
+    """Subsequent pushes (README already in the repo) don't include it
+    in the commit — user edits are preserved."""
+    # fake_hf_api defaults to existing_files=["README.md"]
+    capture = tmp_path / "capture"
+    capture.mkdir()
+    _write_capture(capture, "rid", _BODY, {})
+
+    push_dataset([{"capture_dir": capture, "model": "m"}], "me/my-dataset")
+
+    paths = [op["path_in_repo"] for op in fake_hf_api.commits[0]["operations"]]
+    assert "README.md" not in paths
 
 
 # ---------------------------------------------------------------------------

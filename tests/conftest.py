@@ -423,6 +423,64 @@ def fake_sandbox():
 
 
 # ---------------------------------------------------------------------------
+# Fake huggingface_hub.HfApi for export tests
+# ---------------------------------------------------------------------------
+
+
+class _FakeHfApi:
+    """Captures create_repo + list_repo_files + create_commit calls so
+    push_dataset can be asserted on without hitting the network. Reads
+    back each committed parquet to expose its row count + columns +
+    request_ids; bytes payloads (e.g. README.md) are recorded as-is."""
+
+    def __init__(self):
+        self.created_repo: dict | None = None
+        self.commits: list[dict] = []
+        # Default to steady-state: README already in the repo, so
+        # parquet-focused tests don't see the first-push README op
+        # bleed into their assertions. Tests exercising first-push
+        # behaviour clear this.
+        self.existing_files: list[str] = ["README.md"]
+
+    def create_repo(self, *, repo_id, repo_type, exist_ok):
+        self.created_repo = {
+            "repo_id": repo_id, "repo_type": repo_type, "exist_ok": exist_ok,
+        }
+
+    def list_repo_files(self, repo_id, repo_type):
+        return list(self.existing_files)
+
+    def create_commit(self, *, repo_id, repo_type, operations, commit_message):
+        import pyarrow.parquet as pq
+
+        op_list: list[dict] = []
+        for op in operations:
+            entry: dict = {"path_in_repo": op.path_in_repo}
+            payload = op.path_or_fileobj
+            if isinstance(payload, (bytes, bytearray)):
+                entry["bytes"] = bytes(payload)
+            else:
+                table = pq.read_table(payload)
+                entry["n_rows"] = table.num_rows
+                entry["columns"] = list(table.column_names)
+                entry["request_ids"] = list(table.column("request_id").to_pylist())
+            op_list.append(entry)
+        self.commits.append({
+            "repo_id": repo_id,
+            "repo_type": repo_type,
+            "commit_message": commit_message,
+            "operations": op_list,
+        })
+
+
+@pytest.fixture
+def fake_hf_api(monkeypatch):
+    fake = _FakeHfApi()
+    monkeypatch.setattr("huggingface_hub.HfApi", lambda *a, **kw: fake)
+    return fake
+
+
+# ---------------------------------------------------------------------------
 # Mock HTTP server fixture
 # ---------------------------------------------------------------------------
 

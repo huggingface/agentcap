@@ -118,4 +118,4 @@ fi
 agentcap run "${ARGS[@]}"
 
 echo "done. captures in $WORKDIR/captures, summary in $WORKDIR/run.json"
-echo "next: $HERE/export.sh \"$WORKDIR\"   # render + push to the corpus bucket"
+echo "next: $HERE/export.sh \"$WORKDIR\"   # render + push to the corpus dataset"
