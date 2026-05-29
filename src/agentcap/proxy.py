@@ -24,7 +24,12 @@ from starlette.routing import Route
 # Constant so per-agent Containerfiles can bake the proxy URL into
 # the agent's config files without per-run rewriting.
 IN_PROCESS_PROXY_HOST = "127.0.0.1"
-IN_PROCESS_PROXY_PORT = 8001
+# 0 = let the kernel pick a free ephemeral port. The actual bound
+# value is read back from the socket in serve_in_thread and surfaced
+# as ProxyHandle.port — callers wire it into AGENTCAP_PROXY_URL after
+# startup. Concurrent ``agentcap run`` invocations on the same host
+# no longer collide.
+IN_PROCESS_PROXY_PORT = 0
 
 CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
 
@@ -353,13 +358,19 @@ class ProxyHandle:
 def serve_in_thread(
     upstream: str,
     capture_dir: Path | str,
-    host: str = "127.0.0.1",
-    port: int = 8001,
+    host: str = IN_PROCESS_PROXY_HOST,
+    port: int = IN_PROCESS_PROXY_PORT,
     *,
     log_level: str = "warning",
     startup_timeout: float = 10.0,
 ) -> ProxyHandle:
-    """Start the proxy on a daemon thread; block until uvicorn is bound."""
+    """Start the proxy on a daemon thread; block until uvicorn is bound.
+
+    ``port=0`` (the default) asks the kernel for an ephemeral port; the
+    actual bound port is read back from the live socket and exposed as
+    ``ProxyHandle.port`` so callers can build the agent-facing URL
+    after startup.
+    """
     import threading
     import time
 
@@ -382,4 +393,15 @@ def serve_in_thread(
             )
         time.sleep(0.05)
 
-    return ProxyHandle(server, thread, host, port)
+    # uvicorn populates ``server.servers`` during startup; each entry
+    # is an asyncio Server with a ``sockets`` list. Read the actual
+    # bound (host, port) tuple back so ``port=0`` callers see the
+    # ephemeral port the kernel picked.
+    bound_host, bound_port = host, port
+    try:
+        sockname = server.servers[0].sockets[0].getsockname()
+        bound_host, bound_port = sockname[0], sockname[1]
+    except (AttributeError, IndexError, TypeError):
+        pass
+
+    return ProxyHandle(server, thread, bound_host, bound_port)

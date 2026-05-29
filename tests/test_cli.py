@@ -8,6 +8,7 @@ test suite.
 
 from __future__ import annotations
 
+import types
 from pathlib import Path
 
 from click.testing import CliRunner
@@ -75,7 +76,7 @@ def test_run_synthesized_defaults_from_upstream_and_model(
 
     @contextlib.contextmanager
     def fake_proxy(*args, **kwargs):
-        yield None
+        yield types.SimpleNamespace(host="127.0.0.1", port=18001)
 
     monkeypatch.setattr("agentcap.proxy.serve_in_thread", fake_proxy)
 
@@ -146,7 +147,7 @@ def test_run_invokes_orchestrator_under_proxy(tmp_path: Path, monkeypatch, fake_
     @contextlib.contextmanager
     def fake_proxy(*args, **kwargs):
         proxy_started["count"] += 1
-        yield None
+        yield types.SimpleNamespace(host="127.0.0.1", port=18001)
 
     monkeypatch.setattr("agentcap.proxy.serve_in_thread", fake_proxy)
 
@@ -242,7 +243,7 @@ def test_run_hf_router_api_key_auto_from_hf_token_env(
 
     @contextlib.contextmanager
     def fake_proxy(*args, **kwargs):
-        yield None
+        yield types.SimpleNamespace(host="127.0.0.1", port=18001)
 
     monkeypatch.setattr("agentcap.proxy.serve_in_thread", fake_proxy)
     monkeypatch.setenv("HF_TOKEN", "hf_env_token")

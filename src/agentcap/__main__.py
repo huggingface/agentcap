@@ -267,17 +267,8 @@ def run_cmd(
     from .followups import get_followup
     from .orchestrator import Orchestrator, read_tasks_txt
     from .provider import _hostname_fallback, refine_for_sub_provider
-    from .proxy import (
-        IN_PROCESS_PROXY_HOST,
-        IN_PROCESS_PROXY_PORT,
-        serve_in_thread,
-    )
+    from .proxy import serve_in_thread
     from .sandbox import require_sandbox_or_die
-
-    # The proxy is now a fully internal dependency of ``run`` — fixed
-    # localhost bind, agent picks it up via AGENTCAP_PROXY_URL.
-    host, port = IN_PROCESS_PROXY_HOST, IN_PROCESS_PROXY_PORT
-    proxy_url = f"http://{host}:{port}/v1"
 
     if not model:
         raise click.UsageError(
@@ -319,65 +310,76 @@ def run_cmd(
     sessions.mkdir(parents=True, exist_ok=True)
     click.echo(f"  [workdir] {workdir_p}", err=True)
 
-    # First call per agent builds/boots the image; can take minutes.
-    # Env vars consumed by the image entrypoint to render configs.
-    sandbox_env = {
-        "AGENTCAP_PROXY_URL": proxy_url,
-        "AGENTCAP_MODEL": model,
-        "AGENTCAP_PROVIDER": provider_slug,
-    }
-    if api_key:
-        sandbox_env["AGENTCAP_API_KEY"] = api_key
-    sandbox_ro: list[Path] = []
-    if skills_dir is not None:
-        skills_abs = Path(skills_dir).resolve()
-        sandbox_env["AGENTCAP_SKILLS_DIR"] = str(skills_abs)
-        sandbox_ro.append(skills_abs)
-    sandbox = require_sandbox_or_die(
-        agent=agent, command="agentcap run", log=_sb_log,
-        env=sandbox_env,
-        readonly_paths=sandbox_ro,
-    )
-
-    # ``--sandbox`` is the host directory the agent sees as cwd. When
-    # omitted, default to an empty ``sandbox/`` next to ``captures/``
-    # under the auto-derived run dir — mirrors the convention
-    # examples/transformers-coding-session/run.sh already uses.
-    if sandbox_dir is not None:
-        sandbox_cwd = str(Path(sandbox_dir).resolve())
-    else:
-        default_sandbox = workdir_p / "sandbox"
-        default_sandbox.mkdir(parents=True, exist_ok=True)
-        sandbox_cwd = str(default_sandbox)
-
-    driver_kwargs: dict = {"sandbox": sandbox, "cwd": sandbox_cwd, "model": model}
-    driver = get_driver(agent, **driver_kwargs)
     tasks = read_tasks_txt(tasks_file)
     if not tasks:
         raise click.UsageError(f"no tasks found in {tasks_file}")
 
-    click.echo(
-        f"agentcap run: {len(tasks)} tasks × {turns} turns through {agent} "
-        f"-> {upstream}",
-        err=True,
-    )
-
     def _on_event(event: str, **kw):
         click.echo(f"  [{event}] " + " ".join(f"{k}={v}" for k, v in kw.items()), err=True)
 
-    orch = Orchestrator(driver, fu, sessions_dir=sessions, on_event=_on_event)
+    # Start the proxy first so we know which ephemeral port the kernel
+    # assigned before baking AGENTCAP_PROXY_URL into the sandbox env.
+    # Concurrent ``agentcap run`` invocations don't collide on :8001
+    # any more.
+    with serve_in_thread(upstream, captures) as proxy:
+        proxy_url = f"http://{proxy.host}:{proxy.port}/v1"
+        click.echo(f"  [proxy] {proxy_url}", err=True)
 
-    try:
-        with serve_in_thread(upstream, captures, host=host, port=port):
-            results = orch.run_corpus(tasks, turns_per_task=turns, timeout=timeout)
-    finally:
-        close = getattr(driver, "close", None)
-        if callable(close):
-            close()
-        # Tear down the sandbox's working container / VM session.
-        sb_close = getattr(sandbox, "close", None)
-        if callable(sb_close):
-            sb_close()
+        sandbox_env = {
+            "AGENTCAP_PROXY_URL": proxy_url,
+            "AGENTCAP_MODEL": model,
+            "AGENTCAP_PROVIDER": provider_slug,
+        }
+        if api_key:
+            sandbox_env["AGENTCAP_API_KEY"] = api_key
+        sandbox_ro: list[Path] = []
+        if skills_dir is not None:
+            skills_abs = Path(skills_dir).resolve()
+            sandbox_env["AGENTCAP_SKILLS_DIR"] = str(skills_abs)
+            sandbox_ro.append(skills_abs)
+        # First call per agent builds/boots the image; can take minutes.
+        sandbox = require_sandbox_or_die(
+            agent=agent, command="agentcap run", log=_sb_log,
+            env=sandbox_env,
+            readonly_paths=sandbox_ro,
+        )
+
+        # ``--sandbox`` is the host directory the agent sees as cwd.
+        # When omitted, default to an empty ``sandbox/`` next to
+        # ``captures/`` under the auto-derived run dir — mirrors the
+        # convention examples/transformers-coding-session/run.sh uses.
+        if sandbox_dir is not None:
+            sandbox_cwd = str(Path(sandbox_dir).resolve())
+        else:
+            default_sandbox = workdir_p / "sandbox"
+            default_sandbox.mkdir(parents=True, exist_ok=True)
+            sandbox_cwd = str(default_sandbox)
+
+        driver_kwargs: dict = {
+            "sandbox": sandbox, "cwd": sandbox_cwd, "model": model,
+        }
+        driver = get_driver(agent, **driver_kwargs)
+
+        click.echo(
+            f"agentcap run: {len(tasks)} tasks × {turns} turns through "
+            f"{agent} -> {upstream}",
+            err=True,
+        )
+        orch = Orchestrator(
+            driver, fu, sessions_dir=sessions, on_event=_on_event,
+        )
+
+        try:
+            results = orch.run_corpus(
+                tasks, turns_per_task=turns, timeout=timeout,
+            )
+        finally:
+            close = getattr(driver, "close", None)
+            if callable(close):
+                close()
+            sb_close = getattr(sandbox, "close", None)
+            if callable(sb_close):
+                sb_close()
 
     summary = {
         "agent": agent,
