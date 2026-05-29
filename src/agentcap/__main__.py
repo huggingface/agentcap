@@ -19,25 +19,6 @@ def cli() -> None:
     """agentcap: capture LLM-agent chat-completion bytes."""
 
 
-def _parse_listen(listen: str) -> tuple[str, int]:
-    if ":" not in listen:
-        raise click.BadParameter(
-            f"--listen must be HOST:PORT, got {listen!r}", param_hint="--listen"
-        )
-    host, _, port_s = listen.rpartition(":")
-    try:
-        port = int(port_s)
-    except ValueError as exc:
-        raise click.BadParameter(
-            f"port {port_s!r} is not an integer", param_hint="--listen"
-        ) from exc
-    if not (0 < port < 65536):
-        raise click.BadParameter(
-            f"port {port} out of range", param_hint="--listen"
-        )
-    return host, port
-
-
 def _is_hf_router_upstream(upstream: str) -> bool:
     host = (urlparse(upstream).hostname or "").lower()
     return host == "router.huggingface.co"
@@ -215,31 +196,16 @@ def export_cmd(targets: tuple[str, ...], all_runs: bool, push: str) -> None:
     "we also auto-try HF_TOKEN and ~/.cache/huggingface/token.",
 )
 @click.option(
-    "--listen",
-    default=None,
-    help="HOST:PORT the in-process capture proxy binds on "
-    "(default: 127.0.0.1:8001). Override if the default port "
-    "collides on your host — the agent images pick the URL up via "
-    "AGENTCAP_PROXY_URL.",
-)
-@click.option(
-    "--workdir",
-    default=None,
-    type=click.Path(file_okay=False, dir_okay=True),
-    help="Output directory for captures, session logs, and the run summary. "
-    "Defaults to ``$AGENTCAP_WORKSPACE/.agentcap/<agent>-<provider>-<utc>/`` "
-    "(or under cwd if AGENTCAP_WORKSPACE is unset).",
-)
-@click.option(
-    "--workspace",
+    "--sandbox",
+    "sandbox_dir",
     default=None,
     type=click.Path(exists=True, file_okay=False, dir_okay=True),
-    help="Host directory to expose as the agent's cwd (bind-mounted "
-    "writable into the sandbox). Use this when the corpus needs the "
-    "agent to see real source — e.g. a transformers git worktree for "
-    "the transformers-coding-session corpus. If omitted, the agent's "
-    "cwd is a fresh hermetic temp dir (recommended for any corpus "
-    "that's self-contained).",
+    help="Host directory exposed as the agent's cwd (bind-mounted "
+    "writable into the per-agent container). Use this when the corpus "
+    "needs the agent to see real source — e.g. a transformers git "
+    "worktree for the transformers-coding-session corpus. If omitted, "
+    "an empty ``sandbox/`` is created next to ``captures/`` under the "
+    "auto-derived run dir.",
 )
 @click.option(
     "--skills",
@@ -276,18 +242,6 @@ def export_cmd(targets: tuple[str, ...], all_runs: bool, push: str) -> None:
     help="Follow-up strategy for turns 2..N.",
 )
 @click.option(
-    "--synth-upstream",
-    default=None,
-    help="Synthesizer endpoint (only used with --followup synthesized). "
-    "Should bypass the capture proxy. Defaults to --upstream.",
-)
-@click.option(
-    "--synth-model",
-    default=None,
-    help="Synthesizer model id (only used with --followup synthesized). "
-    "Defaults to --model.",
-)
-@click.option(
     "--timeout",
     type=float,
     default=1200,
@@ -299,15 +253,11 @@ def run_cmd(
     model: str | None,
     upstream: str,
     api_key: str | None,
-    listen: str | None,
-    workdir: str,
-    workspace: str | None,
+    sandbox_dir: str | None,
     skills_dir: str | None,
     tasks_file: str,
     turns: int,
     followup: str,
-    synth_upstream: str | None,
-    synth_model: str | None,
     timeout: float,
 ) -> None:
     """Drive an agent CLI through a corpus, capture, summarise."""
@@ -324,24 +274,10 @@ def run_cmd(
     )
     from .sandbox import require_sandbox_or_die
 
-    # Validate before touching the sandbox / workdir so a bad CLI call
-    # doesn't pay the cost of building / booting the per-agent image.
-
-    # Bind 0.0.0.0 needs a sandbox-reachable advertise host:
-    # host.lima.internal on macOS/Lima, 127.0.0.1 on Linux/bwrap.
-    if listen is not None:
-        host, port = _parse_listen(listen)
-    else:
-        host, port = IN_PROCESS_PROXY_HOST, IN_PROCESS_PROXY_PORT
-    agent_host = host
-    if host in ("0.0.0.0", "::"):
-        import platform as _platform
-        import shutil as _shutil
-        if _platform.system() == "Darwin" and _shutil.which("limactl"):
-            agent_host = "host.lima.internal"
-        else:
-            agent_host = "127.0.0.1"
-    proxy_url = f"http://{agent_host}:{port}/v1"
+    # The proxy is now a fully internal dependency of ``run`` — fixed
+    # localhost bind, agent picks it up via AGENTCAP_PROXY_URL.
+    host, port = IN_PROCESS_PROXY_HOST, IN_PROCESS_PROXY_PORT
+    proxy_url = f"http://{host}:{port}/v1"
 
     if not model:
         raise click.UsageError(
@@ -349,13 +285,7 @@ def run_cmd(
         )
 
     if followup == "synthesized":
-        resolved_synth_upstream = synth_upstream or upstream
-        resolved_synth_model = synth_model or model
-        fu = get_followup(
-            "synthesized",
-            upstream=resolved_synth_upstream,
-            model=resolved_synth_model,
-        )
+        fu = get_followup("synthesized", upstream=upstream, model=model)
     else:
         fu = get_followup(followup)
 
@@ -382,9 +312,7 @@ def run_cmd(
     )
     click.echo(f"  [provider] {provider_slug}", err=True)
 
-    if workdir is None:
-        workdir = str(_default_workdir(agent, provider_slug))
-    workdir_p = Path(workdir)
+    workdir_p = _default_workdir(agent, provider_slug)
     captures = workdir_p / "captures"
     sessions = workdir_p / "sessions"
     captures.mkdir(parents=True, exist_ok=True)
@@ -411,12 +339,16 @@ def run_cmd(
         readonly_paths=sandbox_ro,
     )
 
-    # Without --workspace, mint a hermetic temp dir so cwd-side state
-    # (Hermes auto-injects AGENTS.md) doesn't leak between runs.
-    if workspace is not None:
-        sandbox_cwd = str(Path(workspace).resolve())
+    # ``--sandbox`` is the host directory the agent sees as cwd. When
+    # omitted, default to an empty ``sandbox/`` next to ``captures/``
+    # under the auto-derived run dir — mirrors the convention
+    # examples/transformers-coding-session/run.sh already uses.
+    if sandbox_dir is not None:
+        sandbox_cwd = str(Path(sandbox_dir).resolve())
     else:
-        sandbox_cwd = sandbox.mkdtemp(prefix="agentcap-run-")
+        default_sandbox = workdir_p / "sandbox"
+        default_sandbox.mkdir(parents=True, exist_ok=True)
+        sandbox_cwd = str(default_sandbox)
 
     driver_kwargs: dict = {"sandbox": sandbox, "cwd": sandbox_cwd, "model": model}
     driver = get_driver(agent, **driver_kwargs)
@@ -426,7 +358,7 @@ def run_cmd(
 
     click.echo(
         f"agentcap run: {len(tasks)} tasks × {turns} turns through {agent} "
-        f"via proxy {host}:{port} -> {upstream}",
+        f"-> {upstream}",
         err=True,
     )
 
@@ -452,7 +384,6 @@ def run_cmd(
         "model": model,
         "provider": provider_slug,
         "upstream": upstream,
-        "proxy_listen": f"{host}:{port}",
         "turns_per_task": turns,
         "followup": followup,
         "tasks": [

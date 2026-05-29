@@ -10,10 +10,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 from click.testing import CliRunner
 
-from agentcap.__main__ import cli, _parse_listen
+from agentcap.__main__ import cli
 
 
 def test_help_lists_subcommands():
@@ -31,25 +30,6 @@ def test_version_flag():
     result = runner.invoke(cli, ["--version"])
     assert result.exit_code == 0
     assert __version__ in result.output
-
-
-def test_parse_listen_ipv4():
-    assert _parse_listen("127.0.0.1:8001") == ("127.0.0.1", 8001)
-
-
-def test_parse_listen_no_colon_rejected():
-    with pytest.raises(Exception):
-        _parse_listen("127.0.0.1")
-
-
-def test_parse_listen_bad_port_rejected():
-    with pytest.raises(Exception):
-        _parse_listen("127.0.0.1:notaport")
-
-
-def test_parse_listen_out_of_range_rejected():
-    with pytest.raises(Exception):
-        _parse_listen("127.0.0.1:99999")
 
 
 def test_run_requires_agent_upstream_and_workdir():
@@ -99,6 +79,7 @@ def test_run_synthesized_defaults_from_upstream_and_model(
 
     monkeypatch.setattr("agentcap.proxy.serve_in_thread", fake_proxy)
 
+    monkeypatch.setenv("AGENTCAP_WORKSPACE", str(tmp_path))
     runner = CliRunner()
     result = runner.invoke(
         cli,
@@ -107,7 +88,6 @@ def test_run_synthesized_defaults_from_upstream_and_model(
             "--agent", "hermes",
             "--model", "google/gemma-4-E4B-it",
             "--upstream", "http://up",
-            "--workdir", str(tmp_path / "wd"),
             "--tasks", str(tasks),
             "--turns", "2",
             "--followup", "synthesized",
@@ -125,7 +105,7 @@ def test_run_invokes_orchestrator_under_proxy(tmp_path: Path, monkeypatch, fake_
 
     tasks = tmp_path / "tasks.txt"
     tasks.write_text("first task\nsecond task\n")
-    workdir = tmp_path / "wd"
+    monkeypatch.setenv("AGENTCAP_WORKSPACE", str(tmp_path))
 
     # Fake driver returned by get_driver; records calls.
     class _FakeDriver:
@@ -178,7 +158,6 @@ def test_run_invokes_orchestrator_under_proxy(tmp_path: Path, monkeypatch, fake_
             "--agent", "hermes",
             "--model", "google/gemma-4-E4B-it",
             "--upstream", "http://up:8000",
-            "--workdir", str(workdir),
             "--tasks", str(tasks),
             "--turns", "2",
         ],
@@ -187,8 +166,10 @@ def test_run_invokes_orchestrator_under_proxy(tmp_path: Path, monkeypatch, fake_
     assert proxy_started["count"] == 1
     assert fake_driver.start_calls == 2   # one per task
     assert fake_driver.resume_calls == 2  # one follow-up per task
-    # run.json summary written
-    summary_path = workdir / "run.json"
+    # run.json summary written under the auto-derived workdir
+    run_dirs = sorted((tmp_path / ".agentcap").glob("hermes-*"))
+    assert len(run_dirs) == 1, run_dirs
+    summary_path = run_dirs[0] / "run.json"
     assert summary_path.is_file()
     import json
 
@@ -265,6 +246,7 @@ def test_run_hf_router_api_key_auto_from_hf_token_env(
 
     monkeypatch.setattr("agentcap.proxy.serve_in_thread", fake_proxy)
     monkeypatch.setenv("HF_TOKEN", "hf_env_token")
+    monkeypatch.setenv("AGENTCAP_WORKSPACE", str(tmp_path))
 
     runner = CliRunner()
     result = runner.invoke(
@@ -274,7 +256,6 @@ def test_run_hf_router_api_key_auto_from_hf_token_env(
             "--agent", "hermes",
             "--model", "Qwen/Qwen3-8B",
             "--upstream", "https://router.huggingface.co",
-            "--workdir", str(tmp_path / "wd"),
             "--tasks", str(tasks),
             "--turns", "1",
         ],
