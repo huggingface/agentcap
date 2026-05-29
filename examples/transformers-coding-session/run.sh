@@ -18,29 +18,24 @@
 #   ./run.sh --agent pi --model qwen3.6-35b-a3b
 #   ./run.sh --agent goose --model gemma-4-26b
 #
-# ``--agent`` accepts any value listed by ``agentcap run --help``.
-# ``--model`` is required for all agents.
-#
-# Captures + run.json land at
-# ``$AGENTCAP_WORKSPACE/.agentcap/<agent>-<provider>-<utc>/`` (run
-# ``agentcap ls`` to find the latest run). The export step at the end
-# auto-selects the most recent one.
+# Captures + run.json land under ``$HERE/.agentcap/<run-id>/`` (this
+# script pins AGENTCAP_WORKSPACE to the corpus dir so each corpus
+# keeps its own runs). ``./export.sh`` then picks them up.
 #
 # Env knobs:
-#   UPSTREAM        model server URL                http://127.0.0.1:8000
-#   TURNS           multi-turn count                4
-#   FOLLOWUP        continue | templates | synthesized   synthesized
-#   TIMEOUT         per-turn timeout in seconds     300
-#   TRANSFORMERS_CHECKOUT  path to a transformers git checkout. The
-#                   script seeds <sandbox>/ as a detached
-#                   ``git worktree`` of it so the agent has real
-#                   transformers code to inspect — without this the
-#                   sandbox is empty and the corpus prompts produce
-#                   pure speculation.
+#   UPSTREAM   model server URL                http://127.0.0.1:8000
+#   TURNS      multi-turn count                4
+#   FOLLOWUP   continue | templates | synthesized   synthesized
+#   TIMEOUT    per-turn timeout in seconds     300
+#   TRANSFORMERS_CHECKOUT  path to a transformers git checkout; the
+#              script seeds <sandbox>/ as a detached ``git worktree``
+#              of it so corpus prompts have real code to ground in.
 
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+export AGENTCAP_WORKSPACE="$HERE"
+
 AGENT=""
 MODEL=""
 while [[ $# -gt 0 ]]; do
@@ -55,12 +50,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ -z "$AGENT" ]]; then
-    echo "ERROR: --agent <name> is required. See: $0 --help" >&2
-    exit 2
-fi
-if [[ -z "$MODEL" ]]; then
-    echo "ERROR: --model <id> is required. See: $0 --help" >&2
+if [[ -z "$AGENT" || -z "$MODEL" ]]; then
+    echo "ERROR: --agent and --model are required. See: $0 --help" >&2
     exit 2
 fi
 
@@ -69,9 +60,7 @@ TURNS="${TURNS:-4}"
 FOLLOWUP="${FOLLOWUP:-synthesized}"
 TIMEOUT="${TIMEOUT:-300}"
 
-# Seed a sandbox dir with a transformers worktree so corpus prompts
-# have real code to ground in. We materialise it once at $HERE/sandbox
-# (idempotent across reruns) and pass it to agentcap via --sandbox.
+# Materialise a sandbox at $HERE/sandbox once; reused across reruns.
 if [[ -z "${TRANSFORMERS_CHECKOUT:-}" ]]; then
     for c in "$HOME/transformers" "$HERE/transformers"; do
         if [[ -d "$c/.git" || -f "$c/.git" ]]; then
@@ -92,18 +81,15 @@ if [[ ! -e "$SANDBOX/.git" ]]; then
     fi
 fi
 
-ARGS=(
-    --agent     "$AGENT"
-    --model     "$MODEL"
-    --upstream  "$UPSTREAM"
-    --sandbox   "$SANDBOX"
-    --tasks     "$HERE/tasks.txt"
-    --turns     "$TURNS"
-    --followup  "$FOLLOWUP"
+agentcap run \
+    --agent     "$AGENT" \
+    --model     "$MODEL" \
+    --upstream  "$UPSTREAM" \
+    --sandbox   "$SANDBOX" \
+    --tasks     "$HERE/tasks.txt" \
+    --turns     "$TURNS" \
+    --followup  "$FOLLOWUP" \
     --timeout   "$TIMEOUT"
-)
 
-agentcap run "${ARGS[@]}"
-
-echo "done. captures land under \$AGENTCAP_WORKSPACE/.agentcap/ (run 'agentcap ls' to find this run)."
+echo "done. captures land under $HERE/.agentcap/ (run 'agentcap ls' to list)."
 echo "next: $HERE/export.sh   # picks the most recent run and pushes"

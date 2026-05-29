@@ -1,16 +1,14 @@
 #!/usr/bin/env bash
-# Render captures from an `hf-hub-session/run.sh` workdir into parquet
-# and push to the agentcap-captures Dataset repo under the
-# `hf-hub-session/` subdir.
+# Render captures from this corpus into parquet and push to a Hugging
+# Face Dataset repo under the ``hf-hub-session/`` subdir.
 #
-# Prereqs:
-#   1. A workdir from run.sh (or pass --all to push every run.sh output
-#      under $HERE/runs/).
-#   2. `hf auth login` (read+write) for the target dataset.
+# Pins AGENTCAP_WORKSPACE to the corpus dir so ``agentcap export``
+# only sees runs from this corpus (run.sh does the same).
 #
 # Usage:
-#   ./export.sh [WORKDIR] [--push <repo>]   # one run
-#   ./export.sh --all [--push <repo>]       # every run under runs/
+#   ./export.sh                       # latest run
+#   ./export.sh <run-id> [<run-id>…]  # explicit run-ids (see `agentcap ls`)
+#   ./export.sh --all                 # every run in $HERE/.agentcap/
 #
 # Env knobs:
 #   DATASET   default --push target. dacorvo/agentcap-captures/hf-hub-session
@@ -19,48 +17,23 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+export AGENTCAP_WORKSPACE="$HERE"
+
 DEFAULT_DATASET="dacorvo/agentcap-captures/hf-hub-session"
 AGENTCAP="${AGENTCAP:-agentcap}"
-DATASET="${DATASET:-$DEFAULT_DATASET}"
+PUSH="${DATASET:-$DEFAULT_DATASET}"
 
-WORKDIR=""
-ALL=""
-PUSH=""
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --all)    ALL="1"; shift ;;
-        --push)   PUSH="$2"; shift 2 ;;
-        -h|--help)
-            sed -n '/^# Usage:/,/^set -euo/p' "$0" | sed 's/^# \?//; /^set -euo/d'
-            exit 0
-            ;;
-        *) WORKDIR="$1"; shift ;;
-    esac
-done
-
-PUSH="${PUSH:-$DATASET}"
-
-if [[ -n "$ALL" ]]; then
-    # Walk runs/* directly (the per-corpus convention is to put runs
-    # under $HERE/runs/ via --workdir, not under .agentcap/).
-    if [[ ! -d "$HERE/runs" ]]; then
-        echo "ERROR: $HERE/runs is empty." >&2
-        exit 2
-    fi
-    ARGS=()
-    for d in "$HERE"/runs/*/; do
-        ARGS+=("${d%/}")
-    done
-    exec "$AGENTCAP" export "${ARGS[@]}" --push "$PUSH"
+if [[ "${1:-}" == "--all" ]]; then
+    exec "$AGENTCAP" export --all --push "$PUSH"
+fi
+if [[ $# -gt 0 ]]; then
+    exec "$AGENTCAP" export "$@" --push "$PUSH"
 fi
 
-if [[ -z "$WORKDIR" ]]; then
-    WORKDIR="$(ls -td "$HERE"/runs/*/ 2>/dev/null | head -1 | sed 's:/$::')"
-    if [[ -z "$WORKDIR" ]]; then
-        echo "ERROR: no WORKDIR given and $HERE/runs is empty." >&2
-        exit 2
-    fi
-    echo "auto-selected latest workdir: $WORKDIR" >&2
+LATEST="$(ls -td "$HERE"/.agentcap/*/ 2>/dev/null | head -1 | sed 's:/$::')"
+if [[ -z "$LATEST" ]]; then
+    echo "ERROR: no runs under $HERE/.agentcap/." >&2
+    exit 2
 fi
-
-exec "$AGENTCAP" export "$WORKDIR" --push "$PUSH"
+echo "auto-selected latest run: $(basename "$LATEST")" >&2
+exec "$AGENTCAP" export "$(basename "$LATEST")" --push "$PUSH"
