@@ -30,3 +30,8 @@ otherwise set `TRANSFORMERS_CHECKOUT=<path>`.
 ```
 
 `./run.sh --help` and `./export.sh --help` for the env-var knobs.
+
+Both scripts pin `AGENTCAP_WORKSPACE` to this directory, so runs
+live under `./.agentcap/` rather than the global workspace. List
+them with `agentcap ls` *from this directory* (or
+`AGENTCAP_WORKSPACE=$PWD agentcap ls` from anywhere).
