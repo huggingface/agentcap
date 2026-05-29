@@ -94,8 +94,35 @@ def _resolve_api_key(
     return None, None
 
 
+def _complete_run_ids(ctx, param, incomplete):
+    """Shell completion for workspace run-ids."""
+    root = _workspace_root()
+    if not root.is_dir():
+        return []
+    return [
+        d.name for d in root.iterdir()
+        if d.is_dir() and (d / "run.json").is_file()
+        and d.name.startswith(incomplete)
+    ]
+
+
+def _complete_request_ids(ctx, param, incomplete):
+    """Shell completion for captured request-ids across the workspace."""
+    root = _workspace_root()
+    if not root.is_dir():
+        return []
+    out: list[str] = []
+    for run_dir in root.iterdir():
+        captures = run_dir / "captures"
+        if not captures.is_dir():
+            continue
+        for req in captures.glob(f"{incomplete}*.request.json"):
+            out.append(req.name.removesuffix(".request.json"))
+    return out
+
+
 @cli.command("export")
-@click.argument("targets", nargs=-1)
+@click.argument("targets", nargs=-1, shell_complete=_complete_run_ids)
 @click.option(
     "--all", "all_runs", is_flag=True,
     help="Export every run in the workspace (mutually exclusive with positional run-ids).",
@@ -767,6 +794,136 @@ def ls_cmd(long_form: bool) -> None:
                 r["run_id"], r["agent"], r["model"],
                 tasks_cell, str(r["n_caps"]),
             ]))
+
+
+def _resolve_request_id(
+    rid: str, source: str | None
+) -> tuple[dict, dict | None]:
+    """Resolve ``rid`` to ``(request_body, response_record)``.
+
+    - If ``source`` is given, looks the rid up there via
+      ``replay.load_request`` (any agentcap-supported source: dir,
+      parquet, hf://). Response record is unavailable in that path.
+    - Otherwise scans the workspace for a capture dir containing the
+      rid, returning both the request body and the paired response
+      record (for status / timing context).
+    """
+    from . import replay
+
+    if source is not None:
+        try:
+            return replay.load_request(source, rid), None
+        except KeyError as exc:
+            raise click.UsageError(str(exc))
+        except (ValueError, FileNotFoundError) as exc:
+            raise click.UsageError(str(exc))
+
+    capture_dir = replay.resolve_workspace_rid(_workspace_root(), rid)
+    if capture_dir is None:
+        raise click.UsageError(
+            f"request_id {rid!r} not found in workspace at {_workspace_root()}; "
+            f"pass --source to point at a capture dir, parquet, or hf:// URI."
+        )
+    import json as _json
+    req_rec = _json.loads(
+        (capture_dir / f"{rid}.request.json").read_text()
+    )
+    resp_path = capture_dir / f"{rid}.response.json"
+    resp_rec = (
+        _json.loads(resp_path.read_text()) if resp_path.is_file() else None
+    )
+    body = req_rec.get("body")
+    if not isinstance(body, dict):
+        raise click.UsageError(
+            f"capture {capture_dir / f'{rid}.request.json'} has no body field"
+        )
+    return body, resp_rec
+
+
+@cli.command("inspect")
+@click.argument("request_id", shell_complete=_complete_request_ids)
+@click.option(
+    "--source",
+    default=None,
+    help="Where to look up the request: a capture dir, a .parquet, or "
+    "hf://datasets/<owner>/<name>[/<subdir>]. Defaults to scanning "
+    "the local workspace.",
+)
+def inspect_cmd(request_id: str, source: str | None) -> None:
+    """Print a captured request body to stdout.
+
+    Useful for piping into ``curl --data @-`` or stashing as a
+    regression fixture. Request metadata goes to stderr.
+    """
+    import json as _json
+
+    body, resp_rec = _resolve_request_id(request_id, source)
+    if resp_rec is not None:
+        click.echo(
+            f"  request_id={request_id} "
+            f"captured_at={resp_rec.get('captured_at_resp', '?')} "
+            f"status={resp_rec.get('status_code', '?')}",
+            err=True,
+        )
+    click.echo(_json.dumps(body, indent=2, ensure_ascii=False))
+
+
+@cli.command("replay")
+@click.argument("request_id", shell_complete=_complete_request_ids)
+@click.option(
+    "--target",
+    required=True,
+    help="Base URL of an OpenAI-compatible server (e.g. "
+    "http://127.0.0.1:8000). The body is POSTed verbatim to "
+    "<target>/v1/chat/completions.",
+)
+@click.option(
+    "--source",
+    default=None,
+    help="Where to look up the request (see ``agentcap inspect``). "
+    "Defaults to scanning the local workspace.",
+)
+@click.option(
+    "--timeout",
+    type=float,
+    default=600.0,
+    show_default=True,
+    help="Per-request HTTP timeout in seconds.",
+)
+def replay_cmd(
+    request_id: str, target: str, source: str | None, timeout: float
+) -> None:
+    """Re-issue one captured request to an OpenAI-compatible endpoint.
+
+    Single-turn only — multi-turn replay diverges as soon as the new
+    model responds differently (see ROADMAP.md). The body is sent
+    byte-faithfully; no normalisation. Prints the response JSON to
+    stdout and status / timing to stderr.
+    """
+    import json as _json
+    import time
+
+    import httpx
+
+    body, _ = _resolve_request_id(request_id, source)
+    url = target.rstrip("/") + "/v1/chat/completions"
+    t0 = time.monotonic()
+    try:
+        resp = httpx.post(url, json=body, timeout=timeout)
+    except httpx.HTTPError as exc:
+        raise click.ClickException(f"replay failed: {exc}")
+    dt = time.monotonic() - t0
+    click.echo(
+        f"  POST {url} status={resp.status_code} duration={dt:.2f}s "
+        f"bytes={len(resp.content)}",
+        err=True,
+    )
+    try:
+        click.echo(_json.dumps(resp.json(), indent=2, ensure_ascii=False))
+    except ValueError:
+        # Non-JSON or streaming chunks — emit raw bytes.
+        sys.stdout.buffer.write(resp.content)
+        sys.stdout.buffer.write(b"\n")
 
 
 def main() -> int:

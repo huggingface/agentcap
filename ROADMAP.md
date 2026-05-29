@@ -30,10 +30,20 @@ Stretch:
   to kv-cache-reuse recurrence research.
 - Filter: "all sessions where tool X was called with args matching Y".
 
+## Single-turn replay (shipped)
+
+`agentcap replay <rid> --target <url>` resolves a captured request
+by id and re-POSTs the body verbatim to an OpenAI-compatible
+endpoint. Workspace-relative by default; `--source` accepts a
+capture dir, a `.parquet`, or `hf://datasets/<owner>/<name>` for
+re-issuing requests from a published dataset. `agentcap inspect
+<rid>` prints the body to stdout for piping into `curl` / stashing
+as a regression fixture. The library reuse surface is
+`agentcap.replay.{load_request, load_requests}`.
+
 ## Out of scope
 
-- **Replay.** Re-issuing captured requests against a different model
-  is per-request only — the agent's next prompt diverges the moment
-  the model responds differently. The only useful per-request replay
-  is the splice-correctness harness used by kv-cache-reuse research,
-  which doesn't need agentcap support.
+- **Multi-turn (conversation) replay.** Diverges the moment the
+  model responds differently — the agent's next prompt depends on
+  the response. Only per-request replay (above) is meaningful, and
+  that ships.

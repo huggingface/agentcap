@@ -275,3 +275,93 @@ def test_export_all_walks_workspace_in_one_commit(
     assert result.exit_code == 0, result.output
     assert len(fake_hf_api.commits) == 1
     assert len(fake_hf_api.commits[0]["operations"]) == 2
+
+
+def test_export_all_skips_empty_runs(
+    tmp_path: Path, monkeypatch, fake_hf_api
+):
+    """A run with no captures (e.g. proxy never reached) is skipped, not fatal."""
+    import json
+    monkeypatch.setenv("AGENTCAP_WORKSPACE", str(tmp_path))
+    ws = tmp_path / ".agentcap"
+    # one good run, one empty run (run.json present but no captures)
+    good = ws / "hermes-local-20260101-000000"
+    (good / "captures").mkdir(parents=True)
+    _write_capture(good / "captures", "rid", "m")
+    (good / "run.json").write_text(json.dumps({"agent": "hermes"}))
+
+    empty = ws / "hermes-local-20260101-010000"
+    (empty / "captures").mkdir(parents=True)
+    (empty / "run.json").write_text(json.dumps({"agent": "hermes"}))
+
+    result = CliRunner().invoke(cli, ["export", "--all", "--push", "me/d"])
+    assert result.exit_code == 0, result.output
+    assert "skipped (no captures)" in result.output
+    assert len(fake_hf_api.commits[0]["operations"]) == 1
+
+
+def test_inspect_resolves_rid_from_workspace(tmp_path: Path, monkeypatch):
+    import json as _json
+    monkeypatch.setenv("AGENTCAP_WORKSPACE", str(tmp_path))
+    cap = tmp_path / ".agentcap" / "hermes-local-20260101-000000" / "captures"
+    cap.mkdir(parents=True)
+    body = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
+    (cap / "rid.request.json").write_text(_json.dumps({
+        "request_id": "rid", "captured_at": 1,
+        "upstream_url": "http://x", "body": body,
+    }))
+    (cap / "rid.response.json").write_text(_json.dumps({
+        "request_id": "rid", "captured_at_resp": 2,
+        "status_code": 200, "body": {},
+    }))
+
+    result = CliRunner().invoke(cli, ["inspect", "rid"])
+    assert result.exit_code == 0, result.stderr
+    assert _json.loads(result.stdout) == body
+
+
+def test_inspect_unknown_rid_errors(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("AGENTCAP_WORKSPACE", str(tmp_path))
+    (tmp_path / ".agentcap").mkdir()
+    result = CliRunner().invoke(cli, ["inspect", "ghost"])
+    assert result.exit_code != 0
+    assert "ghost" in result.output
+
+
+def test_replay_posts_body_to_target(tmp_path: Path, monkeypatch):
+    """Replay POSTs the captured body verbatim and surfaces the response."""
+    import json as _json
+
+    monkeypatch.setenv("AGENTCAP_WORKSPACE", str(tmp_path))
+    cap = tmp_path / ".agentcap" / "hermes-local-20260101-000000" / "captures"
+    cap.mkdir(parents=True)
+    body = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
+    (cap / "rid.request.json").write_text(_json.dumps({
+        "request_id": "rid", "captured_at": 1,
+        "upstream_url": "http://x", "body": body,
+    }))
+
+    seen: dict = {}
+
+    class _FakeResponse:
+        status_code = 200
+        content = b'{"id":"x"}'
+        def json(self) -> dict:
+            return {"id": "x"}
+
+    def _fake_post(url, json=None, timeout=None):  # noqa: A002
+        seen["url"] = url
+        seen["json"] = json
+        seen["timeout"] = timeout
+        return _FakeResponse()
+
+    import httpx
+    monkeypatch.setattr(httpx, "post", _fake_post)
+
+    result = CliRunner().invoke(
+        cli, ["replay", "rid", "--target", "http://server:9"],
+    )
+    assert result.exit_code == 0, result.stderr
+    assert seen["url"] == "http://server:9/v1/chat/completions"
+    assert seen["json"] == body
+    assert '"id": "x"' in result.stdout

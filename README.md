@@ -174,6 +174,10 @@ agentcap export --all --push my-org/my-captures/<corpus>
 # Or push selected runs only.
 agentcap export hermes-local-20260512-162345 \
     --push my-org/my-captures/<corpus>
+
+# Inspect or replay a single captured request by id.
+agentcap inspect <request-id>
+agentcap replay  <request-id> --target http://127.0.0.1:8000
 ```
 
 See [docs/tested-models-and-agents.md](docs/tested-models-and-agents.md)
