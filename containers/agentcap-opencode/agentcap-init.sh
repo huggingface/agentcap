@@ -12,7 +12,10 @@ set -e
 export OPENAI_API_KEY="${AGENTCAP_API_KEY:-dummy}"
 export OPENCODE_DISABLE_MODELS_FETCH=1
 url="${AGENTCAP_PROXY_URL:-http://127.0.0.1:8001/v1}"
-sed -i "s|@@AGENTCAP_PROXY_URL@@|${url}|g" \
+model="${AGENTCAP_MODEL:?AGENTCAP_MODEL is required for opencode}"
+sed -i \
+    -e "s|@@AGENTCAP_PROXY_URL@@|${url}|g" \
+    -e "s|@@AGENTCAP_MODEL@@|${model}|g" \
     "$HOME/.config/opencode/opencode.json"
 
 # Skills: AGENTS.md + skills/ symlinked into cwd (where opencode looks).

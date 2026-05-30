@@ -6,8 +6,8 @@
       "name": "Local via agentcap proxy",
       "options": {"baseURL": "@@AGENTCAP_PROXY_URL@@"},
       "models": {
-        "gemma-4-E4B-it": {
-          "name": "gemma-4-E4B-it",
+        "@@AGENTCAP_MODEL@@": {
+          "name": "@@AGENTCAP_MODEL@@",
           "options": {"max_tokens": 8192},
           "limit": {"context": 65536, "output": 8192}
         }
