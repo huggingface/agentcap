@@ -1110,9 +1110,12 @@ def _preview_cmd(request_id: str) -> None:
     status = (
         resp_rec.get("status_code") if resp_rec is not None else "?"
     )
+    serialized = _json.dumps(body, ensure_ascii=False)
+    size_b = len(serialized.encode("utf-8"))
     click.echo(f"rid:    {full_rid}")
     click.echo(f"status: {status}")
     click.echo(f"model:  {body.get('model', '?')}")
+    click.echo(f"size:   {size_b:,} bytes (~{size_b // 4:,} tokens)")
     click.echo()
     click.echo("─── TASK ────────────────────────────────────────────────")
     click.echo(last_user or "(no user message)")
