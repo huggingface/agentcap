@@ -84,9 +84,16 @@ class LimaSandbox:
                 "Use BwrapSandbox for real network isolation.\n"
             )
         # writable_paths is advisory on Lima — VM mounts decide.
-        return build_command(
-            [INIT_PATH] + argv, vm=self.vm, workdir=self.workdir,
-        )
+        # Inject the baked env via POSIX ``env`` so init scripts that
+        # require AGENTCAP_MODEL etc. see them — same shape as
+        # BwrapSandbox.wrap which threads ``self._baked_env`` through.
+        inner = [INIT_PATH] + argv
+        if self._baked_env:
+            inner = (
+                ["env"] + [f"{k}={v}" for k, v in self._baked_env.items()]
+                + inner
+            )
+        return build_command(inner, vm=self.vm, workdir=self.workdir)
 
     def _build_shell_cmd(
         self,

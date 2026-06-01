@@ -205,7 +205,9 @@ def test_lima_vm_can_reach_host_server(lima_vm_for, mock_http_server):
     succeeds AND that the host-side process saw the request."""
     vm = lima_vm_for(_SANDBOX_TEST_AGENT)
     port, received = mock_http_server
-    sb = LimaSandbox(vm=vm)
+    # opencode-init refuses to start without AGENTCAP_MODEL — same shim
+    # as the bwrap end-to-end tests below.
+    sb = LimaSandbox(vm=vm, env={"AGENTCAP_MODEL": "test/dummy"})
     code = (
         "import urllib.request, sys; "
         f"r = urllib.request.urlopen("
@@ -243,7 +245,7 @@ def test_lima_fs_methods_inside_vm(lima_vm_for):
 
 def test_lima_run_propagates_env_into_vm(lima_vm_for):
     vm = lima_vm_for(_SANDBOX_TEST_AGENT)
-    sb = LimaSandbox(vm=vm)
+    sb = LimaSandbox(vm=vm, env={"AGENTCAP_MODEL": "test/dummy"})
     r = sb.run(["sh", "-c", "echo $HF_TOKEN"], env={"HF_TOKEN": "tok123"})
     assert r.returncode == 0
     assert r.stdout.strip() == "tok123"
@@ -251,7 +253,7 @@ def test_lima_run_propagates_env_into_vm(lima_vm_for):
 
 def test_lima_run_uses_cwd_inside_vm(lima_vm_for):
     vm = lima_vm_for(_SANDBOX_TEST_AGENT)
-    sb = LimaSandbox(vm=vm)
+    sb = LimaSandbox(vm=vm, env={"AGENTCAP_MODEL": "test/dummy"})
     d = sb.mkdtemp(prefix="lima-cwd-test-")
     try:
         r = sb.run(["pwd"], cwd=d)
