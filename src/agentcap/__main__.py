@@ -523,6 +523,7 @@ def run_cmd(
         )
         orch = Orchestrator(
             driver, fu, sessions_dir=sessions, on_event=_on_event,
+            set_capture_context=proxy.set_context,
         )
 
         try:
@@ -892,6 +893,8 @@ def _enumerate_workspace_requests(scope: str | None) -> list[dict]:
                 "rid": rid,
                 "captured_at": int(req.get("captured_at", 0)),
                 "status": status,
+                "task_id": req.get("task_id"),
+                "turn": req.get("turn"),
                 "preview": preview,
             })
     rows.sort(key=lambda r: (r["run_id"], r["captured_at"]))
@@ -908,13 +911,31 @@ def _format_inspect_rows(
     import shutil
     import time
 
-    cols = ["RID", "TIME", "STATUS", "PREVIEW"]
+    # TASK + TURN columns only appear when at least one row has them
+    # (captures from runs predating the proxy-stamping commit don't).
+    has_task = any(r.get("task_id") for r in rows)
+    has_turn = any(r.get("turn") is not None for r in rows)
+
+    cols = ["RID", "TIME", "STATUS"]
+    if has_task:
+        cols.append("TASK")
+    if has_turn:
+        cols.append("TURN")
     if include_run:
-        cols.insert(3, "RUN")
+        cols.append("RUN")
+    cols.append("PREVIEW")
+
     widths = {c: len(c) for c in cols}
     widths["RID"] = max(widths["RID"], 8)  # git-style 8-char prefix
     widths["TIME"] = max(widths["TIME"], 8)
     widths["STATUS"] = max(widths["STATUS"], 3)
+    if has_task:
+        widths["TASK"] = max(
+            widths["TASK"],
+            max((len(r.get("task_id") or "") for r in rows), default=0),
+        )
+    if has_turn:
+        widths["TURN"] = max(widths["TURN"], 3)
     if include_run:
         widths["RUN"] = max(
             widths["RUN"],
@@ -937,24 +958,30 @@ def _format_inspect_rows(
             return s
         return s[: max(1, w - 1)] + "…"
 
-    def _fmt(rid, ts, status, run, preview) -> str:
+    def _fmt(rid, ts, status, task, turn, run, preview) -> str:
         cells = [
             f"{rid:<{widths['RID']}}",
             f"{ts:<{widths['TIME']}}",
             f"{status:>{widths['STATUS']}}",
         ]
+        if has_task:
+            cells.append(f"{task:<{widths['TASK']}}")
+        if has_turn:
+            cells.append(f"{turn:>{widths['TURN']}}")
         if include_run:
             cells.append(f"{run:<{widths['RUN']}}")
         cells.append(_trim(preview, preview_w))
         return "  ".join(cells)
 
-    header = _fmt("RID", "TIME", "STATUS", "RUN", "PREVIEW")
+    header = _fmt("RID", "TIME", "STATUS", "TASK", "TURN", "RUN", "PREVIEW")
     body = [
         _fmt(
             r["rid"][:8],
             time.strftime("%H:%M:%S", time.gmtime(r["captured_at"]))
             if r["captured_at"] else "?",
             r["status"],
+            r.get("task_id") or "-",
+            str(r.get("turn")) if r.get("turn") is not None else "-",
             r["run_id"],
             r["preview"],
         )

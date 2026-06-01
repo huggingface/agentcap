@@ -119,6 +119,15 @@ class CaptureProxy:
         self.capture_dir.mkdir(parents=True, exist_ok=True)
         self._client = client
         self._owns_client = client is None
+        # Context the orchestrator sets before each turn — stamped into
+        # each captured request so rid → (task_id, turn) is recoverable
+        # from the capture file alone, no sidecar mapping.
+        self._task_id: str | None = None
+        self._turn: int | None = None
+
+    def set_context(self, *, task_id: str | None, turn: int | None) -> None:
+        self._task_id = task_id
+        self._turn = turn
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -136,6 +145,8 @@ class CaptureProxy:
             "request_id": request_id,
             "captured_at": captured_at,
             "upstream_url": self.upstream,
+            "task_id": self._task_id,
+            "turn": self._turn,
             "body": _safe_json_loads(body_bytes),
         }
         path.write_text(json.dumps(record, indent=2))
@@ -329,11 +340,21 @@ def serve(
 class ProxyHandle:
     """Running in-process proxy. Use as a context manager."""
 
-    def __init__(self, server, thread, host: str, port: int) -> None:
+    def __init__(
+        self, server, thread, host: str, port: int,
+        proxy: CaptureProxy | None = None,
+    ) -> None:
         self._server = server
         self._thread = thread
         self.host = host
         self.port = port
+        self.proxy = proxy
+
+    def set_context(self, *, task_id: str | None, turn: int | None) -> None:
+        """Forward to the underlying ``CaptureProxy`` so subsequent
+        captures are stamped with the given orchestrator-turn context."""
+        if self.proxy is not None:
+            self.proxy.set_context(task_id=task_id, turn=turn)
 
     @property
     def base_url(self) -> str:
@@ -392,4 +413,4 @@ def serve_in_thread(
     except (AttributeError, IndexError, TypeError):
         pass
 
-    return ProxyHandle(server, thread, bound_host, bound_port)
+    return ProxyHandle(server, thread, bound_host, bound_port, proxy=app.state.proxy)
