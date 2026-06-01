@@ -148,7 +148,7 @@ explicitly first.
     Reasoning-by-default models (Qwen 3.5+, etc.) on llama.cpp put
     their actual answer in `reasoning_content` and leave `content`
     empty — the agent loop sees no tool calls and stalls. Run
-    llama-server with `--reasoning off` for these models;
+    `llama serve` with `--reasoning off` for these models;
     `scripts/start_llama_cpp_server.sh` exposes this via the
     `REASONING` env var (default `auto` follows the chat-template's
     own default, set to `off` for reasoning models). Also: agent

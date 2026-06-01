@@ -7,7 +7,7 @@ agent exited 0, file changed, ``turn.tool_errors`` empty. Agent
 output quality is explicitly not graded here.
 
 Skips when ``live_proxy_base_url`` can't be assembled (no
-``$AGENTCAP_TEST_GGUF`` / no ``llama-server``) or the agent binary
+``$AGENTCAP_TEST_GGUF`` / no ``llama`` on PATH) or the agent binary
 isn't on the sandbox PATH.
 """
 

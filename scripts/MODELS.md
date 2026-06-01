@@ -30,7 +30,7 @@ Two rules that bite regardless of host:
 - **`CTX_SIZE=65536`** is needed for the 30-task corpora. Hermes
   refuses to start unless both `model.context_length` and
   `auxiliary.compression.context_length` ≥ 64 K, and we bake both
-  at 65536; the llama-server side must match. The script's default
+  at 65536; the `llama serve` side must match. The script's default
   is 32768, which is fine for short smoke runs but not for the full
   corpora.
 
