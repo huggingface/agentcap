@@ -135,16 +135,44 @@ def _scan_arrow_table(table, wanted: set[str]) -> dict[str, dict]:
     return out
 
 
+class AmbiguousRequestId(Exception):
+    """Raised when a short rid prefix matches more than one captured
+    request — caller should ask the user to disambiguate (like
+    ``git`` does)."""
+
+    def __init__(self, prefix: str, matches: list[str]):
+        self.prefix = prefix
+        self.matches = matches
+        super().__init__(
+            f"rid prefix {prefix!r} is ambiguous ({len(matches)} matches): "
+            f"{', '.join(sorted(matches)[:5])}{'…' if len(matches) > 5 else ''}"
+        )
+
+
 def resolve_workspace_rid(
     workspace_root: Path, request_id: str
-) -> Path | None:
-    """Find the capture dir containing ``<request_id>.request.json`` by
-    scanning ``<workspace_root>/*/captures/``. Returns the capture dir
-    path, or ``None`` if not found."""
+) -> tuple[Path, str] | None:
+    """Find the capture dir + full rid for a (possibly truncated) request id.
+
+    Returns ``(capture_dir, full_rid)`` for the unique match, ``None`` if
+    no match. Raises ``AmbiguousRequestId`` when multiple rids share the
+    prefix.
+    """
     if not workspace_root.is_dir():
         return None
+    matches: list[tuple[Path, str]] = []
     for run_dir in workspace_root.iterdir():
         captures = run_dir / "captures"
-        if (captures / f"{request_id}.request.json").is_file():
-            return captures
-    return None
+        if not captures.is_dir():
+            continue
+        # Exact match shortcut — also makes full-length rids O(1).
+        exact = captures / f"{request_id}.request.json"
+        if exact.is_file():
+            return captures, request_id
+        for hit in captures.glob(f"{request_id}*.request.json"):
+            matches.append((captures, hit.name.removesuffix(".request.json")))
+    if not matches:
+        return None
+    if len(matches) > 1:
+        raise AmbiguousRequestId(request_id, [m[1] for m in matches])
+    return matches[0]

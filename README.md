@@ -175,9 +175,16 @@ agentcap export --all --push my-org/my-captures/<corpus>
 agentcap export hermes-local-20260512-162345 \
     --push my-org/my-captures/<corpus>
 
-# Inspect or replay a single captured request by id.
-agentcap inspect <request-id>
-agentcap replay  <request-id> --target http://127.0.0.1:8000
+# Browse captured requests (fzf-driven picker with body preview;
+# falls back to a plain table if fzf isn't on PATH).
+agentcap inspect                       # everything in the workspace
+agentcap inspect <run-id>              # one run only
+agentcap inspect <request-id>          # dump a specific body
+
+# Re-issue a single captured request to an OpenAI-compatible target.
+agentcap replay <request-id> --target http://127.0.0.1:8000
+# Compose with the picker:
+agentcap replay $(agentcap inspect --rid) --target http://127.0.0.1:8000
 ```
 
 See [docs/tested-models-and-agents.md](docs/tested-models-and-agents.md)

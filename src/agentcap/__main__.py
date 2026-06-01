@@ -798,69 +798,288 @@ def ls_cmd(long_form: bool) -> None:
 
 def _resolve_request_id(
     rid: str, source: str | None
-) -> tuple[dict, dict | None]:
-    """Resolve ``rid`` to ``(request_body, response_record)``.
+) -> tuple[str, dict, dict | None]:
+    """Resolve ``rid`` (full or short prefix) to ``(full_rid, body,
+    response_record)``.
 
     - If ``source`` is given, looks the rid up there via
       ``replay.load_request`` (any agentcap-supported source: dir,
-      parquet, hf://). Response record is unavailable in that path.
-    - Otherwise scans the workspace for a capture dir containing the
-      rid, returning both the request body and the paired response
-      record (for status / timing context).
+      parquet, hf://) — exact match only. Response record is
+      unavailable in that path.
+    - Otherwise scans the workspace, accepting a prefix (git-style)
+      and returning both the request body and the paired response.
     """
     from . import replay
 
     if source is not None:
         try:
-            return replay.load_request(source, rid), None
+            return rid, replay.load_request(source, rid), None
         except KeyError as exc:
             raise click.UsageError(str(exc))
         except (ValueError, FileNotFoundError) as exc:
             raise click.UsageError(str(exc))
 
-    capture_dir = replay.resolve_workspace_rid(_workspace_root(), rid)
-    if capture_dir is None:
+    try:
+        found = replay.resolve_workspace_rid(_workspace_root(), rid)
+    except replay.AmbiguousRequestId as exc:
+        raise click.UsageError(str(exc))
+    if found is None:
         raise click.UsageError(
             f"request_id {rid!r} not found in workspace at {_workspace_root()}; "
             f"pass --source to point at a capture dir, parquet, or hf:// URI."
         )
+    capture_dir, full_rid = found
     import json as _json
     req_rec = _json.loads(
-        (capture_dir / f"{rid}.request.json").read_text()
+        (capture_dir / f"{full_rid}.request.json").read_text()
     )
-    resp_path = capture_dir / f"{rid}.response.json"
+    resp_path = capture_dir / f"{full_rid}.response.json"
     resp_rec = (
         _json.loads(resp_path.read_text()) if resp_path.is_file() else None
     )
     body = req_rec.get("body")
     if not isinstance(body, dict):
         raise click.UsageError(
-            f"capture {capture_dir / f'{rid}.request.json'} has no body field"
+            f"capture {capture_dir / f'{full_rid}.request.json'} has no body field"
         )
-    return body, resp_rec
+    return full_rid, body, resp_rec
+
+
+def _enumerate_workspace_requests(scope: str | None) -> list[dict]:
+    """Walk captures across the workspace (or one run if ``scope`` is a
+    run-id) and return one row per captured request, in chronological
+    order. Each row has ``run_id``, ``rid``, ``captured_at``, ``status``,
+    and ``preview`` (last user message, truncated)."""
+    import json as _json
+
+    root = _workspace_root()
+    if not root.is_dir():
+        return []
+    run_dirs = (
+        [root / scope] if scope else [d for d in sorted(root.iterdir()) if d.is_dir()]
+    )
+    rows: list[dict] = []
+    for run_dir in run_dirs:
+        captures = run_dir / "captures"
+        if not captures.is_dir():
+            continue
+        for req_path in captures.glob("*.request.json"):
+            rid = req_path.stem.split(".")[0]
+            try:
+                req = _json.loads(req_path.read_text())
+            except (OSError, _json.JSONDecodeError):
+                continue
+            resp_path = captures / f"{rid}.response.json"
+            status = "?"
+            if resp_path.is_file():
+                try:
+                    status = str(_json.loads(resp_path.read_text()).get("status_code", "?"))
+                except (OSError, _json.JSONDecodeError):
+                    pass
+            messages = (req.get("body") or {}).get("messages") or []
+            last_user = next(
+                (m.get("content") for m in reversed(messages) if m.get("role") == "user"),
+                "",
+            )
+            if isinstance(last_user, list):
+                # Tool-result / multi-modal message content can be a list.
+                last_user = " ".join(
+                    p.get("text", "") for p in last_user if isinstance(p, dict)
+                )
+            preview = (last_user or "").replace("\n", " ").strip()
+            rows.append({
+                "run_id": run_dir.name,
+                "rid": rid,
+                "captured_at": int(req.get("captured_at", 0)),
+                "status": status,
+                "preview": preview,
+            })
+    rows.sort(key=lambda r: (r["run_id"], r["captured_at"]))
+    return rows
+
+
+def _format_inspect_rows(
+    rows: list[dict], *, include_run: bool
+) -> tuple[str, list[str]]:
+    """Format rows as a header line + body lines. Rid first (it's what
+    you copy into replay), then time/status/preview, with run-id last
+    only when browsing across multiple runs. The task preview column
+    shrinks to fit the terminal so the task is always visible."""
+    import shutil
+    import time
+
+    cols = ["RID", "TIME", "STATUS", "PREVIEW"]
+    if include_run:
+        cols.insert(3, "RUN")
+    widths = {c: len(c) for c in cols}
+    widths["RID"] = max(widths["RID"], 8)  # git-style 8-char prefix
+    widths["TIME"] = max(widths["TIME"], 8)
+    widths["STATUS"] = max(widths["STATUS"], 3)
+    if include_run:
+        widths["RUN"] = max(
+            widths["RUN"],
+            max((len(r["run_id"]) for r in rows), default=0),
+        )
+
+    # Compute the budget for the task preview column from the terminal
+    # width. fzf's preview pane is right:60%, so the row gets the left
+    # 40% — use that when we're going through fzf (heuristic: caller
+    # passes us the same rows). For the plain-table fallback, use the
+    # full width. We err on the wider side since fzf wraps gracefully.
+    term_w = shutil.get_terminal_size((120, 24)).columns
+    sep_w = 2 * (len(cols) - 1)
+    fixed_w = sum(widths[c] for c in cols if c != "PREVIEW") + sep_w
+    preview_w = max(20, term_w - fixed_w)
+    widths["PREVIEW"] = preview_w
+
+    def _trim(s: str, w: int) -> str:
+        if len(s) <= w:
+            return s
+        return s[: max(1, w - 1)] + "…"
+
+    def _fmt(rid, ts, status, run, preview) -> str:
+        cells = [
+            f"{rid:<{widths['RID']}}",
+            f"{ts:<{widths['TIME']}}",
+            f"{status:>{widths['STATUS']}}",
+        ]
+        if include_run:
+            cells.append(f"{run:<{widths['RUN']}}")
+        cells.append(_trim(preview, preview_w))
+        return "  ".join(cells)
+
+    header = _fmt("RID", "TIME", "STATUS", "RUN", "PREVIEW")
+    body = [
+        _fmt(
+            r["rid"][:8],
+            time.strftime("%H:%M:%S", time.gmtime(r["captured_at"]))
+            if r["captured_at"] else "?",
+            r["status"],
+            r["run_id"],
+            r["preview"],
+        )
+        for r in rows
+    ]
+    return header, body
+
+
+def _fzf_pick(
+    header: str, lines: list[str], preview_cmd: str
+) -> tuple[str | None, bool]:
+    """Run fzf over ``lines`` with ``header`` pinned at the top. Returns
+    ``(picked, available)``:
+      - ``(line, True)``  picked from fzf
+      - ``(None, True)``  fzf ran, user cancelled (Esc / Ctrl-C)
+      - ``(None, False)`` fzf not on PATH
+    """
+    import shutil
+    import subprocess
+
+    # ``AGENTCAP_NO_FZF=1`` lets users compare the fzf and plain-table
+    # UX without uninstalling fzf — pretend it isn't there.
+    if os.environ.get("AGENTCAP_NO_FZF") or not shutil.which("fzf"):
+        return None, False
+    proc = subprocess.run(
+        [
+            "fzf",
+            "--ansi",
+            "--header", header,
+            "--header-first",
+            "--preview", preview_cmd,
+            "--preview-window=right:60%:wrap",
+            "--no-sort",
+        ],
+        input="\n".join(lines),
+        capture_output=True,
+        text=True,
+    )
+    picked = proc.stdout.rstrip("\n") if proc.returncode == 0 else ""
+    return (picked or None, True)
+
+
+def _pick_workspace_request(scope: str | None) -> str | None:
+    """Interactive picker (fzf when available, plain table otherwise) for
+    a workspace request. Returns the picked short rid, or ``None`` if
+    cancelled / fzf unavailable. In the fzf-missing case the table is
+    printed to stdout and ``None`` returned — callers should treat that
+    as "user must re-invoke with an explicit rid"."""
+    import sys
+
+    rows = _enumerate_workspace_requests(scope)
+    if not rows:
+        where = f"run {scope!r}" if scope else "workspace"
+        raise click.UsageError(f"no captured requests in {where}")
+
+    include_run = scope is None
+    header, lines = _format_inspect_rows(rows, include_run=include_run)
+    preview = (
+        f"{sys.executable} -m agentcap _preview {{1}} 2>/dev/null | head -400"
+    )
+
+    picked, fzf_available = _fzf_pick(header, lines, preview)
+    if not fzf_available:
+        click.echo(header)
+        for line in lines:
+            click.echo(line)
+        return None
+    if picked is None:
+        return None  # cancelled
+    return picked.split()[0]
 
 
 @cli.command("inspect")
-@click.argument("request_id", shell_complete=_complete_request_ids)
+@click.argument("target", required=False, shell_complete=_complete_request_ids)
 @click.option(
     "--source",
     default=None,
     help="Where to look up the request: a capture dir, a .parquet, or "
-    "hf://datasets/<owner>/<name>[/<subdir>]. Defaults to scanning "
-    "the local workspace.",
+    "hf://datasets/<owner>/<name>[/<subdir>]. Only honored when "
+    "TARGET is a request-id; defaults to scanning the local workspace.",
 )
-def inspect_cmd(request_id: str, source: str | None) -> None:
-    """Print a captured request body to stdout.
+@click.option(
+    "--rid",
+    "print_rid_only",
+    is_flag=True,
+    help="When picking interactively, print only the selected request-id "
+    "(useful for piping into `agentcap replay`).",
+)
+def inspect_cmd(target: str | None, source: str | None, print_rid_only: bool) -> None:
+    """Inspect captured requests.
 
-    Useful for piping into ``curl --data @-`` or stashing as a
-    regression fixture. Request metadata goes to stderr.
+    \b
+    - ``agentcap inspect``              browse all workspace requests (fzf picker)
+    - ``agentcap inspect <run-id>``     browse one run
+    - ``agentcap inspect <rid>``        print the captured body for that request
+
+    A rid is 32 hex chars (proxy-minted UUID); a run-id contains a dash.
+    Falls back to a plain table when fzf is not on PATH.
     """
     import json as _json
 
-    body, resp_rec = _resolve_request_id(request_id, source)
+    # rid (full or short prefix) → body dump (single request).
+    if target and "-" not in target:
+        full_rid, body, resp_rec = _resolve_request_id(target, source)
+        if resp_rec is not None:
+            click.echo(
+                f"  request_id={full_rid} "
+                f"captured_at={resp_rec.get('captured_at_resp', '?')} "
+                f"status={resp_rec.get('status_code', '?')}",
+                err=True,
+            )
+        click.echo(_json.dumps(body, indent=2, ensure_ascii=False))
+        return
+
+    # No arg or run-id → enumerate + pick.
+    pick = _pick_workspace_request(target)
+    if pick is None:
+        return  # cancelled or no-fzf table-only path
+    full_rid, body, resp_rec = _resolve_request_id(pick, None)
+    if print_rid_only:
+        click.echo(full_rid)
+        return
     if resp_rec is not None:
         click.echo(
-            f"  request_id={request_id} "
+            f"  request_id={full_rid} "
             f"captured_at={resp_rec.get('captured_at_resp', '?')} "
             f"status={resp_rec.get('status_code', '?')}",
             err=True,
@@ -868,8 +1087,42 @@ def inspect_cmd(request_id: str, source: str | None) -> None:
     click.echo(_json.dumps(body, indent=2, ensure_ascii=False))
 
 
+@cli.command("_preview", hidden=True)
+@click.argument("request_id")
+def _preview_cmd(request_id: str) -> None:
+    """Internal: dual TASK + REQUEST view used by the fzf preview pane.
+
+    Not part of the public CLI surface — hidden from ``--help``. The
+    user-facing inspector is ``agentcap inspect <rid>``.
+    """
+    import json as _json
+
+    full_rid, body, resp_rec = _resolve_request_id(request_id, None)
+    messages = body.get("messages") or []
+    last_user = next(
+        (m.get("content") for m in reversed(messages) if m.get("role") == "user"),
+        "",
+    )
+    if isinstance(last_user, list):
+        last_user = " ".join(
+            p.get("text", "") for p in last_user if isinstance(p, dict)
+        )
+    status = (
+        resp_rec.get("status_code") if resp_rec is not None else "?"
+    )
+    click.echo(f"rid:    {full_rid}")
+    click.echo(f"status: {status}")
+    click.echo(f"model:  {body.get('model', '?')}")
+    click.echo()
+    click.echo("─── TASK ────────────────────────────────────────────────")
+    click.echo(last_user or "(no user message)")
+    click.echo()
+    click.echo("─── REQUEST ─────────────────────────────────────────────")
+    click.echo(_json.dumps(body, indent=2, ensure_ascii=False))
+
+
 @cli.command("replay")
-@click.argument("request_id", shell_complete=_complete_request_ids)
+@click.argument("request_id", required=False, shell_complete=_complete_request_ids)
 @click.option(
     "--target",
     required=True,
@@ -891,21 +1144,31 @@ def inspect_cmd(request_id: str, source: str | None) -> None:
     help="Per-request HTTP timeout in seconds.",
 )
 def replay_cmd(
-    request_id: str, target: str, source: str | None, timeout: float
+    request_id: str | None, target: str, source: str | None, timeout: float
 ) -> None:
     """Re-issue one captured request to an OpenAI-compatible endpoint.
 
-    Single-turn only — multi-turn replay diverges as soon as the new
-    model responds differently (see ROADMAP.md). The body is sent
-    byte-faithfully; no normalisation. Prints the response JSON to
-    stdout and status / timing to stderr.
+    Without a request-id, opens the same fzf picker as ``agentcap inspect``
+    and replays whatever you select. Single-turn only — multi-turn replay
+    diverges as soon as the new model responds differently (see
+    ROADMAP.md). The body is sent byte-faithfully; no normalisation.
+    Prints the response JSON to stdout and status / timing to stderr.
     """
     import json as _json
     import time
 
     import httpx
 
-    body, _ = _resolve_request_id(request_id, source)
+    if request_id is None:
+        if source is not None:
+            raise click.UsageError(
+                "request-id is required when --source points outside the workspace"
+            )
+        picked = _pick_workspace_request(None)
+        if picked is None:
+            return  # cancelled or no-fzf table-only path (already printed)
+        request_id = picked
+    full_rid, body, _ = _resolve_request_id(request_id, source)
     url = target.rstrip("/") + "/v1/chat/completions"
     t0 = time.monotonic()
     try:
@@ -914,8 +1177,8 @@ def replay_cmd(
         raise click.ClickException(f"replay failed: {exc}")
     dt = time.monotonic() - t0
     click.echo(
-        f"  POST {url} status={resp.status_code} duration={dt:.2f}s "
-        f"bytes={len(resp.content)}",
+        f"  rid={full_rid} POST {url} status={resp.status_code} "
+        f"duration={dt:.2f}s bytes={len(resp.content)}",
         err=True,
     )
     try:

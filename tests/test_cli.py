@@ -328,6 +328,64 @@ def test_inspect_unknown_rid_errors(tmp_path: Path, monkeypatch):
     assert "ghost" in result.output
 
 
+def _seed_workspace_run(root: Path, run_id: str, rids: list[tuple[str, str]]) -> None:
+    """Create a fake workspace run with captures for each (rid, prompt)."""
+    import json as _json
+    cap = root / ".agentcap" / run_id / "captures"
+    cap.mkdir(parents=True)
+    for i, (rid, prompt) in enumerate(rids):
+        body = {"model": "m", "messages": [{"role": "user", "content": prompt}]}
+        (cap / f"{rid}.request.json").write_text(_json.dumps({
+            "request_id": rid, "captured_at": 1000 + i,
+            "upstream_url": "http://x", "body": body,
+        }))
+        (cap / f"{rid}.response.json").write_text(_json.dumps({
+            "request_id": rid, "captured_at_resp": 1001 + i,
+            "status_code": 200, "body": {},
+        }))
+
+
+def test_inspect_run_id_falls_back_to_table_without_fzf(
+    tmp_path: Path, monkeypatch
+):
+    """Without fzf on PATH the picker prints a plain table."""
+    monkeypatch.setenv("AGENTCAP_WORKSPACE", str(tmp_path))
+    monkeypatch.setenv("PATH", "")
+    _seed_workspace_run(
+        tmp_path, "hermes-local-20260101-000000",
+        [("aaa", "first prompt"), ("bbb", "second prompt")],
+    )
+
+    result = CliRunner().invoke(cli, ["inspect", "hermes-local-20260101-000000"])
+    assert result.exit_code == 0, result.output
+    assert "aaa" in result.output and "bbb" in result.output
+    assert "first prompt" in result.output
+
+
+def test_inspect_no_arg_walks_whole_workspace(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("AGENTCAP_WORKSPACE", str(tmp_path))
+    monkeypatch.setenv("PATH", "")
+    _seed_workspace_run(
+        tmp_path, "hermes-local-20260101-000000", [("aaa", "p1")],
+    )
+    _seed_workspace_run(
+        tmp_path, "goose-local-20260101-010000", [("bbb", "p2")],
+    )
+
+    result = CliRunner().invoke(cli, ["inspect"])
+    assert result.exit_code == 0, result.output
+    # Both runs surfaced.
+    assert "aaa" in result.output and "bbb" in result.output
+
+
+def test_inspect_no_arg_empty_workspace_errors(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("AGENTCAP_WORKSPACE", str(tmp_path))
+    (tmp_path / ".agentcap").mkdir()
+    result = CliRunner().invoke(cli, ["inspect"])
+    assert result.exit_code != 0
+    assert "no captured requests" in result.output
+
+
 def test_replay_posts_body_to_target(tmp_path: Path, monkeypatch):
     """Replay POSTs the captured body verbatim and surfaces the response."""
     import json as _json
