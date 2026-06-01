@@ -12,8 +12,12 @@ RUN apt-get update \
 
 # opencode's installer drops its tree under ``$HOME/.opencode/``. Move
 # the whole tree under /opt/ (out of the per-run $HOME tmpfs) and
-# symlink the launcher into /usr/local/bin so it's on PATH.
-RUN curl -fsSL https://opencode.ai/install | bash \
+# symlink the launcher into /usr/local/bin so it's on PATH. Pin the
+# release explicitly (the installer otherwise grabs latest at build
+# time, making the image hash non-deterministic).
+ARG OPENCODE_VERSION=1.15.13
+RUN curl -fsSL https://opencode.ai/install \
+        | bash -s -- --version "${OPENCODE_VERSION}" \
  && mv /root/.opencode /opt/opencode \
  && ln -s /opt/opencode/bin/opencode /usr/local/bin/opencode \
  && command -v opencode
