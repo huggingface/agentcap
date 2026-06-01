@@ -1,4 +1,4 @@
-name: ci-live
+name: linux-live-tests
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 jobs:
-  live:
+  tests:
     # Live end-to-end tests: build per-agent sandbox images, spawn
     # ``llama serve`` locally, and run real agent CLIs against the
     # spawned model. CPU inference makes the default ``ubuntu-latest``

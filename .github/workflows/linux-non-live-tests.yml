@@ -1,4 +1,4 @@
-name: ci
+name: linux-non-live-tests
 
 on:
   push:
@@ -7,10 +7,10 @@ on:
     branches: [main]
 
 jobs:
-  ci:
+  tests:
     # Lint + unit tests on the default Ubuntu runner. The live tests
-    # live in ``ci-live.yml`` and run on a GPU runner so the local
-    # ``llama serve`` doesn't stall on CPU inference.
+    # live in ``linux-live-tests.yml`` and run on a GPU runner so the
+    # local ``llama serve`` doesn't stall on CPU inference.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
