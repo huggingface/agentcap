@@ -442,6 +442,23 @@ def _seed_workspace_run(root: Path, run_id: str, rids: list[tuple[str, str]]) ->
         }))
 
 
+def _seed_workspace_run_with_meta(
+    root: Path, run_id: str, *, agent: str = "hermes", model: str = "m",
+) -> None:
+    """Like _seed_workspace_run but also writes a minimal run.json so
+    the run picker discovers it."""
+    import json as _json
+    _seed_workspace_run(root, run_id, [("aaa", "p1")])
+    (root / ".agentcap" / run_id / "run.json").write_text(_json.dumps({
+        "agent": agent, "model": model, "upstream": "http://x",
+        "turns_per_task": 1,
+        "tasks": [{
+            "task_id": "task_01", "prompt": "p1", "completed_turns": 1,
+            "turns": [{"turn": 1, "returncode": 0, "duration_s": 1.0}],
+        }],
+    }))
+
+
 def test_inspect_run_id_falls_back_to_table_without_fzf(
     tmp_path: Path, monkeypatch
 ):
@@ -459,20 +476,22 @@ def test_inspect_run_id_falls_back_to_table_without_fzf(
     assert "first prompt" in result.output
 
 
-def test_inspect_no_arg_walks_whole_workspace(tmp_path: Path, monkeypatch):
+def test_inspect_no_arg_opens_run_picker(tmp_path: Path, monkeypatch):
+    """With no arg, inspect now opens the run picker first. Without fzf
+    the run table is printed and inspect exits (user must re-invoke
+    with an explicit run-id)."""
     monkeypatch.setenv("AGENTCAP_WORKSPACE", str(tmp_path))
     monkeypatch.setenv("PATH", "")
-    _seed_workspace_run(
-        tmp_path, "hermes-local-20260101-000000", [("aaa", "p1")],
-    )
-    _seed_workspace_run(
-        tmp_path, "goose-local-20260101-010000", [("bbb", "p2")],
+    # Seed a run with run.json so the run picker finds it.
+    _seed_workspace_run_with_meta(
+        tmp_path, "hermes-local-20260101-000000",
+        agent="hermes", model="m",
     )
 
     result = CliRunner().invoke(cli, ["inspect"])
     assert result.exit_code == 0, result.output
-    # Both runs surfaced.
-    assert "aaa" in result.output and "bbb" in result.output
+    # The run table includes the run-id.
+    assert "hermes-local-20260101-000000" in result.output
 
 
 def test_inspect_no_arg_empty_workspace_errors(tmp_path: Path, monkeypatch):
@@ -480,7 +499,7 @@ def test_inspect_no_arg_empty_workspace_errors(tmp_path: Path, monkeypatch):
     (tmp_path / ".agentcap").mkdir()
     result = CliRunner().invoke(cli, ["inspect"])
     assert result.exit_code != 0
-    assert "no captured requests" in result.output
+    assert "no runs" in result.output or "no workspace" in result.output
 
 
 def test_replay_posts_body_to_target(tmp_path: Path, monkeypatch):
