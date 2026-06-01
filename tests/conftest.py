@@ -261,12 +261,20 @@ _HELLO_PY = 'def hello():\n    print("Hello, world!")\n'
 
 
 @pytest.fixture(scope="session")
-def sandbox_for(lima_vm_for, agentcap_image_for, live_proxy_base_url):
+def sandbox_for(
+    lima_vm_for, agentcap_image_for, live_proxy_base_url, live_model,
+):
     """Factory: ``sandbox_for("hermes")`` returns a Sandbox keyed on
     the given agent. On macOS this is the ``agentcap-<agent>``
     LimaSandbox (the fixture ensures the VM is up first); on Linux
     it's the host BwrapSandbox mounted on the per-agent buildah image
     (the fixture ensures the image is built); on other hosts it skips.
+
+    The sandbox env is seeded with ``AGENTCAP_PROXY_URL`` *and*
+    ``AGENTCAP_MODEL`` so the per-agent entrypoint can start — the
+    opencode init script bails out without ``AGENTCAP_MODEL``, which
+    is enough to make ``command -v opencode`` (used as a skip probe
+    by ``agent_proj_for``) exit non-zero and silently skip the test.
 
     Sandboxes are closed at session teardown so the BwrapSandbox's
     persistent buildah working container is removed (otherwise it
@@ -290,7 +298,10 @@ def sandbox_for(lima_vm_for, agentcap_image_for, live_proxy_base_url):
             )
         sb = get_sandbox(
             agent=agent,
-            env={"AGENTCAP_PROXY_URL": live_proxy_base_url},
+            env={
+                "AGENTCAP_PROXY_URL": live_proxy_base_url,
+                "AGENTCAP_MODEL": live_model,
+            },
         )
         cache[agent] = sb
         return sb
