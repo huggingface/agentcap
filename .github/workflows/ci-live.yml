@@ -1,0 +1,55 @@
+name: ci-live
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  live:
+    # Live end-to-end tests: build per-agent sandbox images, spawn
+    # ``llama serve`` locally, and run real agent CLIs against the
+    # spawned model. CPU inference makes the default ``ubuntu-latest``
+    # runner too slow (default gemma-4-E4B-it Q4_K_M is multi-GB and
+    # response-bound on CPU), so we run on a GPU runner instead.
+    #
+    # ``continue-on-error: true`` keeps merges unblocked while the
+    # live setup stabilises.
+    runs-on: aws-g5-4xlarge-plus
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install system deps (bwrap + buildah)
+        # Required by ``agentcap.sandbox.bwrap``. Both ship in
+        # Ubuntu's default apt sources.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap buildah
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e '.[dev]'
+      - name: Install llama
+        # ``live_proxy_base_url`` invokes ``llama serve`` to spawn a
+        # local model server. The installer detects CUDA on the GPU
+        # runner and installs the GPU-enabled build.
+        run: |
+          curl -fsSL https://llama.app/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Cache GGUF weights
+        # The default test GGUF (gemma-4-E4B-it Q4_K_M, ~5 GB) lands
+        # in the HF hub cache. Caching it keeps live runs cheap after
+        # the first download.
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-hub-gguf-${{ hashFiles('tests/conftest.py') }}
+          restore-keys: |
+            hf-hub-gguf-
+      - name: Run live tests
+        run: pytest -m live tests/ -v
