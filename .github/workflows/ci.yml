@@ -9,15 +9,11 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.10", "3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.12"
           cache: pip
       - name: Install
         run: |
@@ -39,22 +35,21 @@ jobs:
 
   live:
     # End-to-end tests that touch a real model server, build per-agent
-    # sandbox images, and run real agent CLIs. Runs after ``test``
-    # passes; ``continue-on-error: true`` keeps merges unblocked while
-    # the live setup stabilises.
+    # sandbox images, and run real agent CLIs. Runs on every PR and on
+    # push to main; ``continue-on-error: true`` keeps merges unblocked
+    # while the live setup stabilises.
     #
     # Self-contained: installs llama (from llama.app) and lets the
     # ``live_proxy_base_url`` fixture fetch a small GGUF from HF Hub
     # and spawn ``llama serve`` locally. No external secrets needed.
     runs-on: ubuntu-latest
     needs: test
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
           cache: pip
       - name: Install system deps (bwrap + buildah)
         # Required by ``agentcap.sandbox.bwrap``. Both are in Ubuntu's
