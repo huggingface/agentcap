@@ -1121,6 +1121,72 @@ def _preview_cmd(request_id: str) -> None:
     click.echo(_json.dumps(body, indent=2, ensure_ascii=False))
 
 
+def _render_sse_stream(chunks) -> int:
+    """Parse an OpenAI-compatible SSE stream and emit only the generated
+    content (and tool-call name/arguments) to stdout. Returns the total
+    number of raw bytes consumed so the caller can report it."""
+    import json as _json
+
+    buf = ""
+    total = 0
+    tool_open = False
+    for chunk in chunks:
+        total += len(chunk)
+        buf += chunk.decode("utf-8", errors="replace")
+        while True:
+            sep = buf.find("\n\n")
+            if sep < 0:
+                break
+            event, buf = buf[: sep], buf[sep + 2:]
+            for line in event.split("\n"):
+                if not line.startswith("data:"):
+                    continue
+                payload = line[5:].strip()
+                if not payload or payload == "[DONE]":
+                    continue
+                try:
+                    obj = _json.loads(payload)
+                except _json.JSONDecodeError:
+                    continue
+                delta = (obj.get("choices") or [{}])[0].get("delta") or {}
+                content = delta.get("content")
+                if content:
+                    sys.stdout.write(content)
+                    sys.stdout.flush()
+                for tc in delta.get("tool_calls") or []:
+                    fn = tc.get("function") or {}
+                    name = fn.get("name")
+                    if name:
+                        prefix = ")\n" if tool_open else ""
+                        sys.stdout.write(f"{prefix}[tool:{name}](")
+                        tool_open = True
+                    args = fn.get("arguments")
+                    if args:
+                        sys.stdout.write(args)
+                        sys.stdout.flush()
+    if tool_open:
+        sys.stdout.write(")\n")
+    elif not buf.endswith("\n"):
+        sys.stdout.write("\n")
+    sys.stdout.flush()
+    return total
+
+
+def _render_buffered_completion(obj: dict) -> None:
+    """Render a non-streamed /v1/chat/completions response: just the
+    message text, then a compact tool-call summary if any."""
+    msg = ((obj.get("choices") or [{}])[0].get("message")) or {}
+    content = msg.get("content") or ""
+    if content:
+        sys.stdout.write(content)
+        if not content.endswith("\n"):
+            sys.stdout.write("\n")
+    for tc in msg.get("tool_calls") or []:
+        fn = tc.get("function") or {}
+        sys.stdout.write(f"[tool:{fn.get('name', '?')}]({fn.get('arguments', '')})\n")
+    sys.stdout.flush()
+
+
 @cli.command("replay")
 @click.argument("request_id", required=False, shell_complete=_complete_request_ids)
 @click.option(
@@ -1143,8 +1209,15 @@ def _preview_cmd(request_id: str) -> None:
     show_default=True,
     help="Per-request HTTP timeout in seconds.",
 )
+@click.option(
+    "--raw", "raw_output", is_flag=True,
+    help="Dump the raw response bytes (SSE for streamed, JSON for "
+    "buffered) instead of rendering just the generated text. Use "
+    "when debugging the wire shape.",
+)
 def replay_cmd(
-    request_id: str | None, target: str, source: str | None, timeout: float
+    request_id: str | None, target: str, source: str | None,
+    timeout: float, raw_output: bool,
 ) -> None:
     """Re-issue one captured request to an OpenAI-compatible endpoint.
 
@@ -1170,23 +1243,63 @@ def replay_cmd(
         request_id = picked
     full_rid, body, _ = _resolve_request_id(request_id, source)
     url = target.rstrip("/") + "/v1/chat/completions"
+    is_stream = bool(body.get("stream"))
+    # Rough input size — chars/4 is a coarse token estimate but it sets
+    # expectations: 15k tokens means "wait a minute," not "something's wrong".
+    msgs_chars = sum(
+        len(_json.dumps(m, ensure_ascii=False))
+        for m in (body.get("messages") or [])
+    )
+    click.echo(
+        f"  rid={full_rid} POST {url} "
+        f"({'streaming' if is_stream else 'buffered'}, "
+        f"messages={len(body.get('messages') or [])}, "
+        f"tools={len(body.get('tools') or [])}, "
+        f"~{msgs_chars // 4} input tokens)…",
+        err=True,
+    )
     t0 = time.monotonic()
+    n_bytes = 0
+    status: int | None = None
     try:
-        resp = httpx.post(url, json=body, timeout=timeout)
+        if is_stream:
+            # Stream chunks to stdout as they arrive so a long generation
+            # gives immediate feedback instead of a wall of silence.
+            with httpx.stream("POST", url, json=body, timeout=timeout) as resp:
+                status = resp.status_code
+                click.echo(
+                    f"  ← headers status={status} content-type="
+                    f"{resp.headers.get('content-type', '?')}",
+                    err=True,
+                )
+                if raw_output or status != 200:
+                    # Errors come back as a single JSON object, not SSE.
+                    # Always dump them raw so the user sees the message.
+                    for chunk in resp.iter_raw():
+                        sys.stdout.buffer.write(chunk)
+                        sys.stdout.buffer.flush()
+                        n_bytes += len(chunk)
+                else:
+                    n_bytes = _render_sse_stream(resp.iter_raw())
+        else:
+            resp = httpx.post(url, json=body, timeout=timeout)
+            status = resp.status_code
+            n_bytes = len(resp.content)
+            if raw_output or status != 200:
+                try:
+                    click.echo(_json.dumps(resp.json(), indent=2, ensure_ascii=False))
+                except ValueError:
+                    sys.stdout.buffer.write(resp.content)
+                    sys.stdout.buffer.write(b"\n")
+            else:
+                _render_buffered_completion(resp.json())
     except httpx.HTTPError as exc:
         raise click.ClickException(f"replay failed: {exc}")
     dt = time.monotonic() - t0
     click.echo(
-        f"  rid={full_rid} POST {url} status={resp.status_code} "
-        f"duration={dt:.2f}s bytes={len(resp.content)}",
+        f"  status={status} duration={dt:.2f}s bytes={n_bytes}",
         err=True,
     )
-    try:
-        click.echo(_json.dumps(resp.json(), indent=2, ensure_ascii=False))
-    except ValueError:
-        # Non-JSON or streaming chunks — emit raw bytes.
-        sys.stdout.buffer.write(resp.content)
-        sys.stdout.buffer.write(b"\n")
 
 
 def main() -> int:

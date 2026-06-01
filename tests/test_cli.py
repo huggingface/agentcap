@@ -403,9 +403,9 @@ def test_replay_posts_body_to_target(tmp_path: Path, monkeypatch):
 
     class _FakeResponse:
         status_code = 200
-        content = b'{"id":"x"}'
+        content = b'{"choices":[{"message":{"content":"hello world"}}]}'
         def json(self) -> dict:
-            return {"id": "x"}
+            return {"choices": [{"message": {"content": "hello world"}}]}
 
     def _fake_post(url, json=None, timeout=None):  # noqa: A002
         seen["url"] = url
@@ -422,4 +422,12 @@ def test_replay_posts_body_to_target(tmp_path: Path, monkeypatch):
     assert result.exit_code == 0, result.stderr
     assert seen["url"] == "http://server:9/v1/chat/completions"
     assert seen["json"] == body
-    assert '"id": "x"' in result.stdout
+    # Default rendering: just the assistant's content text.
+    assert "hello world" in result.stdout
+
+    # --raw surfaces the pretty JSON dump instead.
+    result = CliRunner().invoke(
+        cli, ["replay", "rid", "--target", "http://server:9", "--raw"],
+    )
+    assert result.exit_code == 0, result.stderr
+    assert '"choices"' in result.stdout

@@ -40,5 +40,5 @@ exec llama serve \
     --ctx-size "${CTX_SIZE:-32768}" \
     --reasoning "${REASONING:-auto}" \
     --fit "${FIT:-off}" \
-    "${opt[@]}" \
+    ${opt[@]+"${opt[@]}"} \
     --jinja

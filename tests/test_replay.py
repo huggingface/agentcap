@@ -95,7 +95,30 @@ def test_resolve_workspace_rid_finds_run(tmp_path: Path) -> None:
     _write_capture(cap, "rid-target", {"model": "m"})
 
     found = resolve_workspace_rid(ws, "rid-target")
-    assert found == cap
+    assert found == (cap, "rid-target")
+
+
+def test_resolve_workspace_rid_accepts_prefix(tmp_path: Path) -> None:
+    ws = tmp_path / ".agentcap"
+    cap = ws / "hermes-local-20260101-000000" / "captures"
+    cap.mkdir(parents=True)
+    _write_capture(cap, "abc12345deadbeef", {"model": "m"})
+
+    found = resolve_workspace_rid(ws, "abc12345")
+    assert found == (cap, "abc12345deadbeef")
+
+
+def test_resolve_workspace_rid_ambiguous_prefix_raises(tmp_path: Path) -> None:
+    from agentcap.replay import AmbiguousRequestId
+
+    ws = tmp_path / ".agentcap"
+    cap = ws / "hermes-local-20260101-000000" / "captures"
+    cap.mkdir(parents=True)
+    _write_capture(cap, "abc12345_a", {"model": "m"})
+    _write_capture(cap, "abc12345_b", {"model": "m"})
+
+    with pytest.raises(AmbiguousRequestId):
+        resolve_workspace_rid(ws, "abc12345")
 
 
 def test_resolve_workspace_rid_returns_none_when_absent(tmp_path: Path) -> None:
