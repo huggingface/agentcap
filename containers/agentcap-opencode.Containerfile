@@ -15,7 +15,13 @@ RUN apt-get update \
 # symlink the launcher into /usr/local/bin so it's on PATH. Pin the
 # release explicitly (the installer otherwise grabs latest at build
 # time, making the image hash non-deterministic).
-ARG OPENCODE_VERSION=1.15.13
+# 1.15.13 broke ``--agent <name>`` resolution (the "Config loading
+# behavior refinement" in its release notes seems to be the trigger).
+# Until 1.15.14 lands or the new behavior is documented, pin to
+# 1.15.12 — the last release before the regression and what the
+# floating installer was actually serving from buildah's layer cache
+# when the live test was last green.
+ARG OPENCODE_VERSION=1.15.12
 RUN curl -fsSL https://opencode.ai/install \
         | bash -s -- --version "${OPENCODE_VERSION}" \
  && mv /root/.opencode /opt/opencode \
