@@ -23,6 +23,16 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e '.[dev]'
+      - name: Install trufflehog
+        # Used by ``agentcap scan`` and the pre-export gate in
+        # ``agentcap export``. The unit tests pass --no-scan so they
+        # don't depend on this — but having it on PATH keeps the
+        # ``agentcap.scan.find_trufflehog`` smoke path honest and
+        # lets future tests exercise the scan end-to-end.
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh \
+            | sh -s -- -b "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Lint (ruff)
         run: ruff check .
       - name: Tests (unit only, no live)
