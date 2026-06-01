@@ -48,5 +48,23 @@ jobs:
           key: hf-hub-gguf-${{ hashFiles('tests/conftest.py') }}
           restore-keys: |
             hf-hub-gguf-
+      - name: Cache buildah images
+        # Per-agent sandbox images (hermes is the heaviest at ~900 MB)
+        # are built on first use and stamped with a hash of their
+        # Containerfile + build-context dir. Caching the rootless
+        # buildah storage between runs lets ``ensure_image`` short-
+        # circuit on hash match. Key invalidates whenever any
+        # Containerfile or per-agent script changes.
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/containers
+          key: buildah-images-${{ hashFiles('containers/**') }}
+          restore-keys: |
+            buildah-images-
+      - name: Pre-build sandbox images
+        # Idempotent build of every per-agent image. On a cache hit
+        # this is a no-op (hash match in ``ensure_image``); on a miss
+        # it builds and the next run reuses the cache.
+        run: python tests/fixtures/sandbox_images.py
       - name: Run live tests
         run: pytest -m live tests/ -v
