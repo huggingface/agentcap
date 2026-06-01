@@ -453,6 +453,19 @@ def run_cmd(
     state.mkdir(parents=True, exist_ok=True)
     click.echo(f"  [workdir] {workdir_p}", err=True)
 
+    # Stub run.json so ``agentcap ls/inspect/export`` can discover this
+    # run while it's still in flight. Fully overwritten with the final
+    # summary (incl. per-task durations) at end-of-run.
+    (workdir_p / "run.json").write_text(json.dumps({
+        "agent": agent,
+        "model": model,
+        "provider": provider_slug,
+        "upstream": upstream,
+        "turns_per_task": turns,
+        "followup": followup,
+        "tasks": [],
+    }, indent=2))
+
     # Resolve --sandbox up front: it joins the per-VM mount set
     # alongside --skills (RO) and the traces dir (RW), so the Lima
     # backend can configure all three at provision time.
