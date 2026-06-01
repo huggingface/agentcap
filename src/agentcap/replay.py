@@ -62,9 +62,8 @@ def load_requests(
 def _looks_like_hf_source(source: str) -> bool:
     if source.startswith("hf://"):
         return True
-    # Bare ``<owner>/<name>[/<subdir>]`` — a single ``/`` and no path
-    # separator-style prefix. Heuristic, mirrored from how
-    # ``export.parse_dataset_uri`` accepts the same form.
+    # Bare ``<owner>/<name>`` — a single ``/`` and no path-separator
+    # prefix. Heuristic for distinguishing an HF repo from a local path.
     if source.startswith((".", "/", "~")):
         return False
     return "/" in source
@@ -99,16 +98,20 @@ def _load_from_parquet(
 def _load_from_hf_dataset(
     source: str, wanted: set[str]
 ) -> dict[str, dict]:
-    """Scan every parquet under ``data/[<subdir>/]`` in the dataset
-    until all wanted ids are found (or files exhausted)."""
+    """Scan every parquet under ``data/`` in the dataset until all
+    wanted ids are found (or files exhausted)."""
     import pyarrow.parquet as pq
     from huggingface_hub import HfFileSystem
 
-    from .export import parse_dataset_uri
-
-    repo_id, subdir = parse_dataset_uri(source)
+    s = source.removeprefix("hf://datasets/").strip("/")
+    parts = s.split("/")
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise ValueError(
+            f"hf source must be <owner>/<name>, got {source!r}"
+        )
+    repo_id = f"{parts[0]}/{parts[1]}"
     fs = HfFileSystem()
-    prefix = f"datasets/{repo_id}/data" + (f"/{subdir}" if subdir else "")
+    prefix = f"datasets/{repo_id}/data"
 
     out: dict[str, dict] = {}
     remaining = set(wanted)
