@@ -43,6 +43,21 @@ agentcap-compatible capture dir. The corpus is just a `tasks.txt`.
    `(agent, model, provider)` so a single repo holds many tuples
    without aliasing.
 
+## Vocabulary
+
+These terms appear throughout the CLI, on-disk layout, and docs:
+
+| term | meaning |
+|---|---|
+| **task** | One corpus entry — the initial user prompt fed to the agent. |
+| **turn** | One user-prompt cycle: either the initial prompt or one follow-up. Set by `agentcap run --turns N`. |
+| **call** | One `/v1/chat/completions` request the agent makes to the model = one captured `<rid>`. A single turn contains many calls (the agent's tool-use loop). |
+| **session** | An agent's stateful conversation. One task = one session, kept across all its turns via the agent's own `session_id`. |
+| **capture** | One persisted `<rid>.request.json` + `<rid>.response.json` pair — one call's wire bytes on disk. |
+| **run** | One `agentcap run` invocation: many tasks × many turns producing many calls, all under `.agentcap/<agent>-<provider>-<utc>/`. |
+
+So a `run` contains N `task`s; each `task` is one `session` and runs over T `turn`s; each `turn` produces C `call`s, and each `call` is one `capture`.
+
 ## Architecture
 
 ```
