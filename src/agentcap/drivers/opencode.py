@@ -133,6 +133,11 @@ def build_opencode_config(
         cfg["agent"] = {
             "minimal": {
                 "description": "Stripped agent for CI / small-model CPU runs.",
+                # ``primary`` makes it selectable via ``--agent minimal``.
+                # Without ``mode``, opencode 1.15.x treats the agent as
+                # a subagent (@ autocomplete only) and the CLI flag
+                # falls through to "default agent".
+                "mode": "primary",
                 "model": f"{provider_name}/{model_id}",
                 "prompt": _MINIMAL_AGENT_PROMPT,
                 "permission": {"*": "deny", "read": "allow", "edit": "allow"},
