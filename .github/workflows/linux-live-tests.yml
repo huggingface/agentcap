@@ -37,8 +37,22 @@ jobs:
         # script grabs whatever ``$REPO/latest`` returns at install
         # time. Pinning keeps CI deterministic across llama.cpp
         # releases that change CLI flags or server defaults.
+        #
+        # NB the pin tracks llama.app's HF bucket
+        # (``huggingface.co/buckets/ggml-org/install.sh``), which is
+        # a subset of the upstream ``ggml-org/llama.cpp`` release
+        # tags. Don't copy an upstream tag here — query
+        # ``$REPO/latest`` first to see what the bucket actually
+        # publishes.
+        #
+        # ``SKIP_CUDA`` / ``SKIP_ROCM`` / ``SKIP_VULKAN`` make the
+        # installer go straight to the CPU build — the runner has
+        # no GPU and the probe downloads would fail and waste time.
         env:
-          LLAMA_VERSION: b9453
+          LLAMA_VERSION: b9444
+          SKIP_CUDA: "1"
+          SKIP_ROCM: "1"
+          SKIP_VULKAN: "1"
         run: |
           curl -fsSL https://llama.app/install.sh | sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
