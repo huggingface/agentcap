@@ -40,8 +40,19 @@ esac
 
 # Model id flows via the hermes CLI ``-m`` flag (the driver
 # appends it) — config-side model.name is left alone.
-# Session traces are surfaced post-corpus via ``dump-traces``
-# (hermes writes to a SQLite state.db, not per-session JSONL).
+
+# Surface hermes's SQLite state.db on the host. The file itself
+# (and its WAL/SHM siblings, which SQLite places alongside it)
+# land in AGENTCAP_STATE_DIR/hermes/, so a crashed container
+# leaves a recoverable DB. Traces are still rendered post-corpus
+# via dump-traces (hermes writes SQLite, not per-session JSONL).
+if [ -n "${AGENTCAP_STATE_DIR:-}" ] && [ -d "$AGENTCAP_STATE_DIR" ]; then
+    mkdir -p "$AGENTCAP_STATE_DIR/hermes"
+    rm -f "$HOME/.hermes/state.db" \
+          "$HOME/.hermes/state.db-shm" \
+          "$HOME/.hermes/state.db-wal"
+    ln -sfn "$AGENTCAP_STATE_DIR/hermes/state.db" "$HOME/.hermes/state.db"
+fi
 
 if [ -n "${AGENTCAP_SKILLS_DIR:-}" ] && [ -d "$AGENTCAP_SKILLS_DIR" ]; then
     if [ -d "$AGENTCAP_SKILLS_DIR/skills" ]; then

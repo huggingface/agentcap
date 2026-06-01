@@ -13,6 +13,18 @@ export GOOSE_PROVIDER=openai
 url="${AGENTCAP_PROXY_URL:-http://127.0.0.1:8001/v1}"
 export OPENAI_HOST="${url%/v1}"
 
+# Surface goose's SQLite session store on the host. The sessions/
+# subdir under ``~/.local/share/goose/`` holds ``sessions.db`` plus
+# its WAL/SHM siblings — we point it at AGENTCAP_STATE_DIR/goose
+# so a crashed container leaves a recoverable DB. Traces are still
+# materialised post-corpus by dump-traces; this is just durability.
+if [ -n "${AGENTCAP_STATE_DIR:-}" ] && [ -d "$AGENTCAP_STATE_DIR" ]; then
+    mkdir -p "$AGENTCAP_STATE_DIR/goose"
+    mkdir -p "$HOME/.local/share/goose"
+    rm -rf "$HOME/.local/share/goose/sessions"
+    ln -sfn "$AGENTCAP_STATE_DIR/goose" "$HOME/.local/share/goose/sessions"
+fi
+
 # Skills: AGENTS.md + skills/ symlinked into cwd (where goose looks).
 if [ -n "${AGENTCAP_SKILLS_DIR:-}" ] && [ -d "$AGENTCAP_SKILLS_DIR" ]; then
     [ -f "$AGENTCAP_SKILLS_DIR/agents/AGENTS.md" ] && \

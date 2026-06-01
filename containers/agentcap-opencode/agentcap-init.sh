@@ -18,6 +18,18 @@ sed -i \
     -e "s|@@AGENTCAP_MODEL@@|${model}|g" \
     "$HOME/.config/opencode/opencode.json"
 
+# Surface opencode's SQLite store on the host. The whole
+# ``~/.local/share/opencode/`` dir (opencode.db + WAL/SHM + log/)
+# is redirected at AGENTCAP_STATE_DIR/opencode so a crashed
+# container leaves a recoverable state. Traces are still
+# materialised post-corpus by dump-traces.
+if [ -n "${AGENTCAP_STATE_DIR:-}" ] && [ -d "$AGENTCAP_STATE_DIR" ]; then
+    mkdir -p "$AGENTCAP_STATE_DIR/opencode"
+    mkdir -p "$HOME/.local/share"
+    rm -rf "$HOME/.local/share/opencode"
+    ln -sfn "$AGENTCAP_STATE_DIR/opencode" "$HOME/.local/share/opencode"
+fi
+
 # Skills: AGENTS.md + skills/ symlinked into cwd (where opencode looks).
 if [ -n "${AGENTCAP_SKILLS_DIR:-}" ] && [ -d "$AGENTCAP_SKILLS_DIR" ]; then
     [ -f "$AGENTCAP_SKILLS_DIR/agents/AGENTS.md" ] && \

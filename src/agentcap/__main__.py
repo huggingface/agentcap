@@ -60,7 +60,7 @@ def _workspace_root() -> Path:
 
 
 def _no_workspace_msg(workspace: Path) -> str:
-    base, src = _workspace_source()
+    _, src = _workspace_source()
     return (
         f"no workspace at {str(workspace)!r} (from {src}). "
         f"Run `agentcap run` first, or set AGENTCAP_WORKSPACE to a "
@@ -419,9 +419,11 @@ def run_cmd(
     captures = workdir_p / "captures"
     sessions = workdir_p / "sessions"
     traces = workdir_p / "traces"
+    state = workdir_p / "state"
     captures.mkdir(parents=True, exist_ok=True)
     sessions.mkdir(parents=True, exist_ok=True)
     traces.mkdir(parents=True, exist_ok=True)
+    state.mkdir(parents=True, exist_ok=True)
     click.echo(f"  [workdir] {workdir_p}", err=True)
 
     # Resolve --sandbox up front: it joins the per-VM mount set
@@ -456,6 +458,11 @@ def run_cmd(
             "AGENTCAP_MODEL": model,
             "AGENTCAP_PROVIDER": provider_slug,
             "AGENTCAP_TRACES_DIR": str(traces.resolve()),
+            # State dir: SQLite-backed agents (hermes, goose, opencode)
+            # redirect their session store at it, so the .db lands on
+            # host as it's written — survives container crashes. Pi
+            # streams JSONL via the traces symlink and ignores this.
+            "AGENTCAP_STATE_DIR": str(state.resolve()),
         }
         if api_key:
             sandbox_env["AGENTCAP_API_KEY"] = api_key
@@ -466,6 +473,7 @@ def run_cmd(
             sandbox_ro.append(skills_abs)
         sandbox_rw: list[Path] = [
             traces.resolve(),
+            state.resolve(),
             Path(sandbox_cwd).resolve(),
         ]
         # First call per agent builds/boots the image; can take minutes.
