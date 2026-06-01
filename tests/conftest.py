@@ -5,8 +5,9 @@ Live tests run when prereqs are present, skip otherwise. Prereqs:
   - Agent binary present in the per-agent sandbox
     (``agentcap run --agent <name>`` once provisions it).
   - A ``/v1`` endpoint reachable — set ``AGENTCAP_TEST_LLM_URL`` or
-    have ``llama-server`` executable on PATH so the fixture spawns
-    one.
+    have ``llama`` (with the ``serve`` subcommand) executable on PATH
+    so the fixture spawns one. Install via:
+    ``curl -fsSL https://llama.app/install.sh | sh``.
 """
 
 from __future__ import annotations
@@ -95,10 +96,10 @@ def _wait_ready(
             pass
         now = time.time()
         if now - last_hb >= 10:
-            log(f"waiting for llama-server… ({int(now - start)}s elapsed)")
+            log(f"waiting for llama serve… ({int(now - start)}s elapsed)")
             last_hb = now
         time.sleep(1)
-    raise RuntimeError(f"llama-server never became ready at {url}")
+    raise RuntimeError(f"llama serve never became ready at {url}")
 
 
 def _agent_reachable_host() -> str:
@@ -127,8 +128,8 @@ def live_proxy_base_url():
     responsible for the server and for making it reachable from the
     sandbox).
 
-    Otherwise, if ``AGENTCAP_TEST_GGUF`` is set and ``llama-server``
-    is available, spawn one on ``0.0.0.0:<free port>`` so the
+    Otherwise, if ``AGENTCAP_TEST_GGUF`` is set and ``llama`` is on
+    PATH, spawn ``llama serve`` on ``0.0.0.0:<free port>`` so the
     sandbox can connect (the agent inside a Lima VM cannot reach
     the Mac host's loopback). The URL returned uses
     :func:`_agent_reachable_host` so it works on both bwrap (where
@@ -140,7 +141,7 @@ def live_proxy_base_url():
         yield url
         return
 
-    # Probe common ports for an already-running llama-server before
+    # Probe common ports for an already-running llama serve before
     # spawning. Lets the user keep one server alive across many
     # `pytest` invocations (per their explicit workflow preference)
     # without having to set AGENTCAP_TEST_LLM_URL every time.
@@ -151,19 +152,18 @@ def live_proxy_base_url():
             ) as r:
                 if r.status == 200:
                     _log(
-                        f"reusing existing llama-server on :{probe_port}"
+                        f"reusing existing llama serve on :{probe_port}"
                     )
                     yield f"http://127.0.0.1:{probe_port}/v1"
                     return
         except Exception:
             pass
 
-    llama = os.environ.get("AGENTCAP_TEST_LLAMA_BIN") or shutil.which(
-        "llama-server"
-    )
+    llama = os.environ.get("AGENTCAP_TEST_LLAMA_BIN") or shutil.which("llama")
     if not llama:
         pytest.skip(
-            "llama-server not on PATH; either add it to PATH or set "
+            "llama not on PATH; install it with `curl -fsSL "
+            "https://llama.app/install.sh | sh`, set "
             "AGENTCAP_TEST_LLAMA_BIN, OR set AGENTCAP_TEST_LLM_URL "
             "to point at an existing /v1 endpoint."
         )
@@ -178,7 +178,7 @@ def live_proxy_base_url():
     ctx = os.environ.get("AGENTCAP_TEST_CTX_SIZE", "8192")
     ngl = os.environ.get("AGENTCAP_TEST_NGL", "999")
     argv = [
-        llama,
+        llama, "serve",
         "--model", gguf,
         # 0.0.0.0 so the Lima VM can reach the host via
         # host.lima.internal; 127.0.0.1 would be loopback-only.
@@ -198,7 +198,7 @@ def live_proxy_base_url():
     log_path = "/tmp/agentcap-pytest-llama.log"
     log = open(log_path, "w")
     _log(
-        f"spawning llama-server on :{port} "
+        f"spawning llama serve on :{port} "
         f"(gguf={Path(gguf).name}, ctx={ctx}, ngl={ngl}); "
         f"server log -> {log_path}"
     )
@@ -211,7 +211,7 @@ def live_proxy_base_url():
             timeout=180,
             log=_log,
         )
-        _log(f"llama-server ready at :{port}")
+        _log(f"llama serve ready at :{port}")
 
         # Start the in-process proxy on a free port (don't hardcode
         # 8001 — collides with whatever the user has running). Bind
