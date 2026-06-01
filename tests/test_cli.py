@@ -190,7 +190,7 @@ def test_export_requires_push(tmp_path: Path):
 def test_export_requires_targets_or_all(tmp_path: Path):
     runner = CliRunner()
     result = runner.invoke(
-        cli, ["export", "--push", "me/d"]
+        cli, ["export", "--push", "me/d", "--no-scan"]
     )
     assert result.exit_code != 0
     assert "run-ids" in result.output or "--all" in result.output
@@ -202,7 +202,7 @@ def test_export_rejects_both_targets_and_all(tmp_path: Path):
     runner = CliRunner()
     result = runner.invoke(
         cli,
-        ["export", str(capture), "--all", "--push", "me/d"],
+        ["export", str(capture), "--all", "--push", "me/d", "--no-scan"],
     )
     assert result.exit_code != 0
     assert "not both" in result.output
@@ -280,7 +280,7 @@ def test_export_auto_detects_model_from_captures(tmp_path: Path, fake_hf_api):
     _write_capture(capture, "rid", "google/gemma-4-E4B-it")
 
     result = CliRunner().invoke(
-        cli, ["export", str(capture), "--push", "me/d"],
+        cli, ["export", str(capture), "--push", "me/d", "--no-scan"],
     )
     assert result.exit_code == 0, result.output
     op = fake_hf_api.commits[0]["operations"][0]
@@ -295,7 +295,7 @@ def test_export_auto_detect_fails_on_mixed_models(tmp_path: Path):
     _write_capture(capture, "b", "model-2")
 
     result = CliRunner().invoke(
-        cli, ["export", str(capture), "--push", "me/d"],
+        cli, ["export", str(capture), "--push", "me/d", "--no-scan"],
     )
     assert result.exit_code != 0
     assert "multiple models" in result.output
@@ -312,7 +312,7 @@ def test_export_no_model_in_captures_fails(tmp_path: Path):
     }))
 
     result = CliRunner().invoke(
-        cli, ["export", str(capture), "--push", "me/d"],
+        cli, ["export", str(capture), "--push", "me/d", "--no-scan"],
     )
     assert result.exit_code != 0
     assert "no captured requests with a model field" in result.output
@@ -324,10 +324,10 @@ def test_export_push_rejects_malformed_dataset_uri(tmp_path: Path):
     _write_capture(capture, "rid", "m")
 
     result = CliRunner().invoke(
-        cli, ["export", str(capture), "--push", "just-an-owner"],
+        cli, ["export", str(capture), "--push", "just-an-owner", "--no-scan"],
     )
     assert result.exit_code != 0
-    assert "<owner>/<name>" in result.output
+    assert "<owner>/<base>" in result.output
 
 
 def test_export_resolves_workdir_layout_and_reads_agent_from_run_json(
@@ -343,7 +343,7 @@ def test_export_resolves_workdir_layout_and_reads_agent_from_run_json(
     (workdir / "run.json").write_text(json.dumps({"agent": "hermes"}))
 
     result = CliRunner().invoke(
-        cli, ["export", str(workdir), "--push", "me/d"],
+        cli, ["export", str(workdir), "--push", "me/d", "--no-scan"],
     )
     assert result.exit_code == 0, result.output
     op = fake_hf_api.commits[0]["operations"][0]
@@ -367,7 +367,7 @@ def test_export_all_walks_workspace_in_one_commit(
         }))
 
     result = CliRunner().invoke(
-        cli, ["export", "--all", "--push", "me/d"],
+        cli, ["export", "--all", "--push", "me/d", "--no-scan"],
     )
     assert result.exit_code == 0, result.output
     assert len(fake_hf_api.commits) == 1

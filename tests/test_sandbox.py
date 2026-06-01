@@ -307,7 +307,11 @@ def test_bwrap_runs_inside_image_rootfs(agentcap_image_for):
     host (in general). The image-build fixture ensures the image
     exists before the test."""
     tag = agentcap_image_for(_SANDBOX_TEST_AGENT)
-    with BwrapSandbox(image=tag) as sb:
+    # opencode-init refuses to start without AGENTCAP_MODEL (it bakes
+    # the model id into ``~/.config/opencode/opencode.json``). The
+    # value is not exercised by this test, only by the entrypoint.
+    env = {"AGENTCAP_MODEL": "test/dummy"}
+    with BwrapSandbox(image=tag, env=env) as sb:
         # opencode is installed inside the image at /usr/local/bin/opencode.
         r = sb.run(["which", "opencode"], timeout=60)
         assert r.returncode == 0, r.stderr
@@ -323,7 +327,8 @@ def test_bwrap_blocks_writes_outside_allowlist(agentcap_image_for, tmp_path):
     write outside fails. The image rootfs is read-only and the host
     filesystem (apart from explicitly bound paths) is invisible."""
     tag = agentcap_image_for(_SANDBOX_TEST_AGENT)
-    with BwrapSandbox(image=tag) as sb:
+    env = {"AGENTCAP_MODEL": "test/dummy"}
+    with BwrapSandbox(image=tag, env=env) as sb:
         inside = tmp_path / "inside.txt"
         r = sb.run(
             ["python3", "-c", f"open({str(inside)!r}, 'w').write('ok')"],

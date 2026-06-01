@@ -428,24 +428,41 @@ def fake_sandbox():
 
 
 class _FakeHfApi:
-    """Captures create_repo + list_repo_files + create_commit calls so
-    push_dataset can be asserted on without hitting the network. Reads
-    back each committed parquet to expose its row count + columns +
-    request_ids; bytes payloads (e.g. README.md) are recorded as-is."""
+    """Captures HfApi calls so the export layer can be asserted on
+    without hitting the network. Records ``create_repo`` /
+    ``list_repo_files`` / ``create_commit`` for the two dataset repos
+    (``-captures`` + per-agent ``-traces``), and the Collections API
+    surface used by ``ensure_collection`` (``list_collections``,
+    ``create_collection``, ``add_collection_item``).
+
+    Parquet payloads are read back so tests can assert row counts +
+    column sets + request_ids; bytes payloads (README.md, raw trace
+    files) and string-path payloads (raw trace files committed via
+    ``CommitOperationAdd(path_or_fileobj=str)``) are recorded as their
+    content."""
 
     def __init__(self):
-        self.created_repo: dict | None = None
+        self.created_repos: list[dict] = []
         self.commits: list[dict] = []
+        self.collections_created: list[dict] = []
+        self.collection_items: list[dict] = []
         # Default to steady-state: README already in the repo, so
         # parquet-focused tests don't see the first-push README op
         # bleed into their assertions. Tests exercising first-push
         # behaviour clear this.
         self.existing_files: list[str] = ["README.md"]
 
-    def create_repo(self, *, repo_id, repo_type, exist_ok):
-        self.created_repo = {
-            "repo_id": repo_id, "repo_type": repo_type, "exist_ok": exist_ok,
-        }
+    # Back-compat single-call accessor for older tests that only
+    # cared about one repo.
+    @property
+    def created_repo(self) -> dict | None:
+        return self.created_repos[0] if self.created_repos else None
+
+    def create_repo(self, *, repo_id, repo_type, exist_ok, private=False):
+        self.created_repos.append({
+            "repo_id": repo_id, "repo_type": repo_type,
+            "exist_ok": exist_ok, "private": private,
+        })
 
     def list_repo_files(self, repo_id, repo_type):
         return list(self.existing_files)
@@ -459,11 +476,16 @@ class _FakeHfApi:
             payload = op.path_or_fileobj
             if isinstance(payload, (bytes, bytearray)):
                 entry["bytes"] = bytes(payload)
-            else:
+            elif isinstance(payload, str) and op.path_in_repo.endswith(".parquet"):
                 table = pq.read_table(payload)
                 entry["n_rows"] = table.num_rows
                 entry["columns"] = list(table.column_names)
                 entry["request_ids"] = list(table.column("request_id").to_pylist())
+            else:
+                # Raw file (trace JSONL/JSON). Read bytes so tests
+                # can introspect the committed payload.
+                from pathlib import Path as _Path
+                entry["bytes"] = _Path(payload).read_bytes() if isinstance(payload, str) else b""
             op_list.append(entry)
         self.commits.append({
             "repo_id": repo_id,
@@ -471,6 +493,47 @@ class _FakeHfApi:
             "commit_message": commit_message,
             "operations": op_list,
         })
+
+    # --- Collections API ---
+
+    def list_collections(self, *, owner=None, q=None, limit=20):
+        # Idempotent ensure_collection looks for an existing one by
+        # title; the fake starts empty and returns whatever was made.
+        for c in self.collections_created:
+            if owner and c.get("namespace") != owner:
+                continue
+            if q and q not in (c.get("title") or ""):
+                continue
+            yield _FakeCollection(c["slug"], c["title"])
+
+    def create_collection(
+        self, title, *, namespace=None, description=None,
+        private=False, exists_ok=False, **_,
+    ):
+        slug = f"{namespace}/{title}-deadbeef" if namespace else f"{title}-deadbeef"
+        record = {
+            "slug": slug, "title": title, "namespace": namespace,
+            "description": description, "private": private,
+        }
+        self.collections_created.append(record)
+        return _FakeCollection(slug, title)
+
+    def add_collection_item(
+        self, *, collection_slug, item_id, item_type,
+        exists_ok=False, **_,
+    ):
+        self.collection_items.append({
+            "collection_slug": collection_slug,
+            "item_id": item_id,
+            "item_type": item_type,
+        })
+
+
+class _FakeCollection:
+    __slots__ = ("slug", "title")
+    def __init__(self, slug: str, title: str) -> None:
+        self.slug = slug
+        self.title = title
 
 
 @pytest.fixture
