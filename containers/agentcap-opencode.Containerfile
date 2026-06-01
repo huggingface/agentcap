@@ -37,5 +37,6 @@ ENV OPENAI_API_KEY=dummy \
 RUN mkdir -p /root/.config/opencode
 COPY agentcap-opencode/opencode.json /root/.config/opencode/opencode.json
 COPY agentcap-opencode/agentcap-init.sh /usr/local/bin/agentcap-init
-RUN chmod 0755 /usr/local/bin/agentcap-init
+COPY agentcap-opencode/dump-traces.sh /usr/local/bin/dump-traces
+RUN chmod 0755 /usr/local/bin/agentcap-init /usr/local/bin/dump-traces
 ENTRYPOINT ["/usr/local/bin/agentcap-init"]

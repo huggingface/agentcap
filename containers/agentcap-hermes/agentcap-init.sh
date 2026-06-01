@@ -40,6 +40,8 @@ esac
 
 # Model id flows via the hermes CLI ``-m`` flag (the driver
 # appends it) — config-side model.name is left alone.
+# Session traces are surfaced post-corpus via ``dump-traces``
+# (hermes writes to a SQLite state.db, not per-session JSONL).
 
 if [ -n "${AGENTCAP_SKILLS_DIR:-}" ] && [ -d "$AGENTCAP_SKILLS_DIR" ]; then
     if [ -d "$AGENTCAP_SKILLS_DIR/skills" ]; then

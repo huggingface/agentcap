@@ -109,20 +109,49 @@ def known_drivers() -> tuple[str, ...]:
     return tuple(DRIVER_REGISTRY)
 
 
-# Map of agent name -> in-container path where its native session
-# files live. ``agentcap run`` bind-mounts ``<workdir>/traces/`` to
-# this path so the agent's own trace lands next to the proxy
-# captures, surviving even a crashed run.
+# Native session-trace surfacing. Two patterns:
 #
-# Pi is the vertical slice; other agents will join as their
-# session-dir conventions are characterised.
+#  * **Symlink-the-dir** (pi, hermes): the agent writes one file per
+#    session into its native sessions dir. ``agentcap run`` bind-mounts
+#    ``<workdir>/traces/`` and the image entrypoint symlinks the
+#    native dir at it, so transcripts land on the host as they're
+#    written.
+#
+#  * **Post-run dump** (goose, opencode): the agent writes to a SQLite
+#    store; no per-session files exist on disk. The image ships a
+#    ``dump-traces`` script that lists sessions and exports each one
+#    via the agent's own CLI. The orchestrator calls it once after
+#    the corpus completes.
+#
+# The first column drives the in-container symlink at start-up
+# (set in the per-agent ``agentcap-init.sh``); the second drives the
+# post-corpus dump via :func:`traces_dump_argv_for`.
 SESSIONS_PATH_IN_CONTAINER: dict[str, str] = {
     "pi": "/opt/pi-config/sessions",
 }
 
+# Agents whose images ship a ``dump-traces`` executable (on PATH).
+# Called as ``sandbox.run(["dump-traces"])`` after the corpus to
+# render SQLite-stored sessions into JSON/JSONL files under
+# ``AGENTCAP_TRACES_DIR``. Symlink-style agents (pi) don't need it.
+#
+# hermes/goose/opencode all use SQLite session stores — there's no
+# per-session file on disk to symlink, so we dump via the agent's
+# own export CLI post-corpus.
+_TRACES_DUMP_AGENTS: frozenset[str] = frozenset({"hermes", "goose", "opencode"})
+
 
 def sessions_path_for(agent: str) -> str | None:
     return SESSIONS_PATH_IN_CONTAINER.get(agent)
+
+
+def traces_dump_argv_for(agent: str) -> list[str] | None:
+    """In-container argv for the post-corpus trace dump, or None if
+    the agent surfaces traces through the symlink mechanism (no dump
+    step needed)."""
+    if agent in _TRACES_DUMP_AGENTS:
+        return ["dump-traces"]
+    return None
 
 
 def get_driver(name: str, **kwargs) -> AgentDriver:

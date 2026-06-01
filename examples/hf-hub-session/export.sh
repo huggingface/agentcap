@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
-# Render captures from this corpus into parquet and push to a Hugging
-# Face Dataset repo under the ``hf-hub-session/`` subdir.
+# Push captures (parquet) + native session traces (raw JSONL) from
+# this corpus to the paired HF datasets, grouped under a Collection.
 #
 # Pins AGENTCAP_WORKSPACE to the corpus dir so ``agentcap export``
-# only sees runs from this corpus (run.sh does the same).
+# only sees runs from this corpus (run.sh does the same). One
+# ``--push <owner>/<base>`` value drives all three artefacts:
+#   - parquets -> <owner>/<base>-captures
+#   - traces   -> <owner>/<base>-traces
+#   - collection titled <base> under <owner>
 #
 # Usage:
 #   ./export.sh                       # latest run
@@ -11,7 +15,7 @@
 #   ./export.sh --all                 # every run in $HERE/.agentcap/
 #
 # Env knobs:
-#   DATASET   default --push target. dacorvo/agentcap-captures/hf-hub-session
+#   DATASET   default --push base. dacorvo/hf-hub-session
 #   AGENTCAP  path to the agentcap binary; default: `agentcap` on PATH
 
 set -euo pipefail
@@ -19,7 +23,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 export AGENTCAP_WORKSPACE="$HERE"
 
-DEFAULT_DATASET="dacorvo/agentcap-captures/hf-hub-session"
+DEFAULT_DATASET="dacorvo/hf-hub-session"
 AGENTCAP="${AGENTCAP:-agentcap}"
 PUSH="${DATASET:-$DEFAULT_DATASET}"
 

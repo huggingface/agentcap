@@ -42,8 +42,30 @@ def _read_hf_token_cache() -> str | None:
 _WORKSPACE_DIR = ".agentcap"
 
 
+def _workspace_source() -> tuple[Path, str]:
+    """Return the workspace root (without ``.agentcap`` suffix) and a
+    short label of where the value came from. Used by error messages
+    so the user can see, verbatim, what AGENTCAP_WORKSPACE resolved
+    to — catches shell typos like ``WORKSPACE==/path`` that leave a
+    leading ``=`` in the env var value."""
+    env = os.environ.get("AGENTCAP_WORKSPACE")
+    if env is not None:
+        return Path(env), f"AGENTCAP_WORKSPACE={env!r}"
+    return Path(os.getcwd()), "cwd (AGENTCAP_WORKSPACE unset)"
+
+
 def _workspace_root() -> Path:
-    return Path(os.environ.get("AGENTCAP_WORKSPACE", os.getcwd())) / _WORKSPACE_DIR
+    base, _ = _workspace_source()
+    return base / _WORKSPACE_DIR
+
+
+def _no_workspace_msg(workspace: Path) -> str:
+    base, src = _workspace_source()
+    return (
+        f"no workspace at {str(workspace)!r} (from {src}). "
+        f"Run `agentcap run` first, or set AGENTCAP_WORKSPACE to a "
+        f"directory that contains a ``.agentcap/`` subdir."
+    )
 
 
 def _default_workdir(agent: str, provider_slug: str) -> Path:
@@ -81,24 +103,40 @@ def _resolve_api_key(
 @click.option(
     "--push",
     required=True,
-    help="Hugging Face Dataset repo to push to: <owner>/<name>[/<subdir>] "
-    "(or hf://datasets/<owner>/<name>[/<subdir>]). The repo is created "
-    "if it doesn't exist; the parquet lands under data/[<subdir>/]<file>.parquet "
-    "so the Hub Dataset Viewer picks it up automatically.",
+    help="``<owner>/<base>`` — the Hugging Face Collection base name. "
+    "Captures parquets land in ``<owner>/<base>-captures``, raw session "
+    "traces in ``<owner>/<base>-traces``, and both are added to a "
+    "Collection titled ``<base>`` under ``<owner>``. Repos and "
+    "Collection are created on first push.",
 )
-def export_cmd(targets: tuple[str, ...], all_runs: bool, push: str) -> None:
-    """Render captured runs into parquet files and push to a Dataset repo.
-
-    ``TARGETS`` is one or more run-ids (resolved against the workspace)
-    or paths to a workdir/capture-dir. Use ``--all`` to export every
-    run in the workspace.
+@click.option(
+    "--no-scan", "no_scan", is_flag=True,
+    help="Skip the pre-export trufflehog secret scan. Off by default: "
+    "any **verified** secret in a target run dir aborts the export "
+    "before any push happens.",
+)
+def export_cmd(
+    targets: tuple[str, ...], all_runs: bool, push: str, no_scan: bool,
+) -> None:
+    """Render captured runs into parquets + upload native traces, in
+    one shot. Pushes to a paired ``-captures``/``-traces`` dataset
+    grouped under a Collection. ``TARGETS`` is one or more run-ids
+    (resolved against the workspace) or paths to a workdir; ``--all``
+    exports every run in the workspace.
     """
     import json as _json
 
-    from .export import detect_model, parse_dataset_uri, push_dataset
+    from .export import (
+        captures_repo_id,
+        detect_model,
+        ensure_collection,
+        parse_collection_base,
+        push_agent_traces_dataset,
+        push_captures_dataset,
+    )
 
     try:
-        parse_dataset_uri(push)
+        owner, base = parse_collection_base(push)
     except ValueError as exc:
         raise click.UsageError(str(exc))
     if all_runs and targets:
@@ -109,7 +147,7 @@ def export_cmd(targets: tuple[str, ...], all_runs: bool, push: str) -> None:
     workspace = _workspace_root()
     if all_runs:
         if not workspace.is_dir():
-            raise click.UsageError(f"no workspace at {workspace}")
+            raise click.UsageError(_no_workspace_msg(workspace))
         targets = tuple(
             d.name for d in sorted(workspace.iterdir())
             if d.is_dir() and (d / "run.json").is_file()
@@ -117,8 +155,10 @@ def export_cmd(targets: tuple[str, ...], all_runs: bool, push: str) -> None:
         if not targets:
             raise click.UsageError(f"no runs in {workspace}")
 
-    def _resolve(t: str) -> tuple[Path, str | None]:
-        """Return (capture_dir, agent_from_run_json) for a target."""
+    def _resolve(t: str) -> tuple[Path, str | None, str]:
+        """Return (capture_dir, agent_from_run_json, run_id) for a target.
+        run_id is the run-dir basename; it labels both the captures
+        rows and the traces-dataset folder."""
         # 1. run-id in the workspace.
         candidate = workspace / t
         if (candidate / "captures").is_dir():
@@ -129,7 +169,7 @@ def export_cmd(targets: tuple[str, ...], all_runs: bool, push: str) -> None:
                     agent_from = _json.loads(meta.read_text()).get("agent")
                 except (OSError, _json.JSONDecodeError):
                     pass
-            return candidate / "captures", agent_from
+            return candidate / "captures", agent_from, candidate.name
         # 2. an arbitrary workdir path with captures/ subdir.
         p = Path(t)
         if (p / "captures").is_dir():
@@ -140,40 +180,98 @@ def export_cmd(targets: tuple[str, ...], all_runs: bool, push: str) -> None:
                     agent_from = _json.loads(meta.read_text()).get("agent")
                 except (OSError, _json.JSONDecodeError):
                     pass
-            return p / "captures", agent_from
+            return p / "captures", agent_from, p.name
         # 3. a path that *is* a capture dir.
         if p.is_dir() and any(p.glob("*.request.json")):
-            return p, None
+            return p, None, p.parent.name
         raise click.UsageError(f"can't resolve {t!r} to a capture dir")
 
-    items: list[dict] = []
+    cap_items: list[dict] = []
+    trace_items: list[dict] = []
     for t in targets:
-        cap_dir, agent = _resolve(t)
+        cap_dir, agent, run_id = _resolve(t)
         try:
             model = detect_model(cap_dir)
         except ValueError as exc:
             raise click.UsageError(str(exc))
         if model is None:
-            # Empty capture dir (e.g. a run that died before the proxy
-            # received anything). Under --all, skip with a note; under
-            # explicit targets, hard error since the user asked for it.
             if all_runs:
                 click.echo(f"  [{t}] skipped (no captures)", err=True)
                 continue
             raise click.UsageError(
                 f"{cap_dir} has no captured requests with a model field"
             )
-        items.append({"capture_dir": cap_dir, "model": model, "agent": agent})
+        cap_items.append({
+            "capture_dir": cap_dir, "model": model, "agent": agent,
+            "run_id": run_id,
+        })
+        # Traces dir is sibling to captures; missing/empty is fine —
+        # push_traces_dataset accepts it and just records 0 files.
+        traces_dir = cap_dir.parent / "traces"
+        trace_items.append({"traces_dir": traces_dir, "run_id": run_id})
+        n_traces = sum(1 for _ in traces_dir.iterdir()) \
+            if traces_dir.is_dir() else 0
         click.echo(
-            f"  [{t}] (agent={agent or '?'}, model={model})", err=True,
+            f"  [{t}] (agent={agent or '?'}, model={model}, "
+            f"traces={n_traces})",
+            err=True,
         )
-    if not items:
+    if not cap_items:
         raise click.UsageError("no runs with captures to export")
 
-    n_rows_list = push_dataset(items, push)
+    # Pre-export gate: refuse to push if any run carries a verified
+    # secret. Verification round-trips to each provider's API so
+    # ``verified`` is high-precision (real, live credential).
+    # Unverified hits are surfaced but don't block — pattern-only
+    # detectors hit a real false-positive rate on model output.
+    if not no_scan:
+        run_dirs = [Path(c["capture_dir"]).parent for c in cap_items]
+        n_verified = _scan_run_dirs(run_dirs, no_verification=False)
+        if n_verified > 0:
+            raise click.ClickException(
+                f"export aborted: trufflehog found {n_verified} verified "
+                "secret(s) — see output above. Inspect, redact, or pass "
+                "--no-scan to override."
+            )
+
+    cap_repo, n_rows_list = push_captures_dataset(
+        cap_items, owner=owner, base=base,
+    )
     click.echo(
         f"agentcap export: pushed {sum(n_rows_list)} rows across "
-        f"{len(items)} run(s) in 1 commit -> {push}",
+        f"{len(cap_items)} run(s) -> {cap_repo}",
+        err=True,
+    )
+
+    # Group traces by agent — one dataset per agent so the Hub
+    # viewer doesn't try to merge incompatible schemas.
+    by_agent: dict[str, list[dict]] = {}
+    for cap, tr in zip(cap_items, trace_items):
+        agent_name = cap.get("agent") or "unknown"
+        n = sum(1 for _ in tr["traces_dir"].iterdir()) \
+            if tr["traces_dir"].is_dir() else 0
+        if n == 0:
+            continue
+        by_agent.setdefault(agent_name, []).append(tr)
+
+    traces_repos: list[str] = []
+    for agent_name, tr_items in sorted(by_agent.items()):
+        tr_repo, n_files = push_agent_traces_dataset(
+            tr_items, owner=owner, base=base, agent=agent_name,
+        )
+        traces_repos.append(tr_repo)
+        click.echo(
+            f"agentcap export: pushed {n_files} trace file(s) for "
+            f"{agent_name} across {len(tr_items)} run(s) -> {tr_repo}",
+            err=True,
+        )
+
+    slug = ensure_collection(
+        owner=owner, base=base,
+        repos=[captures_repo_id(owner, base), *traces_repos],
+    )
+    click.echo(
+        f"agentcap export: collection -> https://huggingface.co/collections/{slug}",
         err=True,
     )
 
@@ -277,7 +375,7 @@ def run_cmd(
     """Drive an agent CLI through a corpus, capture, summarise."""
     import json
 
-    from .drivers import get_driver
+    from .drivers import get_driver, traces_dump_argv_for
     from .followups import get_followup
     from .orchestrator import Orchestrator, read_tasks_txt
     from .provider import _hostname_fallback, refine_for_sub_provider
@@ -397,6 +495,27 @@ def run_cmd(
                 tasks, turns_per_task=turns, timeout=timeout,
             )
         finally:
+            # Dump SQLite-stored sessions to AGENTCAP_TRACES_DIR for
+            # agents whose images ship a ``dump-traces`` script
+            # (goose, opencode). No-op for symlink-style agents
+            # (pi, hermes) — their transcripts already streamed to
+            # the host. Failure is logged but never aborts the run.
+            dump_argv = traces_dump_argv_for(agent)
+            if dump_argv is not None:
+                try:
+                    r = sandbox.run(
+                        dump_argv,
+                        env=sandbox_env,
+                        cwd=sandbox_cwd,
+                        timeout=600,
+                    )
+                    if r.returncode != 0:
+                        click.echo(
+                            f"  [traces] dump-traces rc={r.returncode}",
+                            err=True,
+                        )
+                except Exception as exc:
+                    click.echo(f"  [traces] dump-traces failed: {exc}", err=True)
             close = getattr(driver, "close", None)
             if callable(close):
                 close()
@@ -438,6 +557,125 @@ def run_cmd(
     )
 
 
+def _scan_run_dirs(
+    run_dirs: list[Path],
+    *,
+    no_verification: bool = False,
+    rescan: bool = False,
+) -> int:
+    """Run trufflehog over each run dir; print a per-run summary.
+    Returns the total count of **verified** hits across all runs.
+    Unverified hits are listed but never abort the caller —
+    Trufflehog's pattern matchers have a real false-positive rate.
+
+    Persists results to ``<run_dir>/scan.json`` so repeat scans skip
+    the verification round-trips. Pass ``rescan=True`` to force a
+    fresh scan."""
+    from collections import Counter
+
+    from .scan import TrufflehogMissingError, scan_run_dir
+
+    total_verified = 0
+    for run_dir in run_dirs:
+        try:
+            result, was_cached = scan_run_dir(
+                run_dir,
+                no_verification=no_verification,
+                rescan=rescan,
+            )
+        except TrufflehogMissingError as exc:
+            raise click.ClickException(str(exc))
+        n_unver = len(result.unverified)
+        n_ver = len(result.verified)
+        total_verified += n_ver
+        cache_tag = " (cached)" if was_cached else ""
+        click.echo(
+            f"  [scan] {run_dir.name}{cache_tag}: "
+            f"{result.chunks_scanned} chunks / {result.bytes_scanned} bytes; "
+            f"verified={n_ver} unverified={n_unver}",
+            err=True,
+        )
+        # Verified hits are rare + actionable — list each one.
+        for hit in result.verified:
+            click.echo(
+                f"    VERIFIED  {hit.detector}  {hit.file}",
+                err=True,
+            )
+        # Unverified hits are usually pattern-only false positives
+        # (Box matches any 32-char alphanumeric, Mailgun any 32-hex,
+        # …). Summarise by detector instead of dumping every line;
+        # per-hit detail lives in ``<run_dir>/scan.json``.
+        if result.unverified:
+            by_det = Counter(h.detector for h in result.unverified)
+            tail = ", ".join(
+                f"{det}={n}" for det, n in by_det.most_common()
+            )
+            click.echo(f"    unverified by detector: {tail}", err=True)
+    return total_verified
+
+
+@cli.command("scan")
+@click.argument("targets", nargs=-1)
+@click.option(
+    "--all", "all_runs", is_flag=True,
+    help="Scan every run in the workspace.",
+)
+@click.option(
+    "--no-verify", "no_verify", is_flag=True,
+    help="Skip the provider-API verification step. Faster + offline-"
+    "safe, but every hit lands as unverified so the gate never fires.",
+)
+@click.option(
+    "--rescan", is_flag=True,
+    help="Ignore any cached ``<run_dir>/scan.json`` and re-run trufflehog.",
+)
+def scan_cmd(
+    targets: tuple[str, ...], all_runs: bool, no_verify: bool, rescan: bool,
+) -> None:
+    """Run trufflehog over a run's captures+traces. Exits non-zero on
+    any verified hit; unverified hits are listed but don't change the
+    exit code (false-positive rate is real). Verification is on by
+    default — disable with --no-verify. Results are persisted to
+    ``<run_dir>/scan.json`` and reused on subsequent runs unless
+    --rescan is passed."""
+    workspace = _workspace_root()
+    if all_runs and targets:
+        raise click.UsageError("pass --all OR positional run-ids, not both")
+    if not all_runs and not targets:
+        raise click.UsageError("specify one or more run-ids/paths, or pass --all")
+
+    if all_runs:
+        if not workspace.is_dir():
+            raise click.UsageError(_no_workspace_msg(workspace))
+        run_dirs = [
+            d for d in sorted(workspace.iterdir())
+            if d.is_dir() and (d / "run.json").is_file()
+        ]
+        if not run_dirs:
+            raise click.UsageError(f"no runs in {workspace}")
+    else:
+        run_dirs = []
+        for t in targets:
+            cand = workspace / t
+            if (cand / "run.json").is_file():
+                run_dirs.append(cand)
+                continue
+            p = Path(t)
+            if (p / "run.json").is_file():
+                run_dirs.append(p)
+                continue
+            raise click.UsageError(f"can't resolve {t!r} to a run dir")
+
+    n_verified = _scan_run_dirs(
+        run_dirs, no_verification=no_verify, rescan=rescan,
+    )
+    if n_verified > 0:
+        raise click.ClickException(
+            f"scan found {n_verified} verified secret(s); see output above"
+        )
+    click.echo("scan: no verified secrets found.", err=True)
+
+
 @cli.command("ls")
 @click.option(
     "--long", "-l", "long_form", is_flag=True,
@@ -450,7 +688,7 @@ def ls_cmd(long_form: bool) -> None:
 
     root = _workspace_root()
     if not root.is_dir():
-        click.echo(f"no workspace at {root}; run `agentcap run` first.", err=True)
+        click.echo(_no_workspace_msg(root), err=True)
         return
 
     rows: list[dict] = []

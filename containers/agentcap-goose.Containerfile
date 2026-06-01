@@ -39,5 +39,6 @@ ENV OPENAI_API_KEY=dummy \
     GOOSE_PROVIDER=openai
 
 COPY agentcap-goose/agentcap-init.sh /usr/local/bin/agentcap-init
-RUN chmod 0755 /usr/local/bin/agentcap-init
+COPY agentcap-goose/dump-traces.sh /usr/local/bin/dump-traces
+RUN chmod 0755 /usr/local/bin/agentcap-init /usr/local/bin/dump-traces
 ENTRYPOINT ["/usr/local/bin/agentcap-init"]

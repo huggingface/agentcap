@@ -58,5 +58,6 @@ RUN mkdir -p /root/.hermes/skills \
 # proxy on :8001). ``hermes config set`` round-trips the YAML, so
 # we don't sed.
 COPY agentcap-hermes/agentcap-init.sh /usr/local/bin/agentcap-init
-RUN chmod 0755 /usr/local/bin/agentcap-init
+COPY agentcap-hermes/dump-traces.sh /usr/local/bin/dump-traces
+RUN chmod 0755 /usr/local/bin/agentcap-init /usr/local/bin/dump-traces
 ENTRYPOINT ["/usr/local/bin/agentcap-init"]

@@ -193,18 +193,24 @@ def export_local(
     return n_written
 
 
-def parse_dataset_uri(uri: str) -> tuple[str, str]:
-    """Split ``<owner>/<name>[/<subdir>]`` (optionally prefixed with
-    ``hf://datasets/``) into ``("<owner>/<name>", "<subdir>")``."""
-    s = uri.removeprefix("hf://datasets/")
-    parts = s.split("/", 2)
-    if len(parts) < 2 or not parts[0] or not parts[1]:
+def parse_collection_base(uri: str) -> tuple[str, str]:
+    """Split ``<owner>/<base>`` (optionally prefixed with
+    ``hf://datasets/``) into ``("<owner>", "<base>")``.
+
+    ``<base>`` drives all three artifacts: captures dataset
+    ``<owner>/<base>-captures``, traces dataset ``<owner>/<base>-traces``,
+    and the HF Collection of the same title under ``<owner>``."""
+    s = uri.removeprefix("hf://datasets/").strip("/")
+    parts = s.split("/")
+    if len(parts) != 2 or not parts[0] or not parts[1]:
         raise ValueError(
-            f"dataset URI must be <owner>/<name>[/<subdir>], got {uri!r}"
+            f"--push must be <owner>/<base>, got {uri!r}"
         )
-    repo_id = f"{parts[0]}/{parts[1]}"
-    subdir = parts[2].strip("/") if len(parts) > 2 else ""
-    return repo_id, subdir
+    return parts[0], parts[1]
+
+
+def captures_repo_id(owner: str, base: str) -> str:
+    return f"{owner}/{base}-captures"
 
 
 _FILENAME_SAFE = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_."
@@ -243,19 +249,24 @@ def _default_filename(
     return "-".join(parts) + ".parquet"
 
 
-_README_TEMPLATE = """\
+_CAPTURES_README_TEMPLATE = """\
 ---
 license: apache-2.0
 tags:
-- agent-captures
 - agentcap
+- agentcap-captures
 ---
 
 # {repo_id}
 
-Captured agent ↔ model interactions — one row per
+HTTP captures of agent ↔ model interactions — one parquet row per
 `/v1/chat/completions` call. Produced by
 [agentcap](https://github.com/huggingface/agentcap).
+
+Native session traces for the same runs live in companion datasets
+named `{base}-<agent>-traces`. They're all grouped under the
+[{collection_title} Collection](https://huggingface.co/{owner})
+alongside this dataset. Join on `run_id`.
 
 ## Loading
 
@@ -269,6 +280,7 @@ ds = load_dataset("{repo_id}", split="train")
 
 | column | description |
 |---|---|
+| `run_id` | agentcap run id; matches the per-run folder in the traces dataset |
 | `request_id` | UUID minted by the capture proxy |
 | `model` | Model id from the captured request body |
 | `captured_at` | Epoch seconds when the request was captured |
@@ -287,36 +299,102 @@ through the model's chat template yourself —
 """
 
 
-def _dataset_readme(repo_id: str) -> str:
-    return _README_TEMPLATE.format(repo_id=repo_id)
+_TRACES_README_TEMPLATE = """\
+---
+license: apache-2.0
+tags:
+- agent-traces
+- agentcap
+- agentcap-traces
+- agentcap-traces-{agent}
+source_datasets:
+- {captures_repo}
+---
+
+# {repo_id}
+
+{agent} coding-agent session traces produced by
+[agentcap](https://github.com/huggingface/agentcap) runs. Each run
+contributes one folder under `data/<run_id>/`; inside, one file per
+session in `{agent}`'s native export format.
+
+The on-the-wire HTTP captures for these same runs live in
+[{captures_repo}](https://huggingface.co/datasets/{captures_repo}).
+Both belong to the
+[{collection_title} Collection](https://huggingface.co/{owner})
+— join on `run_id` to align captures with traces.
+"""
 
 
-def push_dataset(
+def traces_repo_id_for(owner: str, base: str, agent: str) -> str:
+    """Per-agent traces dataset id. One agent per dataset keeps the
+    schema homogeneous — the Hub viewer can't reconcile pi's
+    type-discriminated events with goose's session-as-object dump."""
+    return f"{owner}/{base}-{agent}-traces"
+
+
+def _captures_readme(
+    *,
+    repo_id: str,
+    owner: str,
+    base: str,
+    collection_title: str,
+) -> str:
+    return _CAPTURES_README_TEMPLATE.format(
+        repo_id=repo_id,
+        owner=owner,
+        base=base,
+        collection_title=collection_title,
+    )
+
+
+def _traces_readme(
+    *,
+    repo_id: str,
+    captures_repo: str,
+    owner: str,
+    collection_title: str,
+    agent: str,
+) -> str:
+    return _TRACES_README_TEMPLATE.format(
+        repo_id=repo_id,
+        captures_repo=captures_repo,
+        owner=owner,
+        collection_title=collection_title,
+        agent=agent,
+    )
+
+
+def push_captures_dataset(
     items: list[dict],
-    dataset_uri: str,
-) -> list[int]:
-    """Export N capture dirs to parquet and commit all of them to a
-    Hugging Face Dataset repo in a **single git commit**.
+    *,
+    owner: str,
+    base: str,
+) -> tuple[str, list[int]]:
+    """Render N capture dirs to parquet under ``<owner>/<base>-captures``
+    in a single commit. Returns ``(repo_id, [n_rows...])``.
 
     ``items`` is a list of dicts, each with:
       - ``capture_dir`` (required): path to a capture dir
       - ``model`` (required): model id used in the default filename
       - ``agent`` (optional): agent name embedded in the default filename
+      - ``run_id`` (optional): stamped onto every row + into the filename
       - ``filename`` (optional): overrides the default unique name
 
-    ``dataset_uri`` is ``<owner>/<name>[/<subdir>]`` (with optional
-    ``hf://datasets/`` prefix). The repo is created on first push
-    (``exist_ok=True``); files land under
-    ``data/[<subdir>/]<filename>.parquet`` so the Hub Dataset Viewer
-    picks them up automatically. Returns row counts in input order.
+    The repo is created on first push (``exist_ok=True``); files land
+    under ``data/<filename>.parquet`` so the Hub Dataset Viewer picks
+    them up automatically.
     """
     import tempfile
 
     from huggingface_hub import CommitOperationAdd, HfApi
 
-    repo_id, subdir = parse_dataset_uri(dataset_uri)
+    repo_id = captures_repo_id(owner, base)
     api = HfApi()
-    api.create_repo(repo_id=repo_id, repo_type="dataset", exist_ok=True)
+    api.create_repo(
+        repo_id=repo_id, repo_type="dataset",
+        private=True, exist_ok=True,
+    )
 
     # Seed a dataset card on first push (no README in the repo yet).
     # Later pushes leave any existing README alone — including
@@ -333,27 +411,33 @@ def push_dataset(
         if include_readme:
             operations.append(CommitOperationAdd(
                 path_in_repo="README.md",
-                path_or_fileobj=_dataset_readme(repo_id).encode("utf-8"),
+                path_or_fileobj=_captures_readme(
+                    repo_id=repo_id,
+                    owner=owner,
+                    base=base,
+                    collection_title=base,
+                ).encode("utf-8"),
             ))
         for i, item in enumerate(items):
             cap_dir = item["capture_dir"]
             model = item["model"]
             agent = item.get("agent")
+            run_id = item.get("run_id")
             filename = item.get("filename")
             provider_columns = detect_provider_columns(cap_dir)
+            extra_columns = dict(provider_columns)
+            if run_id:
+                extra_columns["run_id"] = run_id
             if filename is None:
                 filename = _default_filename(
                     agent=agent,
                     model=model,
                     provider=provider_columns.get("provider") or None,
                 )
-            path_in_repo = "/".join(p for p in ("data", subdir, filename) if p)
-            # Disambiguate temp paths if two items happen to pick the
-            # same default filename (unlikely with the timestamp+hex
-            # suffix, but cheap to guard).
+            path_in_repo = f"data/{filename}"
             local_file = Path(tmpdir) / f"{i}-{filename}"
             n_rows = export_local(
-                cap_dir, local_file, provider_columns=provider_columns,
+                cap_dir, local_file, provider_columns=extra_columns,
                 progress=False,
             )
             n_rows_list.append(n_rows)
@@ -369,4 +453,138 @@ def push_dataset(
             commit_message=f"agentcap export: add {len(operations)} parquet(s)",
         )
 
-    return n_rows_list
+    return repo_id, n_rows_list
+
+
+def push_agent_traces_dataset(
+    items: list[dict],
+    *,
+    owner: str,
+    base: str,
+    agent: str,
+) -> tuple[str, int]:
+    """Upload raw trace files for ONE agent under
+    ``<owner>/<base>-<agent>-traces`` in a single commit. Returns
+    ``(repo_id, n_files_total)``.
+
+    ``items`` is a list of dicts, each with:
+      - ``traces_dir`` (required): path to a ``<run>/traces/`` dir
+      - ``run_id`` (required): folder name in the dataset repo
+
+    Splitting by agent (one dataset per agent) keeps each dataset's
+    schema homogeneous — the Hub viewer can't reconcile pi's
+    type-discriminated events with goose's session-as-object dump.
+
+    Files are uploaded **as-is** — no JSON parsing, no schema
+    transformation. Empty trace dirs contribute 0 files. Returns 0
+    files when the entire item list has no files; the repo is still
+    created so the collection link stays consistent.
+    """
+    from huggingface_hub import CommitOperationAdd, HfApi
+
+    repo_id = traces_repo_id_for(owner, base, agent)
+    captures_repo = captures_repo_id(owner, base)
+    api = HfApi()
+    api.create_repo(
+        repo_id=repo_id, repo_type="dataset",
+        private=True, exist_ok=True,
+    )
+
+    try:
+        existing = set(api.list_repo_files(repo_id, repo_type="dataset"))
+    except Exception:
+        existing = set()
+    include_readme = "README.md" not in existing
+
+    operations: list[CommitOperationAdd] = []
+    if include_readme:
+        operations.append(CommitOperationAdd(
+            path_in_repo="README.md",
+            path_or_fileobj=_traces_readme(
+                repo_id=repo_id,
+                captures_repo=captures_repo,
+                owner=owner,
+                collection_title=base,
+                agent=agent,
+            ).encode("utf-8"),
+        ))
+
+    n_files = 0
+    for item in items:
+        traces_dir = Path(item["traces_dir"])
+        run_id = item["run_id"]
+        if not traces_dir.is_dir():
+            continue
+        for f in sorted(p for p in traces_dir.iterdir() if p.is_file()):
+            operations.append(CommitOperationAdd(
+                path_in_repo=f"data/{run_id}/{f.name}",
+                path_or_fileobj=str(f),
+            ))
+            n_files += 1
+
+    # Only commit if we have something to add. If even the README is
+    # already up, skip the empty commit silently.
+    if not operations:
+        return repo_id, n_files
+    api.create_commit(
+        repo_id=repo_id,
+        repo_type="dataset",
+        operations=operations,
+        commit_message=(
+            f"agentcap export: add {agent} traces "
+            f"({n_files} file(s) across {len(items)} run(s))"
+        ),
+    )
+
+    return repo_id, n_files
+
+
+def ensure_collection(
+    *,
+    owner: str,
+    base: str,
+    repos: list[str],
+) -> str:
+    """Find-or-create the ``<owner>/<base>`` collection and ensure every
+    repo in ``repos`` is an item. Returns the collection slug.
+
+    Idempotent: existing items are kept (``exists_ok=True``)."""
+    from huggingface_hub import HfApi
+
+    api = HfApi()
+    slug: str | None = None
+    try:
+        for c in api.list_collections(owner=owner, q=base, limit=20):
+            if c.title == base:
+                slug = c.slug
+                break
+    except Exception:
+        slug = None
+
+    if slug is None:
+        col = api.create_collection(
+            title=base,
+            namespace=owner,
+            description=(
+                "agentcap: paired HTTP captures + native session "
+                "traces. Join on run_id."
+            ),
+            private=True,
+            exists_ok=True,
+        )
+        slug = col.slug
+
+    for repo in repos:
+        try:
+            api.add_collection_item(
+                collection_slug=slug,
+                item_id=repo,
+                item_type="dataset",
+                exists_ok=True,
+            )
+        except Exception:
+            # Item-add isn't load-bearing — the README cross-links
+            # already make the relationship discoverable. Keep going.
+            pass
+
+    return slug
