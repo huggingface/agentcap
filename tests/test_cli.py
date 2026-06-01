@@ -8,12 +8,42 @@ test suite.
 
 from __future__ import annotations
 
+import os
+import shutil
 import types
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from agentcap.__main__ import cli
+
+
+def _has_trufflehog() -> bool:
+    if shutil.which("trufflehog"):
+        return True
+    local = Path.home() / ".local" / "bin" / "trufflehog"
+    return local.is_file() and os.access(local, os.X_OK)
+
+
+_HAS_TRUFFLEHOG = _has_trufflehog()
+
+
+@pytest.fixture(
+    params=[
+        pytest.param([], id="scan"),
+        pytest.param(["--no-scan"], id="no-scan"),
+    ]
+)
+def scan_args(request):
+    """Yields ``[]`` (scan on, the default) or ``["--no-scan"]``.
+
+    The scan-on variant requires trufflehog on PATH (or
+    ~/.local/bin); without it, that parametrisation is skipped so
+    the no-scan variant still runs."""
+    if not request.param and not _HAS_TRUFFLEHOG:
+        pytest.skip("trufflehog not installed; cannot exercise scan path")
+    return request.param
 
 
 def test_help_lists_subcommands():
@@ -190,7 +220,7 @@ def test_export_requires_push(tmp_path: Path):
 def test_export_requires_targets_or_all(tmp_path: Path):
     runner = CliRunner()
     result = runner.invoke(
-        cli, ["export", "--push", "me/d", "--no-scan"]
+        cli, ["export", "--push", "me/d"]
     )
     assert result.exit_code != 0
     assert "run-ids" in result.output or "--all" in result.output
@@ -202,7 +232,7 @@ def test_export_rejects_both_targets_and_all(tmp_path: Path):
     runner = CliRunner()
     result = runner.invoke(
         cli,
-        ["export", str(capture), "--all", "--push", "me/d", "--no-scan"],
+        ["export", str(capture), "--all", "--push", "me/d"],
     )
     assert result.exit_code != 0
     assert "not both" in result.output
@@ -273,14 +303,18 @@ def _write_capture(capture_dir: Path, rid: str, model: str) -> None:
     }))
 
 
-def test_export_auto_detects_model_from_captures(tmp_path: Path, fake_hf_api):
-    """The model auto-detected from captures lands in the committed filename."""
+def test_export_auto_detects_model_from_captures(
+    tmp_path: Path, fake_hf_api, scan_args,
+):
+    """The model auto-detected from captures lands in the committed filename.
+    Runs under both scan modes — the scan path doesn't change the
+    parquet shape, but exercising both keeps the gate honest."""
     capture = tmp_path / "capture"
     capture.mkdir()
     _write_capture(capture, "rid", "google/gemma-4-E4B-it")
 
     result = CliRunner().invoke(
-        cli, ["export", str(capture), "--push", "me/d", "--no-scan"],
+        cli, ["export", str(capture), "--push", "me/d", *scan_args],
     )
     assert result.exit_code == 0, result.output
     op = fake_hf_api.commits[0]["operations"][0]
@@ -295,7 +329,7 @@ def test_export_auto_detect_fails_on_mixed_models(tmp_path: Path):
     _write_capture(capture, "b", "model-2")
 
     result = CliRunner().invoke(
-        cli, ["export", str(capture), "--push", "me/d", "--no-scan"],
+        cli, ["export", str(capture), "--push", "me/d"],
     )
     assert result.exit_code != 0
     assert "multiple models" in result.output
@@ -312,7 +346,7 @@ def test_export_no_model_in_captures_fails(tmp_path: Path):
     }))
 
     result = CliRunner().invoke(
-        cli, ["export", str(capture), "--push", "me/d", "--no-scan"],
+        cli, ["export", str(capture), "--push", "me/d"],
     )
     assert result.exit_code != 0
     assert "no captured requests with a model field" in result.output
@@ -324,14 +358,14 @@ def test_export_push_rejects_malformed_dataset_uri(tmp_path: Path):
     _write_capture(capture, "rid", "m")
 
     result = CliRunner().invoke(
-        cli, ["export", str(capture), "--push", "just-an-owner", "--no-scan"],
+        cli, ["export", str(capture), "--push", "just-an-owner"],
     )
     assert result.exit_code != 0
     assert "<owner>/<base>" in result.output
 
 
 def test_export_resolves_workdir_layout_and_reads_agent_from_run_json(
-    tmp_path: Path, fake_hf_api
+    tmp_path: Path, fake_hf_api, scan_args,
 ):
     """Pointing export at a workdir uses its captures/ subdir AND picks up
     agent from run.json so the parquet filename embeds the agent."""
@@ -343,7 +377,7 @@ def test_export_resolves_workdir_layout_and_reads_agent_from_run_json(
     (workdir / "run.json").write_text(json.dumps({"agent": "hermes"}))
 
     result = CliRunner().invoke(
-        cli, ["export", str(workdir), "--push", "me/d", "--no-scan"],
+        cli, ["export", str(workdir), "--push", "me/d", *scan_args],
     )
     assert result.exit_code == 0, result.output
     op = fake_hf_api.commits[0]["operations"][0]
@@ -351,7 +385,7 @@ def test_export_resolves_workdir_layout_and_reads_agent_from_run_json(
 
 
 def test_export_all_walks_workspace_in_one_commit(
-    tmp_path: Path, monkeypatch, fake_hf_api
+    tmp_path: Path, monkeypatch, fake_hf_api, scan_args,
 ):
     """--all enumerates every run-id in the workspace and pushes them all
     in one git commit."""
@@ -367,7 +401,7 @@ def test_export_all_walks_workspace_in_one_commit(
         }))
 
     result = CliRunner().invoke(
-        cli, ["export", "--all", "--push", "me/d", "--no-scan"],
+        cli, ["export", "--all", "--push", "me/d", *scan_args],
     )
     assert result.exit_code == 0, result.output
     assert len(fake_hf_api.commits) == 1
