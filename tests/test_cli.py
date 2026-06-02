@@ -8,12 +8,42 @@ test suite.
 
 from __future__ import annotations
 
+import os
+import shutil
 import types
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from agentcap.__main__ import cli
+
+
+def _has_trufflehog() -> bool:
+    if shutil.which("trufflehog"):
+        return True
+    local = Path.home() / ".local" / "bin" / "trufflehog"
+    return local.is_file() and os.access(local, os.X_OK)
+
+
+_HAS_TRUFFLEHOG = _has_trufflehog()
+
+
+@pytest.fixture(
+    params=[
+        pytest.param([], id="scan"),
+        pytest.param(["--no-scan"], id="no-scan"),
+    ]
+)
+def scan_args(request):
+    """Yields ``[]`` (scan on, the default) or ``["--no-scan"]``.
+
+    The scan-on variant requires trufflehog on PATH (or
+    ~/.local/bin); without it, that parametrisation is skipped so
+    the no-scan variant still runs."""
+    if not request.param and not _HAS_TRUFFLEHOG:
+        pytest.skip("trufflehog not installed; cannot exercise scan path")
+    return request.param
 
 
 def test_help_lists_subcommands():
@@ -41,143 +71,12 @@ def test_run_requires_agent_upstream_and_workdir():
     assert "--agent" in result.output
 
 
-def test_run_synthesized_defaults_from_upstream_and_model(
-    tmp_path: Path, monkeypatch, fake_sandbox
-):
-    import contextlib
-
-    from agentcap.drivers import AgentTurn
-
-    tasks = tmp_path / "tasks.txt"
-    tasks.write_text("a task\n")
-
-    class _FakeDriver:
-        name = "hermes"
-
-        def start(self, prompt, *, env=None, timeout=None):
-            return AgentTurn(
-                session_id="ses_xyz", response_text="r", returncode=0,
-                stdout="", stderr="",
-            )
-
-        def resume(self, prompt, *, session_id, env=None, timeout=None):
-            return AgentTurn(
-                session_id=session_id, response_text="r", returncode=0,
-                stdout="", stderr="",
-            )
-
-    monkeypatch.setattr(
-        "agentcap.drivers.get_driver", lambda name, **kw: _FakeDriver()
-    )
-    monkeypatch.setattr(
-        "agentcap.sandbox.require_sandbox_or_die",
-        lambda **kw: fake_sandbox,
-    )
-
-    @contextlib.contextmanager
-    def fake_proxy(*args, **kwargs):
-        yield types.SimpleNamespace(host="127.0.0.1", port=18001)
-
-    monkeypatch.setattr("agentcap.proxy.serve_in_thread", fake_proxy)
-
-    monkeypatch.setenv("AGENTCAP_WORKSPACE", str(tmp_path))
-    runner = CliRunner()
-    result = runner.invoke(
-        cli,
-        [
-            "run",
-            "--agent", "hermes",
-            "--model", "google/gemma-4-E4B-it",
-            "--upstream", "http://up",
-            "--tasks", str(tasks),
-            "--turns", "2",
-            "--followup", "synthesized",
-        ],
-    )
-    assert result.exit_code == 0, result.output
-
-
-def test_run_invokes_orchestrator_under_proxy(tmp_path: Path, monkeypatch, fake_sandbox):
-    """Smoke-test for the `run` command. Patches out the proxy lifecycle
-    and the driver factory so no subprocesses or sockets are touched."""
-    import contextlib
-
-    from agentcap.drivers import AgentTurn
-
-    tasks = tmp_path / "tasks.txt"
-    tasks.write_text("first task\nsecond task\n")
-    monkeypatch.setenv("AGENTCAP_WORKSPACE", str(tmp_path))
-
-    # Fake driver returned by get_driver; records calls.
-    class _FakeDriver:
-        name = "hermes"
-
-        def __init__(self) -> None:
-            self.start_calls = 0
-            self.resume_calls = 0
-
-        def start(self, prompt, *, env=None, timeout=None):
-            self.start_calls += 1
-            return AgentTurn(
-                session_id="ses_xyz", response_text="r", returncode=0,
-                stdout="", stderr="",
-            )
-
-        def resume(self, prompt, *, session_id, env=None, timeout=None):
-            self.resume_calls += 1
-            return AgentTurn(
-                session_id=session_id, response_text="r", returncode=0,
-                stdout="", stderr="",
-            )
-
-    fake_driver = _FakeDriver()
-    monkeypatch.setattr(
-        "agentcap.drivers.get_driver", lambda name, **kw: fake_driver
-    )
-
-    # Bypass require_sandbox_or_die (which would build an image / boot
-    # a VM) with the test-only fake_sandbox fixture.
-    monkeypatch.setattr(
-        "agentcap.sandbox.require_sandbox_or_die",
-        lambda **kw: fake_sandbox,
-    )
-
-    proxy_started = {"count": 0}
-
-    @contextlib.contextmanager
-    def fake_proxy(*args, **kwargs):
-        proxy_started["count"] += 1
-        yield types.SimpleNamespace(host="127.0.0.1", port=18001)
-
-    monkeypatch.setattr("agentcap.proxy.serve_in_thread", fake_proxy)
-
-    runner = CliRunner()
-    result = runner.invoke(
-        cli,
-        [
-            "run",
-            "--agent", "hermes",
-            "--model", "google/gemma-4-E4B-it",
-            "--upstream", "http://up:8000",
-            "--tasks", str(tasks),
-            "--turns", "2",
-        ],
-    )
-    assert result.exit_code == 0, result.output
-    assert proxy_started["count"] == 1
-    assert fake_driver.start_calls == 2   # one per task
-    assert fake_driver.resume_calls == 2  # one follow-up per task
-    # run.json summary written under the auto-derived workdir
-    run_dirs = sorted((tmp_path / ".agentcap").glob("hermes-*"))
-    assert len(run_dirs) == 1, run_dirs
-    summary_path = run_dirs[0] / "run.json"
-    assert summary_path.is_file()
-    import json
-
-    summary = json.loads(summary_path.read_text())
-    assert summary["agent"] == "hermes"
-    assert len(summary["tasks"]) == 2
-    assert summary["tasks"][0]["completed_turns"] == 2
+# Plumbing for ``agentcap run`` (CLI flag → env-var composition →
+# orchestrator → run.json shape) is exercised end-to-end against a
+# real model server in ``tests/test_cli_live.py::test_agentcap_run_live``.
+# It replaces two previously heavily-mocked unit tests; the live test
+# touches the real proxy + sandbox + agent so we don't have to stub
+# them here.
 
 
 def test_export_requires_push(tmp_path: Path):
@@ -273,14 +172,18 @@ def _write_capture(capture_dir: Path, rid: str, model: str) -> None:
     }))
 
 
-def test_export_auto_detects_model_from_captures(tmp_path: Path, fake_hf_api):
-    """The model auto-detected from captures lands in the committed filename."""
+def test_export_auto_detects_model_from_captures(
+    tmp_path: Path, fake_hf_api, scan_args,
+):
+    """The model auto-detected from captures lands in the committed filename.
+    Runs under both scan modes — the scan path doesn't change the
+    parquet shape, but exercising both keeps the gate honest."""
     capture = tmp_path / "capture"
     capture.mkdir()
     _write_capture(capture, "rid", "google/gemma-4-E4B-it")
 
     result = CliRunner().invoke(
-        cli, ["export", str(capture), "--push", "me/d"],
+        cli, ["export", str(capture), "--push", "me/d", *scan_args],
     )
     assert result.exit_code == 0, result.output
     op = fake_hf_api.commits[0]["operations"][0]
@@ -327,11 +230,11 @@ def test_export_push_rejects_malformed_dataset_uri(tmp_path: Path):
         cli, ["export", str(capture), "--push", "just-an-owner"],
     )
     assert result.exit_code != 0
-    assert "<owner>/<name>" in result.output
+    assert "<owner>/<base>" in result.output
 
 
 def test_export_resolves_workdir_layout_and_reads_agent_from_run_json(
-    tmp_path: Path, fake_hf_api
+    tmp_path: Path, fake_hf_api, scan_args,
 ):
     """Pointing export at a workdir uses its captures/ subdir AND picks up
     agent from run.json so the parquet filename embeds the agent."""
@@ -343,7 +246,7 @@ def test_export_resolves_workdir_layout_and_reads_agent_from_run_json(
     (workdir / "run.json").write_text(json.dumps({"agent": "hermes"}))
 
     result = CliRunner().invoke(
-        cli, ["export", str(workdir), "--push", "me/d"],
+        cli, ["export", str(workdir), "--push", "me/d", *scan_args],
     )
     assert result.exit_code == 0, result.output
     op = fake_hf_api.commits[0]["operations"][0]
@@ -351,7 +254,7 @@ def test_export_resolves_workdir_layout_and_reads_agent_from_run_json(
 
 
 def test_export_all_walks_workspace_in_one_commit(
-    tmp_path: Path, monkeypatch, fake_hf_api
+    tmp_path: Path, monkeypatch, fake_hf_api, scan_args,
 ):
     """--all enumerates every run-id in the workspace and pushes them all
     in one git commit."""
@@ -367,7 +270,7 @@ def test_export_all_walks_workspace_in_one_commit(
         }))
 
     result = CliRunner().invoke(
-        cli, ["export", "--all", "--push", "me/d"],
+        cli, ["export", "--all", "--push", "me/d", *scan_args],
     )
     assert result.exit_code == 0, result.output
     assert len(fake_hf_api.commits) == 1

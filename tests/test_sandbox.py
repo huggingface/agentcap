@@ -205,7 +205,9 @@ def test_lima_vm_can_reach_host_server(lima_vm_for, mock_http_server):
     succeeds AND that the host-side process saw the request."""
     vm = lima_vm_for(_SANDBOX_TEST_AGENT)
     port, received = mock_http_server
-    sb = LimaSandbox(vm=vm)
+    # opencode-init refuses to start without AGENTCAP_MODEL — same shim
+    # as the bwrap end-to-end tests below.
+    sb = LimaSandbox(vm=vm, env={"AGENTCAP_MODEL": "test/dummy"})
     code = (
         "import urllib.request, sys; "
         f"r = urllib.request.urlopen("
@@ -243,7 +245,7 @@ def test_lima_fs_methods_inside_vm(lima_vm_for):
 
 def test_lima_run_propagates_env_into_vm(lima_vm_for):
     vm = lima_vm_for(_SANDBOX_TEST_AGENT)
-    sb = LimaSandbox(vm=vm)
+    sb = LimaSandbox(vm=vm, env={"AGENTCAP_MODEL": "test/dummy"})
     r = sb.run(["sh", "-c", "echo $HF_TOKEN"], env={"HF_TOKEN": "tok123"})
     assert r.returncode == 0
     assert r.stdout.strip() == "tok123"
@@ -251,7 +253,7 @@ def test_lima_run_propagates_env_into_vm(lima_vm_for):
 
 def test_lima_run_uses_cwd_inside_vm(lima_vm_for):
     vm = lima_vm_for(_SANDBOX_TEST_AGENT)
-    sb = LimaSandbox(vm=vm)
+    sb = LimaSandbox(vm=vm, env={"AGENTCAP_MODEL": "test/dummy"})
     d = sb.mkdtemp(prefix="lima-cwd-test-")
     try:
         r = sb.run(["pwd"], cwd=d)
@@ -307,7 +309,11 @@ def test_bwrap_runs_inside_image_rootfs(agentcap_image_for):
     host (in general). The image-build fixture ensures the image
     exists before the test."""
     tag = agentcap_image_for(_SANDBOX_TEST_AGENT)
-    with BwrapSandbox(image=tag) as sb:
+    # opencode-init refuses to start without AGENTCAP_MODEL (it bakes
+    # the model id into ``~/.config/opencode/opencode.json``). The
+    # value is not exercised by this test, only by the entrypoint.
+    env = {"AGENTCAP_MODEL": "test/dummy"}
+    with BwrapSandbox(image=tag, env=env) as sb:
         # opencode is installed inside the image at /usr/local/bin/opencode.
         r = sb.run(["which", "opencode"], timeout=60)
         assert r.returncode == 0, r.stderr
@@ -323,7 +329,8 @@ def test_bwrap_blocks_writes_outside_allowlist(agentcap_image_for, tmp_path):
     write outside fails. The image rootfs is read-only and the host
     filesystem (apart from explicitly bound paths) is invisible."""
     tag = agentcap_image_for(_SANDBOX_TEST_AGENT)
-    with BwrapSandbox(image=tag) as sb:
+    env = {"AGENTCAP_MODEL": "test/dummy"}
+    with BwrapSandbox(image=tag, env=env) as sb:
         inside = tmp_path / "inside.txt"
         r = sb.run(
             ["python3", "-c", f"open({str(inside)!r}, 'w').write('ok')"],

@@ -278,7 +278,7 @@ right one per use case:
 |---|---|
 | **Inference Providers** (`router.huggingface.co`) | demos, casual capture; zero infra; curated model catalogue; pay per token |
 | **Inference Endpoints** | dedicated GPU + specific model + scale-to-zero between corpus runs; OpenAI-compat by default |
-| **Local `llama.cpp` server** (`./llama-server`) | full control over quant / chat template / sampler; required for research that depends on model-implementation detail (e.g. kv-cache-reuse splice work) |
+| **Local `llama.cpp` server** (`llama serve`) | full control over quant / chat template / sampler; required for research that depends on model-implementation detail (e.g. kv-cache-reuse splice work) |
 | `transformers serve` | works for small models, awkward for big ones at long context |
 
 For which (backend, model, agent) combinations have been validated
@@ -297,8 +297,9 @@ pytest tests/
 
 Live driver tests in [tests/test_drivers_live.py](tests/test_drivers_live.py)
 run when a model endpoint is reachable, skip otherwise. Either set
-`AGENTCAP_TEST_LLM_URL=http://host:port/v1`, or have the
-`llama-server` executable on `$PATH` so the fixture spawns one.
+`AGENTCAP_TEST_LLM_URL=http://host:port/v1`, or have the `llama`
+executable on `$PATH` so the fixture spawns one via `llama serve`
+(install with `curl -fsSL https://llama.app/install.sh | sh`).
 Override the agent's model id with `AGENTCAP_TEST_MODEL` (default
 `gemma-4-E4B-it`).
 

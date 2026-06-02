@@ -12,8 +12,18 @@ RUN apt-get update \
 
 # opencode's installer drops its tree under ``$HOME/.opencode/``. Move
 # the whole tree under /opt/ (out of the per-run $HOME tmpfs) and
-# symlink the launcher into /usr/local/bin so it's on PATH.
-RUN curl -fsSL https://opencode.ai/install | bash \
+# symlink the launcher into /usr/local/bin so it's on PATH. Pin the
+# release explicitly (the installer otherwise grabs latest at build
+# time, making the image hash non-deterministic).
+# 1.15.13 broke ``--agent <name>`` resolution (the "Config loading
+# behavior refinement" in its release notes seems to be the trigger).
+# Until 1.15.14 lands or the new behavior is documented, pin to
+# 1.15.12 — the last release before the regression and what the
+# floating installer was actually serving from buildah's layer cache
+# when the live test was last green.
+ARG OPENCODE_VERSION=1.15.12
+RUN curl -fsSL https://opencode.ai/install \
+        | bash -s -- --version "${OPENCODE_VERSION}" \
  && mv /root/.opencode /opt/opencode \
  && ln -s /opt/opencode/bin/opencode /usr/local/bin/opencode \
  && command -v opencode

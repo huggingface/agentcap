@@ -303,7 +303,7 @@ def export_cmd(
     envvar="AGENTCAP_API_KEY",
     help="Bearer token forwarded to the upstream. Required for "
     "authenticated providers (HF Router, OpenAI, Together, …); leave "
-    "unset for local servers that don't auth (llama-server, vLLM). "
+    "unset for local servers that don't auth (llama serve, vLLM). "
     "Falls back to AGENTCAP_API_KEY. For HF Router only, if unset "
     "we also auto-try HF_TOKEN and ~/.cache/huggingface/token.",
 )

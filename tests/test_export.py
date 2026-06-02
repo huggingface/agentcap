@@ -1,9 +1,10 @@
 """Unit tests for ``agentcap.export``.
 
-The export layer is a pure data shuffle — no rendering, no tokenization
-— so the tests only need to assert that captured request/response files
-in the capture dir come out as parquet rows with the expected metadata
-columns. No fake processor needed.
+Captures + traces are now pushed to a paired ``-captures`` /
+``-<agent>-traces`` dataset pair under a single HF Collection. The
+tests assert: URI parsing, repo-id derivation, the parquet payload
+shape (incl. the new ``run_id`` column), the raw-JSONL trace upload,
+the README cross-links, and ``ensure_collection`` idempotency.
 """
 
 from __future__ import annotations
@@ -15,11 +16,15 @@ import pytest
 
 from agentcap.export import (
     _row,
+    captures_repo_id,
     detect_model,
     detect_provider_columns,
+    ensure_collection,
     export_local,
-    parse_dataset_uri,
-    push_dataset,
+    parse_collection_base,
+    push_agent_traces_dataset,
+    push_captures_dataset,
+    traces_repo_id_for,
 )
 
 
@@ -75,7 +80,6 @@ def test_row_serialises_bodies_as_json_strings():
     assert row["request_id"] == "rid"
     assert row["model"] == "m"
     assert row["captured_at"] == 42
-    # request/response are JSON strings, not dicts.
     assert isinstance(row["request"], str)
     assert isinstance(row["response"], str)
     assert json.loads(row["request"])["messages"][0]["content"] == "x"
@@ -193,190 +197,273 @@ def test_detect_provider_columns_empty_when_no_upstream_stamp(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# Dataset URI parsing + push_dataset
+# Collection-base parsing + repo-id derivation
 # ---------------------------------------------------------------------------
 
 
-def test_parse_dataset_uri_with_subdir():
-    repo_id, subdir = parse_dataset_uri("owner/name/runs/x/y")
-    assert repo_id == "owner/name"
-    assert subdir == "runs/x/y"
+def test_parse_collection_base_owner_and_base():
+    owner, base = parse_collection_base("owner/my-collection")
+    assert owner == "owner"
+    assert base == "my-collection"
 
 
-def test_parse_dataset_uri_no_subdir():
-    repo_id, subdir = parse_dataset_uri("owner/name")
-    assert repo_id == "owner/name"
-    assert subdir == ""
+def test_parse_collection_base_strips_hf_datasets_prefix():
+    owner, base = parse_collection_base("hf://datasets/owner/base")
+    assert (owner, base) == ("owner", "base")
 
 
-def test_parse_dataset_uri_accepts_hf_datasets_prefix():
-    repo_id, subdir = parse_dataset_uri("hf://datasets/owner/name/runs")
-    assert repo_id == "owner/name"
-    assert subdir == "runs"
+def test_parse_collection_base_rejects_subdir():
+    """A third segment is ambiguous — the collection-base form is a
+    single ``<base>``, not a ``<base>/<subdir>``."""
+    with pytest.raises(ValueError, match="<owner>/<base>"):
+        parse_collection_base("owner/base/extra")
 
 
-def test_parse_dataset_uri_rejects_missing_name():
-    with pytest.raises(ValueError, match="<owner>/<name>"):
-        parse_dataset_uri("owner")
+def test_parse_collection_base_rejects_missing_name():
+    with pytest.raises(ValueError, match="<owner>/<base>"):
+        parse_collection_base("owner")
 
 
-def test_push_dataset_uploads_under_data_subdir(tmp_path: Path, fake_hf_api):
+def test_repo_id_derivation():
+    assert captures_repo_id("me", "sweep") == "me/sweep-captures"
+    assert traces_repo_id_for("me", "sweep", "pi") == "me/sweep-pi-traces"
+    assert traces_repo_id_for("me", "sweep", "hermes") == "me/sweep-hermes-traces"
+
+
+# ---------------------------------------------------------------------------
+# push_captures_dataset
+# ---------------------------------------------------------------------------
+
+
+def test_push_captures_creates_captures_repo(tmp_path: Path, fake_hf_api):
+    capture = tmp_path / "capture"
+    capture.mkdir()
+    _write_capture(capture, "rid", _BODY, {"choices": []})
+
+    repo_id, n_rows = push_captures_dataset(
+        [{"capture_dir": capture, "model": "google/gemma-4-E4B-it", "agent": "pi",
+          "run_id": "pi-local-20260601-090000"}],
+        owner="me", base="sweep",
+    )
+
+    assert repo_id == "me/sweep-captures"
+    assert n_rows == [1]
+    assert fake_hf_api.created_repos[0] == {
+        "repo_id": "me/sweep-captures", "repo_type": "dataset",
+        "exist_ok": True, "private": True,
+    }
+
+
+def test_push_captures_lands_under_data(tmp_path: Path, fake_hf_api):
     import re
 
     capture = tmp_path / "capture"
     capture.mkdir()
-    _write_capture(capture, "rid1", _BODY, {"choices": []})
-    _write_capture(capture, "rid2", _BODY, {"choices": []})
+    _write_capture(capture, "rid", _BODY, {"choices": []})
 
-    fake = fake_hf_api
-
-    push_dataset(
-        [{"capture_dir": capture, "model": "google/gemma-4-E4B-it"}],
-        "me/my-dataset/runs/abc",
+    push_captures_dataset(
+        [{"capture_dir": capture, "model": "google/gemma-4-E4B-it",
+          "agent": "pi", "run_id": "pi-local-20260601-090000"}],
+        owner="me", base="sweep",
     )
-
-    assert fake.created_repo == {
-        "repo_id": "me/my-dataset", "repo_type": "dataset", "exist_ok": True,
-    }
-    assert len(fake.commits) == 1
-    commit = fake.commits[0]
-    assert commit["repo_id"] == "me/my-dataset"
-    assert commit["repo_type"] == "dataset"
-    assert len(commit["operations"]) == 1
-    op = commit["operations"][0]
+    op = fake_hf_api.commits[0]["operations"][0]
+    # ``-captures`` repo, single ``data/<filename>.parquet`` layout.
     assert re.fullmatch(
-        r"data/runs/abc/train-gemma-4-E4B-it-local-\d{8}T\d{6}-[0-9a-f]{6}\.parquet",
+        r"data/train-pi-gemma-4-E4B-it-local-\d{8}T\d{6}-[0-9a-f]{6}\.parquet",
         op["path_in_repo"],
     ), op["path_in_repo"]
-    assert op["n_rows"] == 2
-    assert sorted(op["request_ids"]) == ["rid1", "rid2"]
-    assert set(op["columns"]) == {
-        "request_id", "model", "captured_at", "request", "response",
-        "served_by", "served_build_info", "served_model",
-        "provider", "upstream_url",
-    }
 
 
-def test_push_dataset_batches_multiple_items_into_one_commit(
-    tmp_path: Path, fake_hf_api
-):
-    """N items → 1 create_commit call with N operations."""
+def test_push_captures_stamps_run_id_column(tmp_path: Path, fake_hf_api):
+    capture = tmp_path / "capture"
+    capture.mkdir()
+    _write_capture(capture, "rid", _BODY, {"choices": []})
+
+    push_captures_dataset(
+        [{"capture_dir": capture, "model": "m", "agent": "pi",
+          "run_id": "pi-local-20260601-090000"}],
+        owner="me", base="sweep",
+    )
+    op = fake_hf_api.commits[0]["operations"][0]
+    assert "run_id" in op["columns"]
+
+
+def test_push_captures_batches_into_one_commit(tmp_path: Path, fake_hf_api):
     items = []
     for i in range(3):
         cap = tmp_path / f"capture-{i}"
         cap.mkdir()
         _write_capture(cap, f"rid{i}", _BODY, {})
-        items.append({"capture_dir": cap, "model": "m", "agent": "hermes"})
+        items.append({
+            "capture_dir": cap, "model": "m", "agent": "hermes",
+            "run_id": f"hermes-local-2026060{i+1}-000000",
+        })
 
-    fake = fake_hf_api
-    n_rows = push_dataset(items, "me/d/runs")
-
-    assert n_rows == [1, 1, 1]
-    assert len(fake.commits) == 1
-    assert len(fake.commits[0]["operations"]) == 3
-    paths = [op["path_in_repo"] for op in fake.commits[0]["operations"]]
+    push_captures_dataset(items, owner="me", base="sweep")
+    assert len(fake_hf_api.commits) == 1
+    assert len(fake_hf_api.commits[0]["operations"]) == 3
+    paths = [op["path_in_repo"] for op in fake_hf_api.commits[0]["operations"]]
     assert len(set(paths)) == 3, f"filenames collided: {paths}"
 
 
-def test_push_dataset_no_subdir_lands_directly_under_data(
-    tmp_path: Path, fake_hf_api
+def test_push_captures_seeds_readme_with_collection_link(
+    tmp_path: Path, fake_hf_api,
 ):
-    capture = tmp_path / "capture"
-    capture.mkdir()
-    _write_capture(capture, "rid", _BODY, {})
-
-    fake = fake_hf_api
-    push_dataset([{"capture_dir": capture, "model": "m"}], "me/my-dataset")
-
-    op = fake.commits[0]["operations"][0]
-    assert op["path_in_repo"].startswith("data/train-")
-
-
-def test_push_dataset_explicit_filename_overrides_default(
-    tmp_path: Path, fake_hf_api
-):
-    capture = tmp_path / "capture"
-    capture.mkdir()
-    _write_capture(capture, "rid", _BODY, {})
-
-    fake = fake_hf_api
-    push_dataset(
-        [{"capture_dir": capture, "model": "m", "filename": "latest.parquet"}],
-        "me/my-dataset/runs",
-    )
-    assert fake.commits[0]["operations"][0]["path_in_repo"] == "data/runs/latest.parquet"
-
-
-def test_push_dataset_default_filename_embeds_agent_and_slugs_model(
-    tmp_path: Path, fake_hf_api
-):
-    import re
-
-    capture = tmp_path / "capture"
-    capture.mkdir()
-    _write_capture(capture, "rid", _BODY, {})
-
-    fake = fake_hf_api
-    push_dataset(
-        [{
-            "capture_dir": capture,
-            "model": "google/gemma-4-E4B-it",
-            "agent": "goose",
-        }],
-        "me/my-dataset/runs",
-    )
-    op = fake.commits[0]["operations"][0]
-    assert re.fullmatch(
-        r"data/runs/train-goose-gemma-4-E4B-it-local-\d{8}T\d{6}-[0-9a-f]{6}\.parquet",
-        op["path_in_repo"],
-    ), op["path_in_repo"]
-
-
-def test_push_dataset_seeds_readme_on_first_push(
-    tmp_path: Path, fake_hf_api
-):
-    """First push (empty repo) bundles a README.md in the same commit
-    as the parquet."""
     fake_hf_api.existing_files = []  # simulate freshly-created repo
     capture = tmp_path / "capture"
     capture.mkdir()
     _write_capture(capture, "rid", _BODY, {})
 
-    push_dataset([{"capture_dir": capture, "model": "m"}], "me/my-dataset")
+    push_captures_dataset(
+        [{"capture_dir": capture, "model": "m", "run_id": "r"}],
+        owner="me", base="sweep",
+    )
 
     ops = fake_hf_api.commits[0]["operations"]
-    paths = [op["path_in_repo"] for op in ops]
-    assert "README.md" in paths
-    readme_op = next(op for op in ops if op["path_in_repo"] == "README.md")
-    body = readme_op["bytes"].decode("utf-8")
-    assert "me/my-dataset" in body
-    assert "load_dataset" in body
+    readme_ops = [op for op in ops if op["path_in_repo"] == "README.md"]
+    assert readme_ops, "captures README missing on first push"
+    body = readme_ops[0]["bytes"].decode("utf-8")
+    # Cross-links to the traces sibling family and the Collection.
+    assert "me/sweep-captures" in body
+    assert "sweep-<agent>-traces" in body
+    assert "sweep Collection" in body
 
 
-def test_push_dataset_skips_readme_when_one_exists(
-    tmp_path: Path, fake_hf_api
+def test_push_captures_skips_readme_on_subsequent_push(
+    tmp_path: Path, fake_hf_api,
 ):
-    """Subsequent pushes (README already in the repo) don't include it
-    in the commit — user edits are preserved."""
     # fake_hf_api defaults to existing_files=["README.md"]
     capture = tmp_path / "capture"
     capture.mkdir()
     _write_capture(capture, "rid", _BODY, {})
 
-    push_dataset([{"capture_dir": capture, "model": "m"}], "me/my-dataset")
-
+    push_captures_dataset(
+        [{"capture_dir": capture, "model": "m", "run_id": "r"}],
+        owner="me", base="sweep",
+    )
     paths = [op["path_in_repo"] for op in fake_hf_api.commits[0]["operations"]]
     assert "README.md" not in paths
 
 
 # ---------------------------------------------------------------------------
-# Round-trip
+# push_agent_traces_dataset — raw JSONL upload
+# ---------------------------------------------------------------------------
+
+
+def test_push_traces_uploads_files_as_is(tmp_path: Path, fake_hf_api):
+    fake_hf_api.existing_files = []
+    traces = tmp_path / "traces"
+    traces.mkdir()
+    (traces / "session-a.jsonl").write_text('{"type":"session","id":"a"}\n')
+    (traces / "session-b.jsonl").write_text('{"type":"session","id":"b"}\n')
+
+    repo_id, n_files = push_agent_traces_dataset(
+        [{"traces_dir": traces, "run_id": "pi-local-20260601-090000"}],
+        owner="me", base="sweep", agent="pi",
+    )
+
+    assert repo_id == "me/sweep-pi-traces"
+    assert n_files == 2
+    paths = [op["path_in_repo"] for op in fake_hf_api.commits[0]["operations"]]
+    # One README + two raw files under data/<run_id>/.
+    assert "README.md" in paths
+    assert "data/pi-local-20260601-090000/session-a.jsonl" in paths
+    assert "data/pi-local-20260601-090000/session-b.jsonl" in paths
+
+
+def test_push_traces_readme_marks_agent_and_links_captures(
+    tmp_path: Path, fake_hf_api,
+):
+    fake_hf_api.existing_files = []
+    traces = tmp_path / "traces"
+    traces.mkdir()
+    (traces / "x.jsonl").write_text("{}\n")
+
+    push_agent_traces_dataset(
+        [{"traces_dir": traces, "run_id": "r1"}],
+        owner="me", base="sweep", agent="hermes",
+    )
+    ops = fake_hf_api.commits[0]["operations"]
+    readme = next(op for op in ops if op["path_in_repo"] == "README.md")
+    body = readme["bytes"].decode("utf-8")
+    # Tags: agent-traces, agentcap-traces, per-agent suffix.
+    assert "agent-traces" in body
+    assert "agentcap-traces-hermes" in body
+    # source_datasets points back at the captures sibling.
+    assert "me/sweep-captures" in body
+    assert "sweep Collection" in body
+
+
+def test_push_traces_skips_when_no_files_and_readme_exists(
+    tmp_path: Path, fake_hf_api,
+):
+    """Empty trace dir + README already in repo → no commit."""
+    traces = tmp_path / "traces"
+    traces.mkdir()
+    repo_id, n_files = push_agent_traces_dataset(
+        [{"traces_dir": traces, "run_id": "r1"}],
+        owner="me", base="sweep", agent="pi",
+    )
+    assert repo_id == "me/sweep-pi-traces"
+    assert n_files == 0
+    assert fake_hf_api.commits == []
+
+
+def test_push_traces_repo_created_private(tmp_path: Path, fake_hf_api):
+    traces = tmp_path / "traces"
+    traces.mkdir()
+    (traces / "x.jsonl").write_text("{}")
+    push_agent_traces_dataset(
+        [{"traces_dir": traces, "run_id": "r1"}],
+        owner="me", base="sweep", agent="pi",
+    )
+    record = next(
+        r for r in fake_hf_api.created_repos if r["repo_id"] == "me/sweep-pi-traces"
+    )
+    assert record["private"] is True
+
+
+# ---------------------------------------------------------------------------
+# ensure_collection — find-or-create + idempotent item-add
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_collection_creates_when_missing(fake_hf_api):
+    slug = ensure_collection(
+        owner="me", base="sweep",
+        repos=["me/sweep-captures", "me/sweep-pi-traces"],
+    )
+    assert slug.startswith("me/sweep-")
+    assert len(fake_hf_api.collections_created) == 1
+    assert fake_hf_api.collections_created[0]["title"] == "sweep"
+    assert fake_hf_api.collections_created[0]["private"] is True
+    item_ids = [it["item_id"] for it in fake_hf_api.collection_items]
+    assert item_ids == ["me/sweep-captures", "me/sweep-pi-traces"]
+
+
+def test_ensure_collection_is_idempotent_on_second_call(fake_hf_api):
+    first = ensure_collection(
+        owner="me", base="sweep",
+        repos=["me/sweep-captures"],
+    )
+    second = ensure_collection(
+        owner="me", base="sweep",
+        repos=["me/sweep-captures", "me/sweep-hermes-traces"],
+    )
+    assert first == second
+    # Only one collection was created across the two calls.
+    assert len(fake_hf_api.collections_created) == 1
+
+
+# ---------------------------------------------------------------------------
+# Round-trip — captures parquet shape (incl. run_id column)
 # ---------------------------------------------------------------------------
 
 
 def test_export_local_round_trip(tmp_path: Path):
-    """End-to-end: write captures, export, read back, assert columns +
-    that request JSON survives serialisation."""
+    """End-to-end: write captures, export with provider+run_id columns,
+    read parquet back, assert columns + that request JSON survives
+    serialisation."""
     import pyarrow.parquet as pq
 
     capture = tmp_path / "capture"
@@ -388,7 +475,14 @@ def test_export_local_round_trip(tmp_path: Path):
     _write_capture(capture, "rb", _BODY, {"choices": [{"index": 0}]})
 
     out = tmp_path / "rows.parquet"
-    n_rows = export_local(capture, out, progress=False)
+    extra_cols = {
+        "provider": "local",
+        "upstream_url": "http://127.0.0.1:8000",
+        "run_id": "pi-local-20260601-090000",
+    }
+    n_rows = export_local(
+        capture, out, progress=False, provider_columns=extra_cols,
+    )
     assert n_rows == 2
 
     table = pq.read_table(out)
@@ -396,18 +490,16 @@ def test_export_local_round_trip(tmp_path: Path):
     assert set(table.column_names) == {
         "request_id", "model", "captured_at", "request", "response",
         "served_by", "served_build_info", "served_model",
-        "provider", "upstream_url",
+        "provider", "upstream_url", "run_id",
     }
     rows = table.to_pylist()
     by_rid = {r["request_id"]: r for r in rows}
-    # Per-row fingerprint stamped from the captured response.
     assert by_rid["ra"]["served_by"] == "pod-7"
     assert by_rid["ra"]["served_model"] == "gemma"
     assert by_rid["rb"]["served_by"] is None
-    # Per-file provider columns stamped from the upstream_url.
     for r in rows:
         assert r["provider"] == "local"
         assert r["upstream_url"] == "http://127.0.0.1:8000"
-    # Round-trip the request JSON.
+        assert r["run_id"] == "pi-local-20260601-090000"
     sample = json.loads(by_rid["ra"]["request"])
     assert sample["messages"][0]["role"] == "user"

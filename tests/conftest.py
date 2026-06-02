@@ -5,8 +5,9 @@ Live tests run when prereqs are present, skip otherwise. Prereqs:
   - Agent binary present in the per-agent sandbox
     (``agentcap run --agent <name>`` once provisions it).
   - A ``/v1`` endpoint reachable — set ``AGENTCAP_TEST_LLM_URL`` or
-    have ``llama-server`` executable on PATH so the fixture spawns
-    one.
+    have ``llama`` (with the ``serve`` subcommand) executable on PATH
+    so the fixture spawns one. Install via:
+    ``curl -fsSL https://llama.app/install.sh | sh``.
 """
 
 from __future__ import annotations
@@ -95,10 +96,10 @@ def _wait_ready(
             pass
         now = time.time()
         if now - last_hb >= 10:
-            log(f"waiting for llama-server… ({int(now - start)}s elapsed)")
+            log(f"waiting for llama serve… ({int(now - start)}s elapsed)")
             last_hb = now
         time.sleep(1)
-    raise RuntimeError(f"llama-server never became ready at {url}")
+    raise RuntimeError(f"llama serve never became ready at {url}")
 
 
 def _agent_reachable_host() -> str:
@@ -127,8 +128,8 @@ def live_proxy_base_url():
     responsible for the server and for making it reachable from the
     sandbox).
 
-    Otherwise, if ``AGENTCAP_TEST_GGUF`` is set and ``llama-server``
-    is available, spawn one on ``0.0.0.0:<free port>`` so the
+    Otherwise, if ``AGENTCAP_TEST_GGUF`` is set and ``llama`` is on
+    PATH, spawn ``llama serve`` on ``0.0.0.0:<free port>`` so the
     sandbox can connect (the agent inside a Lima VM cannot reach
     the Mac host's loopback). The URL returned uses
     :func:`_agent_reachable_host` so it works on both bwrap (where
@@ -140,7 +141,7 @@ def live_proxy_base_url():
         yield url
         return
 
-    # Probe common ports for an already-running llama-server before
+    # Probe common ports for an already-running llama serve before
     # spawning. Lets the user keep one server alive across many
     # `pytest` invocations (per their explicit workflow preference)
     # without having to set AGENTCAP_TEST_LLM_URL every time.
@@ -151,19 +152,18 @@ def live_proxy_base_url():
             ) as r:
                 if r.status == 200:
                     _log(
-                        f"reusing existing llama-server on :{probe_port}"
+                        f"reusing existing llama serve on :{probe_port}"
                     )
                     yield f"http://127.0.0.1:{probe_port}/v1"
                     return
         except Exception:
             pass
 
-    llama = os.environ.get("AGENTCAP_TEST_LLAMA_BIN") or shutil.which(
-        "llama-server"
-    )
+    llama = os.environ.get("AGENTCAP_TEST_LLAMA_BIN") or shutil.which("llama")
     if not llama:
         pytest.skip(
-            "llama-server not on PATH; either add it to PATH or set "
+            "llama not on PATH; install it with `curl -fsSL "
+            "https://llama.app/install.sh | sh`, set "
             "AGENTCAP_TEST_LLAMA_BIN, OR set AGENTCAP_TEST_LLM_URL "
             "to point at an existing /v1 endpoint."
         )
@@ -178,7 +178,7 @@ def live_proxy_base_url():
     ctx = os.environ.get("AGENTCAP_TEST_CTX_SIZE", "8192")
     ngl = os.environ.get("AGENTCAP_TEST_NGL", "999")
     argv = [
-        llama,
+        llama, "serve",
         "--model", gguf,
         # 0.0.0.0 so the Lima VM can reach the host via
         # host.lima.internal; 127.0.0.1 would be loopback-only.
@@ -198,7 +198,7 @@ def live_proxy_base_url():
     log_path = "/tmp/agentcap-pytest-llama.log"
     log = open(log_path, "w")
     _log(
-        f"spawning llama-server on :{port} "
+        f"spawning llama serve on :{port} "
         f"(gguf={Path(gguf).name}, ctx={ctx}, ngl={ngl}); "
         f"server log -> {log_path}"
     )
@@ -211,7 +211,7 @@ def live_proxy_base_url():
             timeout=180,
             log=_log,
         )
-        _log(f"llama-server ready at :{port}")
+        _log(f"llama serve ready at :{port}")
 
         # Start the in-process proxy on a free port (don't hardcode
         # 8001 — collides with whatever the user has running). Bind
@@ -261,12 +261,20 @@ _HELLO_PY = 'def hello():\n    print("Hello, world!")\n'
 
 
 @pytest.fixture(scope="session")
-def sandbox_for(lima_vm_for, agentcap_image_for, live_proxy_base_url):
+def sandbox_for(
+    lima_vm_for, agentcap_image_for, live_proxy_base_url, live_model,
+):
     """Factory: ``sandbox_for("hermes")`` returns a Sandbox keyed on
     the given agent. On macOS this is the ``agentcap-<agent>``
     LimaSandbox (the fixture ensures the VM is up first); on Linux
     it's the host BwrapSandbox mounted on the per-agent buildah image
     (the fixture ensures the image is built); on other hosts it skips.
+
+    The sandbox env is seeded with ``AGENTCAP_PROXY_URL`` *and*
+    ``AGENTCAP_MODEL`` so the per-agent entrypoint can start — the
+    opencode init script bails out without ``AGENTCAP_MODEL``, which
+    is enough to make ``command -v opencode`` (used as a skip probe
+    by ``agent_proj_for``) exit non-zero and silently skip the test.
 
     Sandboxes are closed at session teardown so the BwrapSandbox's
     persistent buildah working container is removed (otherwise it
@@ -290,7 +298,10 @@ def sandbox_for(lima_vm_for, agentcap_image_for, live_proxy_base_url):
             )
         sb = get_sandbox(
             agent=agent,
-            env={"AGENTCAP_PROXY_URL": live_proxy_base_url},
+            env={
+                "AGENTCAP_PROXY_URL": live_proxy_base_url,
+                "AGENTCAP_MODEL": live_model,
+            },
         )
         cache[agent] = sb
         return sb
@@ -428,24 +439,41 @@ def fake_sandbox():
 
 
 class _FakeHfApi:
-    """Captures create_repo + list_repo_files + create_commit calls so
-    push_dataset can be asserted on without hitting the network. Reads
-    back each committed parquet to expose its row count + columns +
-    request_ids; bytes payloads (e.g. README.md) are recorded as-is."""
+    """Captures HfApi calls so the export layer can be asserted on
+    without hitting the network. Records ``create_repo`` /
+    ``list_repo_files`` / ``create_commit`` for the two dataset repos
+    (``-captures`` + per-agent ``-traces``), and the Collections API
+    surface used by ``ensure_collection`` (``list_collections``,
+    ``create_collection``, ``add_collection_item``).
+
+    Parquet payloads are read back so tests can assert row counts +
+    column sets + request_ids; bytes payloads (README.md, raw trace
+    files) and string-path payloads (raw trace files committed via
+    ``CommitOperationAdd(path_or_fileobj=str)``) are recorded as their
+    content."""
 
     def __init__(self):
-        self.created_repo: dict | None = None
+        self.created_repos: list[dict] = []
         self.commits: list[dict] = []
+        self.collections_created: list[dict] = []
+        self.collection_items: list[dict] = []
         # Default to steady-state: README already in the repo, so
         # parquet-focused tests don't see the first-push README op
         # bleed into their assertions. Tests exercising first-push
         # behaviour clear this.
         self.existing_files: list[str] = ["README.md"]
 
-    def create_repo(self, *, repo_id, repo_type, exist_ok):
-        self.created_repo = {
-            "repo_id": repo_id, "repo_type": repo_type, "exist_ok": exist_ok,
-        }
+    # Back-compat single-call accessor for older tests that only
+    # cared about one repo.
+    @property
+    def created_repo(self) -> dict | None:
+        return self.created_repos[0] if self.created_repos else None
+
+    def create_repo(self, *, repo_id, repo_type, exist_ok, private=False):
+        self.created_repos.append({
+            "repo_id": repo_id, "repo_type": repo_type,
+            "exist_ok": exist_ok, "private": private,
+        })
 
     def list_repo_files(self, repo_id, repo_type):
         return list(self.existing_files)
@@ -459,11 +487,16 @@ class _FakeHfApi:
             payload = op.path_or_fileobj
             if isinstance(payload, (bytes, bytearray)):
                 entry["bytes"] = bytes(payload)
-            else:
+            elif isinstance(payload, str) and op.path_in_repo.endswith(".parquet"):
                 table = pq.read_table(payload)
                 entry["n_rows"] = table.num_rows
                 entry["columns"] = list(table.column_names)
                 entry["request_ids"] = list(table.column("request_id").to_pylist())
+            else:
+                # Raw file (trace JSONL/JSON). Read bytes so tests
+                # can introspect the committed payload.
+                from pathlib import Path as _Path
+                entry["bytes"] = _Path(payload).read_bytes() if isinstance(payload, str) else b""
             op_list.append(entry)
         self.commits.append({
             "repo_id": repo_id,
@@ -471,6 +504,47 @@ class _FakeHfApi:
             "commit_message": commit_message,
             "operations": op_list,
         })
+
+    # --- Collections API ---
+
+    def list_collections(self, *, owner=None, q=None, limit=20):
+        # Idempotent ensure_collection looks for an existing one by
+        # title; the fake starts empty and returns whatever was made.
+        for c in self.collections_created:
+            if owner and c.get("namespace") != owner:
+                continue
+            if q and q not in (c.get("title") or ""):
+                continue
+            yield _FakeCollection(c["slug"], c["title"])
+
+    def create_collection(
+        self, title, *, namespace=None, description=None,
+        private=False, exists_ok=False, **_,
+    ):
+        slug = f"{namespace}/{title}-deadbeef" if namespace else f"{title}-deadbeef"
+        record = {
+            "slug": slug, "title": title, "namespace": namespace,
+            "description": description, "private": private,
+        }
+        self.collections_created.append(record)
+        return _FakeCollection(slug, title)
+
+    def add_collection_item(
+        self, *, collection_slug, item_id, item_type,
+        exists_ok=False, **_,
+    ):
+        self.collection_items.append({
+            "collection_slug": collection_slug,
+            "item_id": item_id,
+            "item_type": item_type,
+        })
+
+
+class _FakeCollection:
+    __slots__ = ("slug", "title")
+    def __init__(self, slug: str, title: str) -> None:
+        self.slug = slug
+        self.title = title
 
 
 @pytest.fixture

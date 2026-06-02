@@ -236,6 +236,7 @@ def scan_run_dir(
 
 
 __all__ = [
+    "SCAN_CACHE_NAME",
     "ScanHit",
     "ScanResult",
     "TrufflehogMissingError",

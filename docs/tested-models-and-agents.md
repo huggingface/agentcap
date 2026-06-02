@@ -26,7 +26,7 @@ the model card or agent revs.
   emission.
 - Reasoning-by-default models (Qwen 3.5+, 3.6) put their answer in
   `message.reasoning_content`, not `content`. Pass `--reasoning off`
-  to llama-server.
+  to `llama serve`.
 - Hermes requires model context ≥ 64 K. Either raise `CTX_SIZE` or
   use `HermesDriver(context_length_override=65536)` to lie via the
   per-run config overlay (the user's `~/.hermes` is never touched).

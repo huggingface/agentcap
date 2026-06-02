@@ -14,8 +14,10 @@ RUN apt-get update \
         python3 python3-venv python3-pip \
  && rm -rf /var/lib/apt/lists/*
 
-# ``HERMES_REF`` accepts a branch, tag, or commit SHA.
-ARG HERMES_REF=main
+# ``HERMES_REF`` accepts a branch, tag, or commit SHA. Default pinned
+# to a known-good release tag so a regression on ``main`` can't
+# silently change CI behaviour. Bump explicitly when upgrading.
+ARG HERMES_REF=v2026.5.29.2
 RUN git clone https://github.com/NousResearch/hermes-agent.git /opt/hermes \
  && git -C /opt/hermes checkout "${HERMES_REF}" \
  && python3 -m venv /opt/hermes/venv \
