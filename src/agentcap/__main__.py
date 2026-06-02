@@ -1385,8 +1385,8 @@ def replay_cmd(
 
     Without a request-id, opens the same fzf picker as ``agentcap inspect``
     and replays whatever you select. Single-turn only — multi-turn replay
-    diverges as soon as the new model responds differently (see
-    ROADMAP.md). The body is sent byte-faithfully; no normalisation.
+    diverges as soon as the new model responds differently. The body is
+    sent byte-faithfully; no normalisation.
     Streams the rendered generation (assistant text + ``[tool:NAME](args)``
     markers) to stdout; pass ``--raw`` to dump the verbatim SSE / JSON
     response instead. Status and timing go to stderr.
