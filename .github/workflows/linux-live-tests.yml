@@ -15,8 +15,8 @@ jobs:
     # end-to-end.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
@@ -60,7 +60,7 @@ jobs:
         # The default test GGUF (gemma-4-E4B-it Q4_K_M, ~5 GB) lands
         # in the HF hub cache. Caching it keeps live runs cheap after
         # the first download.
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/huggingface
           key: hf-hub-gguf-${{ hashFiles('tests/conftest.py') }}
@@ -73,7 +73,7 @@ jobs:
         # buildah storage between runs lets ``ensure_image`` short-
         # circuit on hash match. Key invalidates whenever any
         # Containerfile or per-agent script changes.
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.local/share/containers
           key: buildah-images-${{ hashFiles('containers/**') }}
