@@ -4,9 +4,10 @@ An end-to-end harness for running real coding agents at scale across
 `(agent × model × corpus)` and publishing every interaction as a
 [Hugging Face dataset](https://huggingface.co/docs/datasets). Drives
 the agent through a corpus of prompts, captures every chat-completion
-request and response byte-for-byte, and pushes the result to the Hub
-— so consumers can replay, render, or analyse what the agent actually
-sent and got back, without reconstructing it from a log.
+request/response from the wire (request bodies as parsed JSON;
+streamed responses as raw SSE bytes), and pushes the result to the
+Hub — so consumers can replay, render, or analyse what the agent
+actually sent and got back, without reconstructing it from a log.
 
 The loop:
 
@@ -22,11 +23,13 @@ The loop:
   registered coding-agent CLIs (`hermes`, `opencode`, `goose`, `pi`)
   through a `tasks.txt`, inside a per-agent sandbox (bwrap on Linux,
   lima on macOS). Multi-turn follow-ups, optional skill injection.
-- **Capture every wire byte** — an in-process OpenAI-compat proxy sits
-  between the agent and any backend that speaks `/v1/chat/completions`
-  (llama.cpp, Inference Endpoints, Inference Providers, vLLM), dumping
-  each request and response to disk byte-for-byte. No tokenisation, no
-  rendering — just persist what crossed the wire.
+- **Capture every wire interaction** — an in-process OpenAI-compat
+  proxy sits between the agent and any backend that speaks
+  `/v1/chat/completions` (llama.cpp, Inference Endpoints, Inference
+  Providers, vLLM). Request bodies are persisted as parsed JSON (the
+  object, not the original byte sequence); streamed responses keep
+  the raw SSE bytes. No tokenisation, no rendering — just persist
+  what crossed the wire.
 - **Keep the agent's own session log** — alongside captures, agentcap
   collects each agent's native trace (opencode's SQLite store, pi's
   JSONL stream, …) so consumers see both the agent's view and the
@@ -179,11 +182,12 @@ capture proxy, so the capture stays a clean record of agent ↔ model
 interaction; the synthesizer's own LLM calls are an orchestration
 detail and never land in the dataset.
 
-Capture and export are deliberately dumb: persist the wire bytes,
-ship them as parquet, stamp a few constant provider columns. Anything
+Capture and export are deliberately dumb: persist the wire content,
+ship it as parquet, stamp a few constant provider columns. Anything
 token-level (chat-template rendering, per-message ranges) is
-consumer-side — the raw `request` body is preserved verbatim so
-re-rendering through the model's chat template is a few lines via
+consumer-side — the `request` body is preserved as parsed JSON with
+no agentcap-side normalisation of keys or values, so re-rendering
+through the model's chat template is a few lines via
 `transformers.AutoTokenizer.apply_chat_template`.
 
 ## Pushing to a Dataset repo
@@ -232,8 +236,9 @@ Each `agentcap run` invocation creates one directory at
   version is written at start so `agentcap ls / inspect` can see
   in-flight runs.
 - `captures/` — one `<rid>.request.json` + `<rid>.response.json`
-  pair per chat-completion call (raw OpenAI body + assembled response,
-  byte-faithful; streaming responses keep the SSE bytes verbatim).
+  pair per chat-completion call. Request bodies are stored as parsed
+  JSON (the object, not the original byte sequence); streamed
+  responses keep the raw SSE bytes verbatim.
 - `traces/` — the agent's own native session log (opencode and hermes
   drop a SQLite dump per session; pi streams JSONL; goose writes its
   built-in log file). Format is per-agent; agentcap is just a courier.

@@ -1355,8 +1355,10 @@ def _render_buffered_completion(obj: dict) -> None:
     "--target",
     required=True,
     help="Base URL of an OpenAI-compatible server (e.g. "
-    "http://127.0.0.1:8000). The body is POSTed verbatim to "
-    "<target>/v1/chat/completions.",
+    "http://127.0.0.1:8000). The captured JSON object is POSTed to "
+    "<target>/v1/chat/completions with no agentcap-side "
+    "normalisation (the original wire whitespace / key ordering is "
+    "not preserved by capture, only the JSON object is).",
 )
 @click.option(
     "--source",
@@ -1385,11 +1387,12 @@ def replay_cmd(
 
     Without a request-id, opens the same fzf picker as ``agentcap inspect``
     and replays whatever you select. Single-turn only — multi-turn replay
-    diverges as soon as the new model responds differently. The body is
-    sent byte-faithfully; no normalisation.
+    diverges as soon as the new model responds differently. The captured
+    JSON object is sent without agentcap-side normalisation (captures
+    store parsed JSON, so the original byte sequence isn't preserved).
     Streams the rendered generation (assistant text + ``[tool:NAME](args)``
-    markers) to stdout; pass ``--raw`` to dump the verbatim SSE / JSON
-    response instead. Status and timing go to stderr.
+    markers) to stdout; pass ``--raw`` to dump the SSE / JSON response
+    bytes from the target instead. Status and timing go to stderr.
     """
     import json as _json
     import time

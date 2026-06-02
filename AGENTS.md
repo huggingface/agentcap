@@ -142,9 +142,12 @@ explicitly first.
     avoids pinning consumers to our exact normalisation of the
     template-input shape (see decision 3).
 
-14. **Replay is byte-faithful.** `agentcap replay` re-issues a
-    captured request verbatim — no normalisation, no flags that
-    mutate the body. Cross-server strictness asymmetries (e.g.
+14. **Replay applies no agentcap-side normalisation.** `agentcap
+    replay` re-issues a captured request with no flags that mutate
+    the body. The request is persisted as parsed JSON (so the
+    original byte sequence — whitespace, key ordering — isn't
+    recoverable, only the JSON object); streamed SSE response bytes
+    are kept verbatim. Cross-server strictness asymmetries (e.g.
     captures from a lenient upstream sent at a strict upstream
     that rejects explicit `null`s) are the consumer's normalisation
     problem, not agentcap's. Multi-turn replay stays out of scope

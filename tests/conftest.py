@@ -36,12 +36,12 @@ def _log(msg: str) -> None:
     sys.stderr.flush()
 
 
-# Default test target. ``hf_hub_download`` of Qwen3-0.6B Q8_0 is the
+# Default test target. ``hf_hub_download`` of Qwen3-1.7B Q8_0 is the
 # "click and run" path — agentcap fetches the model bytes, user
-# doesn't manage GGUF files. Qwen3-0.6B is chosen for live tests
-# because it (a) emits valid tool-call JSON in ~1s on CPU and (b)
-# weighs ~600 MB — small enough to download and load on CI runners
-# in seconds. Semantic correctness is intentionally not graded; the
+# doesn't manage GGUF files. Qwen3-1.7B is the smallest checkpoint
+# in this family that chains read → edit reliably across the four
+# drivers; ~1.7 GB downloads + loads on a CI runner in a couple of
+# minutes. Semantic correctness is intentionally not graded; the
 # live tests verify the wire path, not the agent's task quality.
 _DEFAULT_GGUF_REPO = "Qwen/Qwen3-1.7B-GGUF"
 _DEFAULT_GGUF_FILE = "Qwen3-1.7B-Q8_0.gguf"

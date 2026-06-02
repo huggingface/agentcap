@@ -1,7 +1,9 @@
 """Replay primitive: resolve a captured request by id, hand back the body.
 
-Replay is byte-faithful. No normalisation, no flags that mutate the body —
-consumers that hit cross-server strictness do their own normalisation
+No agentcap-side normalisation or mutation of the JSON object — captures
+persist the request as parsed JSON, so the original byte sequence
+(whitespace, key ordering) isn't recoverable, but the JSON object is.
+Consumers that hit cross-server strictness do their own normalisation
 (see AGENTS.md #3).
 """
 
