@@ -23,17 +23,19 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e '.[dev]'
       - name: Install trufflehog
-        # Powers ``agentcap scan`` + the pre-export gate; required by
-        # tests/test_scan.py and the scan-on parametrisation in
-        # tests/test_cli.py. Pinned so a trufflehog release that
-        # changes detector output (more/fewer false positives) can't
-        # silently break the scan-on tests.
+        # Version pinned: detector-output changes (false-positive
+        # bucket) would silently flip test_scan / test_cli scan-on
+        # assertions.
         env:
-          TRUFFLEHOG_VERSION: v3.95.3
+          TRUFFLEHOG_VERSION: 3.95.3
         run: |
-          curl -sSfL -o /tmp/install-trufflehog.sh https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh
-          echo "4caf8178b5af8e5e5a8e3e4dbfea2e91cc5e750f38c1e2e635e28a1f3dbea50b  /tmp/install-trufflehog.sh" | sha256sum -c -
-          sh /tmp/install-trufflehog.sh -b "$HOME/.local/bin" "$TRUFFLEHOG_VERSION"
+          set -euo pipefail
+          cd /tmp
+          curl -sSfL -O "https://github.com/trufflesecurity/trufflehog/releases/download/v${TRUFFLEHOG_VERSION}/trufflehog_${TRUFFLEHOG_VERSION}_linux_amd64.tar.gz"
+          curl -sSfL -O "https://github.com/trufflesecurity/trufflehog/releases/download/v${TRUFFLEHOG_VERSION}/trufflehog_${TRUFFLEHOG_VERSION}_checksums.txt"
+          sha256sum --ignore-missing -c "trufflehog_${TRUFFLEHOG_VERSION}_checksums.txt"
+          mkdir -p "$HOME/.local/bin"
+          tar -xzf "trufflehog_${TRUFFLEHOG_VERSION}_linux_amd64.tar.gz" -C "$HOME/.local/bin" trufflehog
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Lint (ruff)
         run: ruff check .
