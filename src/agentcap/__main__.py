@@ -1107,8 +1107,8 @@ def _pick_workspace_request(scope: str | None) -> str | None:
     "--source",
     default=None,
     help="Where to look up the request: a capture dir, a .parquet, or "
-    "hf://datasets/<owner>/<name>[/<subdir>]. Only honored when "
-    "TARGET is a request-id; defaults to scanning the local workspace.",
+    "hf://datasets/<owner>/<name>. Only honored when TARGET is a "
+    "request-id; defaults to scanning the local workspace.",
 )
 @click.option(
     "--rid",
