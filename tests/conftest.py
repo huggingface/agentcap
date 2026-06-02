@@ -254,10 +254,16 @@ def live_model() -> str:
     return os.environ.get("AGENTCAP_TEST_MODEL", _DEFAULT_MODEL_ALIAS)
 
 
-DOCSTRING_PROMPT = (
-    "Add a one-line docstring to the hello function in hello.py "
-    "describing what it does. Use your edit tool. Then stop."
-)
+def docstring_prompt(proj: str) -> str:
+    # Hermes's edit/patch tools resolve paths literally, not against
+    # $PWD — so a bare ``hello.py`` makes small models guess (and
+    # Qwen3-1.7B guesses ``/root/hello.py`` ≈ $HOME). Pass the
+    # sandbox-side absolute path so the model has nothing to fill in.
+    return (
+        f"Add a one-line docstring to the hello function in "
+        f"{proj}/hello.py describing what it does. "
+        f"Use your edit tool. Then stop."
+    )
 
 
 _HELLO_PY = 'def hello():\n    print("Hello, world!")\n'
