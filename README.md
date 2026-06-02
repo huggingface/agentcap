@@ -41,42 +41,12 @@ The loop:
   over runs and captures with a body preview; `agentcap replay <rid>`
   re-issues any captured request against any OpenAI-compatible target.
 
-## Sandbox prerequisites
-
-`agentcap run` executes the agent inside a per-agent sandbox. Nothing
-on the host is visible to the agent except paths the driver explicitly
-bind-mounts. The agent CLI itself lives **in the image / VM, not on
-the host** — agentcap builds it from a declarative spec on first use,
-then reuses the build across runs.
-
-### Linux
-
-```bash
-sudo apt install -y bubblewrap buildah        # one-time
-# Ubuntu 24.04 only: allow unprivileged user namespaces for bwrap.
-sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-echo 'kernel.apparmor_restrict_unprivileged_userns=0' \
-    | sudo tee /etc/sysctl.d/60-agentcap-bwrap.conf
-```
-
-Each agent has a Containerfile at `containers/agentcap-<agent>.Containerfile`.
-First `agentcap run --agent <agent>` builds it (1–5 min cold); a
-Containerfile change is detected via label hash and forces a rebuild.
-
-### macOS
-
-```bash
-brew install lima                              # one-time
-```
-
-Each agent has a Lima template at `scripts/lima/agentcap-<agent>.yaml`.
-First `agentcap run --agent <agent>` provisions the per-agent VM
-(~30 s cold boot) and reuses it on subsequent runs.
-
 ## Quick start
 
 ```bash
-pip install -e .
+# Installs agentcap + its sandbox deps (lima on macOS;
+# bubblewrap + buildah on Linux), fzf, and trufflehog.
+brew install https://raw.githubusercontent.com/huggingface/agentcap/main/packaging/agentcap.rb
 
 # Pick a server. Three flavours, same proxy front-end.
 #
