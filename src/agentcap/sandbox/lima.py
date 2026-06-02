@@ -138,9 +138,13 @@ class LimaSandbox:
             [INIT_PATH] + list(argv), env=full_env or None, cwd=cwd,
         )
         try:
+            # agentcap is headless; close stdin so any agent that
+            # probes the TTY (consent prompts, ``read -p``) gets
+            # immediate EOF instead of hanging.
             return subprocess.run(
                 cmd,
                 env=os.environ.copy(),
+                stdin=subprocess.DEVNULL,
                 capture_output=True, text=True,
                 timeout=timeout, check=check,
             )

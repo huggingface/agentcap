@@ -36,13 +36,16 @@ def _log(msg: str) -> None:
     sys.stderr.flush()
 
 
-# Default test target. ``hf_hub_download`` of the gemma-4-E4B-it Q4_K_M
-# is the "click and run" path — agentcap fetches the model bytes,
-# user doesn't manage GGUF files. unsloth's repo is picked because its
-# filename matches the convention without a vendor-name prefix.
-_DEFAULT_GGUF_REPO = "unsloth/gemma-4-E4B-it-GGUF"
-_DEFAULT_GGUF_FILE = "gemma-4-E4B-it-Q4_K_M.gguf"
-_DEFAULT_MODEL_ALIAS = "gemma-4-E4B-it"
+# Default test target. ``hf_hub_download`` of Qwen3-1.7B Q8_0 is the
+# "click and run" path — agentcap fetches the model bytes, user
+# doesn't manage GGUF files. Qwen3-1.7B is the smallest checkpoint
+# in this family that chains read → edit reliably across the four
+# drivers; ~1.7 GB downloads + loads on a CI runner in a couple of
+# minutes. Semantic correctness is intentionally not graded; the
+# live tests verify the wire path, not the agent's task quality.
+_DEFAULT_GGUF_REPO = "Qwen/Qwen3-1.7B-GGUF"
+_DEFAULT_GGUF_FILE = "Qwen3-1.7B-Q8_0.gguf"
+_DEFAULT_MODEL_ALIAS = "Qwen3-1.7B"
 
 
 def _fetch_default_gguf() -> str | None:
@@ -251,10 +254,16 @@ def live_model() -> str:
     return os.environ.get("AGENTCAP_TEST_MODEL", _DEFAULT_MODEL_ALIAS)
 
 
-DOCSTRING_PROMPT = (
-    "Add a one-line docstring to the hello function in hello.py "
-    "describing what it does. Use your edit tool. Then stop."
-)
+def docstring_prompt(proj: str) -> str:
+    # Hermes's edit/patch tools resolve paths literally, not against
+    # $PWD — so a bare ``hello.py`` makes small models guess (and
+    # Qwen3-1.7B guesses ``/root/hello.py`` ≈ $HOME). Pass the
+    # sandbox-side absolute path so the model has nothing to fill in.
+    return (
+        f"Add a one-line docstring to the hello function in "
+        f"{proj}/hello.py describing what it does. "
+        f"Use your edit tool. Then stop."
+    )
 
 
 _HELLO_PY = 'def hello():\n    print("Hello, world!")\n'

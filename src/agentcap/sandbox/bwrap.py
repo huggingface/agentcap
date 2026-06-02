@@ -273,8 +273,12 @@ class BwrapSandbox:
             env=env,
             cwd=cwd,
         )
+        # agentcap is headless; close stdin so any agent that probes
+        # the TTY (consent prompts, ``read -p``) gets immediate EOF
+        # instead of hanging.
         return subprocess.run(
             wrapped,
+            stdin=subprocess.DEVNULL,
             capture_output=True, text=True,
             timeout=timeout, check=check,
         )

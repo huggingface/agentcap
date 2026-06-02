@@ -14,7 +14,6 @@ These apply on any host, regardless of GPU count.
 | gemma-4-26B-A4B-it | `ggml-org/gemma-4-26B-A4B-it-GGUF` | `auto` |
 | Qwen3-Coder-30B-A3B-Instruct | `unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF`* | `auto` |
 | Qwen3.6-35B-A3B | `ggml-org/Qwen3.6-35B-A3B-GGUF` | `off` |
-| GLM-4.5-Air | `unsloth/GLM-4.5-Air-GGUF` | `off` |
 
 *`ggml-org` doesn't publish Qwen3-Coder; `unsloth` is the canonical
 source.
@@ -22,10 +21,10 @@ source.
 Two rules that bite regardless of host:
 
 - **`REASONING=off`** is needed whenever the model answers in
-  `reasoning_content` rather than `content` (Qwen 3.5+, 3.6, GLM
-  thinking-mode). Hermes' tool-call parser only looks at `content`,
-  so leaving thinking on breaks the agent's tool-use loop.
-  Qwen3-Coder is not reasoning-by-default, so `auto` is fine.
+  `reasoning_content` rather than `content` (Qwen 3.5+, 3.6 thinking-
+  mode). Hermes' tool-call parser only looks at `content`, so leaving
+  thinking on breaks the agent's tool-use loop. Qwen3-Coder is not
+  reasoning-by-default, so `auto` is fine.
 
 - **`CTX_SIZE=65536`** is needed for the 30-task corpora. Hermes
   refuses to start unless both `model.context_length` and
@@ -67,8 +66,4 @@ CTX_SIZE=65536 TENSOR_SPLIT=1,1,1,1 \
 # Qwen3.6-35B-A3B — needs 4× A10G; suppress visible reasoning
 CTX_SIZE=65536 TENSOR_SPLIT=1,1,1,1 REASONING=off \
     scripts/start_llama_cpp_server.sh ggml-org/Qwen3.6-35B-A3B-GGUF
-
-# GLM-4.5-Air — 4 GPUs, suppress visible reasoning
-CTX_SIZE=65536 TENSOR_SPLIT=1,1,1,1 REASONING=off \
-    scripts/start_llama_cpp_server.sh unsloth/GLM-4.5-Air-GGUF
 ```

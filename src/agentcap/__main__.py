@@ -94,8 +94,35 @@ def _resolve_api_key(
     return None, None
 
 
+def _complete_run_ids(ctx, param, incomplete):
+    """Shell completion for workspace run-ids."""
+    root = _workspace_root()
+    if not root.is_dir():
+        return []
+    return [
+        d.name for d in root.iterdir()
+        if d.is_dir() and (d / "run.json").is_file()
+        and d.name.startswith(incomplete)
+    ]
+
+
+def _complete_request_ids(ctx, param, incomplete):
+    """Shell completion for captured request-ids across the workspace."""
+    root = _workspace_root()
+    if not root.is_dir():
+        return []
+    out: list[str] = []
+    for run_dir in root.iterdir():
+        captures = run_dir / "captures"
+        if not captures.is_dir():
+            continue
+        for req in captures.glob(f"{incomplete}*.request.json"):
+            out.append(req.name.removesuffix(".request.json"))
+    return out
+
+
 @cli.command("export")
-@click.argument("targets", nargs=-1)
+@click.argument("targets", nargs=-1, shell_complete=_complete_run_ids)
 @click.option(
     "--all", "all_runs", is_flag=True,
     help="Export every run in the workspace (mutually exclusive with positional run-ids).",
@@ -426,6 +453,19 @@ def run_cmd(
     state.mkdir(parents=True, exist_ok=True)
     click.echo(f"  [workdir] {workdir_p}", err=True)
 
+    # Stub run.json so ``agentcap ls/inspect/export`` can discover this
+    # run while it's still in flight. Fully overwritten with the final
+    # summary (incl. per-task durations) at end-of-run.
+    (workdir_p / "run.json").write_text(json.dumps({
+        "agent": agent,
+        "model": model,
+        "provider": provider_slug,
+        "upstream": upstream,
+        "turns_per_task": turns,
+        "followup": followup,
+        "tasks": [],
+    }, indent=2))
+
     # Resolve --sandbox up front: it joins the per-VM mount set
     # alongside --skills (RO) and the traces dir (RW), so the Lima
     # backend can configure all three at provision time.
@@ -496,6 +536,7 @@ def run_cmd(
         )
         orch = Orchestrator(
             driver, fu, sessions_dir=sessions, on_event=_on_event,
+            set_capture_context=proxy.set_context,
         )
 
         try:
@@ -767,6 +808,668 @@ def ls_cmd(long_form: bool) -> None:
                 r["run_id"], r["agent"], r["model"],
                 tasks_cell, str(r["n_caps"]),
             ]))
+
+
+def _resolve_request_id(
+    rid: str, source: str | None
+) -> tuple[str, dict, dict | None, dict | None]:
+    """Resolve ``rid`` (full or short prefix) to
+    ``(full_rid, body, response_record, request_record)``.
+
+    - If ``source`` is given, looks the rid up there via
+      ``replay.load_request`` (any agentcap-supported source: dir,
+      parquet, hf://) — exact match only. Response and request
+      records are unavailable in that path (just the body).
+    - Otherwise scans the workspace, accepting a prefix (git-style)
+      and returning the body, the paired response, and the full
+      request record (which carries ``task_id``, ``turn``,
+      ``captured_at``, ``upstream_url``).
+    """
+    from . import replay
+
+    if source is not None:
+        try:
+            return rid, replay.load_request(source, rid), None, None
+        except KeyError as exc:
+            raise click.UsageError(str(exc))
+        except (ValueError, FileNotFoundError) as exc:
+            raise click.UsageError(str(exc))
+
+    try:
+        found = replay.resolve_workspace_rid(_workspace_root(), rid)
+    except replay.AmbiguousRequestId as exc:
+        raise click.UsageError(str(exc))
+    if found is None:
+        raise click.UsageError(
+            f"request_id {rid!r} not found in workspace at {_workspace_root()}; "
+            f"pass --source to point at a capture dir, parquet, or hf:// URI."
+        )
+    capture_dir, full_rid = found
+    import json as _json
+    req_rec = _json.loads(
+        (capture_dir / f"{full_rid}.request.json").read_text()
+    )
+    resp_path = capture_dir / f"{full_rid}.response.json"
+    resp_rec = (
+        _json.loads(resp_path.read_text()) if resp_path.is_file() else None
+    )
+    body = req_rec.get("body")
+    if not isinstance(body, dict):
+        raise click.UsageError(
+            f"capture {capture_dir / f'{full_rid}.request.json'} has no body field"
+        )
+    return full_rid, body, resp_rec, req_rec
+
+
+def _enumerate_workspace_requests(scope: str | None) -> list[dict]:
+    """Walk captures across the workspace (or one run if ``scope`` is a
+    run-id) and return one row per captured request, grouped by run
+    then chronological within each run. Each row has ``run_id``,
+    ``rid``, ``captured_at``, ``status``, and ``preview`` (last user
+    message, truncated)."""
+    import json as _json
+
+    root = _workspace_root()
+    if not root.is_dir():
+        return []
+    run_dirs = (
+        [root / scope] if scope else [d for d in sorted(root.iterdir()) if d.is_dir()]
+    )
+    rows: list[dict] = []
+    for run_dir in run_dirs:
+        captures = run_dir / "captures"
+        if not captures.is_dir():
+            continue
+        for req_path in captures.glob("*.request.json"):
+            rid = req_path.stem.split(".")[0]
+            try:
+                req = _json.loads(req_path.read_text())
+            except (OSError, _json.JSONDecodeError):
+                continue
+            resp_path = captures / f"{rid}.response.json"
+            status = "?"
+            if resp_path.is_file():
+                try:
+                    status = str(_json.loads(resp_path.read_text()).get("status_code", "?"))
+                except (OSError, _json.JSONDecodeError):
+                    pass
+            messages = (req.get("body") or {}).get("messages") or []
+            last_user = next(
+                (m.get("content") for m in reversed(messages) if m.get("role") == "user"),
+                "",
+            )
+            if isinstance(last_user, list):
+                # Tool-result / multi-modal message content can be a list.
+                last_user = " ".join(
+                    p.get("text", "") for p in last_user if isinstance(p, dict)
+                )
+            preview = (last_user or "").replace("\n", " ").strip()
+            rows.append({
+                "run_id": run_dir.name,
+                "rid": rid,
+                "captured_at": int(req.get("captured_at", 0)),
+                "status": status,
+                "task_id": req.get("task_id"),
+                "turn": req.get("turn"),
+                "preview": preview,
+            })
+    rows.sort(key=lambda r: (r["run_id"], r["captured_at"]))
+    return rows
+
+
+def _format_inspect_rows(
+    rows: list[dict], *, include_run: bool
+) -> tuple[str, list[str]]:
+    """Flat table: every row is one captured call, every visible column
+    is something the user might fuzzy-filter on (LOC = ``task.tN``,
+    RID, optional RUN, PROMPT). Step / time / status / model / size
+    live in the fzf preview pane (see ``_preview_cmd``)."""
+
+    rid_w = 8
+    loc_w = max(
+        len("LOC"),
+        max((
+            len(f"{r.get('task_id') or '?'}.t{r.get('turn')}")
+            if r.get("task_id") and r.get("turn") is not None else 1
+            for r in rows
+        ), default=0),
+    )
+    run_w = (
+        max(len("RUN"), max((len(r["run_id"]) for r in rows), default=0))
+        if include_run else 0
+    )
+
+    def _row(loc, rid, run, prompt) -> str:
+        cells = [f"{loc:<{loc_w}}", f"{rid:<{rid_w}}"]
+        if include_run:
+            cells.append(f"{run:<{run_w}}")
+        cells.append(prompt)
+        return "  ".join(cells)
+
+    header = _row("LOC", "RID", "RUN", "PROMPT")
+
+    body: list[str] = []
+    for r in rows:
+        loc = (
+            f"{r.get('task_id') or '?'}.t{r.get('turn')}"
+            if r.get("task_id") and r.get("turn") is not None
+            else "-"
+        )
+        body.append(_row(loc, r["rid"][:8], r["run_id"], r["preview"]))
+    return header, body
+
+
+def _fzf_pick(
+    header: str, lines: list[str], preview_cmd: str
+) -> tuple[str | None, bool]:
+    """Run fzf over ``lines`` with ``header`` pinned at the top. Returns
+    ``(picked, available)``:
+      - ``(line, True)``  picked from fzf
+      - ``(None, True)``  fzf ran, user cancelled (Esc / Ctrl-C)
+      - ``(None, False)`` fzf not on PATH
+    """
+    import shutil
+    import subprocess
+
+    # ``AGENTCAP_NO_FZF=1`` lets users compare the fzf and plain-table
+    # UX without uninstalling fzf — pretend it isn't there.
+    if os.environ.get("AGENTCAP_NO_FZF") or not shutil.which("fzf"):
+        return None, False
+    proc = subprocess.run(
+        [
+            "fzf",
+            "--ansi",
+            "--layout=reverse",
+            "--header", header,
+            "--header-first",
+            "--preview", preview_cmd,
+            "--preview-window=right:60%:wrap",
+            "--no-sort",
+        ],
+        input="\n".join(lines),
+        capture_output=True,
+        text=True,
+    )
+    picked = proc.stdout.rstrip("\n") if proc.returncode == 0 else ""
+    return (picked or None, True)
+
+
+def _pick_workspace_run() -> str | None:
+    """Open an fzf picker over the runs in the workspace, returning the
+    selected run-id. Without fzf: prints the table and returns None
+    (caller treats as cancellation)."""
+    import json as _json
+    import sys
+
+    root = _workspace_root()
+    if not root.is_dir():
+        raise click.UsageError(f"no workspace at {root}")
+
+    rows: list[dict] = []
+    for run_dir in sorted(root.iterdir()):
+        meta_path = run_dir / "run.json"
+        if not run_dir.is_dir() or not meta_path.is_file():
+            continue
+        try:
+            meta = _json.loads(meta_path.read_text())
+        except (OSError, _json.JSONDecodeError):
+            continue
+        captures = run_dir / "captures"
+        n_caps = (
+            len(list(captures.glob("*.request.json"))) if captures.is_dir() else 0
+        )
+        if n_caps == 0:
+            continue  # skip empty runs — nothing to inspect
+        tasks = meta.get("tasks") or []
+        rows.append({
+            "run_id": run_dir.name,
+            "agent": meta.get("agent") or "?",
+            "model": (meta.get("model") or "?").split("/")[-1],
+            "n_tasks": len(tasks),
+            "n_caps": n_caps,
+        })
+    if not rows:
+        raise click.UsageError(f"no runs with captures in {root}")
+
+    run_w = max(len("RUN_ID"), max(len(r["run_id"]) for r in rows))
+    agent_w = max(len("AGENT"), max(len(r["agent"]) for r in rows))
+    model_w = max(len("MODEL"), max(len(r["model"]) for r in rows))
+
+    def _row(rid, agent, model, tasks, caps) -> str:
+        return (
+            f"{rid:<{run_w}}  {agent:<{agent_w}}  {model:<{model_w}}  "
+            f"{tasks:>5}  {caps:>4}"
+        )
+
+    header = _row("RUN_ID", "AGENT", "MODEL", "TASKS", "CAPS")
+    lines = [
+        _row(r["run_id"], r["agent"], r["model"], str(r["n_tasks"]), str(r["n_caps"]))
+        for r in rows
+    ]
+    # Preview shows the run.json metadata so the user sees what's inside
+    # before drilling in.
+    preview = (
+        f"{sys.executable} -m agentcap _run_preview {{1}} 2>/dev/null | head -200"
+    )
+
+    picked, fzf_available = _fzf_pick(header, lines, preview)
+    if not fzf_available:
+        click.echo(header)
+        for line in lines:
+            click.echo(line)
+        return None
+    if picked is None:
+        return None
+    tokens = picked.split()
+    return tokens[0] if tokens else None
+
+
+def _pick_workspace_request(scope: str | None) -> str | None:
+    """Interactive picker (fzf when available, plain table otherwise) for
+    a workspace request. Returns the picked short rid, or ``None`` if
+    cancelled / fzf unavailable. In the fzf-missing case the table is
+    printed to stdout and ``None`` returned — callers should treat that
+    as "user must re-invoke with an explicit rid"."""
+    import sys
+
+    rows = _enumerate_workspace_requests(scope)
+    if not rows:
+        where = f"run {scope!r}" if scope else "workspace"
+        raise click.UsageError(f"no captured requests in {where}")
+
+    include_run = scope is None
+    header, lines = _format_inspect_rows(rows, include_run=include_run)
+    # RID is column 2 (after LOC). fzf substitutes ``{2}`` with that
+    # whitespace-separated field.
+    preview = (
+        f"{sys.executable} -m agentcap _preview {{2}} 2>/dev/null | head -400"
+    )
+
+    picked, fzf_available = _fzf_pick(header, lines, preview)
+    if not fzf_available:
+        click.echo(header)
+        for line in lines:
+            click.echo(line)
+        return None
+    if picked is None:
+        return None  # cancelled
+    tokens = picked.split()
+    short = tokens[1] if len(tokens) >= 2 else ""
+    import re
+    if not re.fullmatch(r"[0-9a-f]{8}", short):
+        return None
+    return short
+
+
+@cli.command("inspect")
+@click.argument("target", required=False, shell_complete=_complete_request_ids)
+@click.option(
+    "--source",
+    default=None,
+    help="Where to look up the request: a capture dir, a .parquet, or "
+    "hf://datasets/<owner>/<name>. Only honored when TARGET is a "
+    "request-id; defaults to scanning the local workspace.",
+)
+@click.option(
+    "--rid",
+    "print_rid_only",
+    is_flag=True,
+    help="When picking interactively, print only the selected request-id "
+    "(useful for piping into `agentcap replay`).",
+)
+def inspect_cmd(target: str | None, source: str | None, print_rid_only: bool) -> None:
+    """Inspect captured requests.
+
+    \b
+    - ``agentcap inspect``              pick a run, then a call (two-step)
+    - ``agentcap inspect <run-id>``     pick a call from that run
+    - ``agentcap inspect <rid>``        print the captured body for that request
+
+    A rid is 32 hex chars (proxy-minted UUID); a run-id contains a dash.
+    Falls back to a plain table when fzf is not on PATH.
+    """
+    import json as _json
+
+    # rid (full or short prefix) → body dump (single request).
+    if target and "-" not in target:
+        full_rid, body, resp_rec, _ = _resolve_request_id(target, source)
+        if resp_rec is not None:
+            click.echo(
+                f"  request_id={full_rid} "
+                f"captured_at={resp_rec.get('captured_at_resp', '?')} "
+                f"status={resp_rec.get('status_code', '?')}",
+                err=True,
+            )
+        click.echo(_json.dumps(body, indent=2, ensure_ascii=False))
+        return
+
+    # No arg → pick a run first; then drill into its calls.
+    if target is None:
+        target = _pick_workspace_run()
+        if target is None:
+            return  # cancelled / no fzf table fallback already printed
+    pick = _pick_workspace_request(target)
+    if pick is None:
+        return  # cancelled or no-fzf table-only path
+    full_rid, body, resp_rec, _ = _resolve_request_id(pick, None)
+    if print_rid_only:
+        click.echo(full_rid)
+        return
+    if resp_rec is not None:
+        click.echo(
+            f"  request_id={full_rid} "
+            f"captured_at={resp_rec.get('captured_at_resp', '?')} "
+            f"status={resp_rec.get('status_code', '?')}",
+            err=True,
+        )
+    click.echo(_json.dumps(body, indent=2, ensure_ascii=False))
+
+
+@cli.command("_run_preview", hidden=True)
+@click.argument("run_id")
+def _run_preview_cmd(run_id: str) -> None:
+    """Internal: preview a run's metadata for the run picker."""
+    import json as _json
+
+    run_dir = _workspace_root() / run_id
+    meta_path = run_dir / "run.json"
+    if not meta_path.is_file():
+        click.echo(f"(no run.json at {meta_path})")
+        return
+    try:
+        meta = _json.loads(meta_path.read_text())
+    except (OSError, _json.JSONDecodeError) as exc:
+        click.echo(f"(run.json unreadable: {exc})")
+        return
+    captures = run_dir / "captures"
+    n_caps = (
+        len(list(captures.glob("*.request.json"))) if captures.is_dir() else 0
+    )
+    click.echo(f"run:       {run_id}")
+    click.echo(f"agent:     {meta.get('agent', '?')}")
+    click.echo(f"model:     {meta.get('model', '?')}")
+    click.echo(f"upstream:  {meta.get('upstream', '?')}")
+    click.echo(f"followup:  {meta.get('followup', '?')}")
+    click.echo(f"turns/task: {meta.get('turns_per_task', '?')}")
+    click.echo(f"captures:  {n_caps}")
+    click.echo()
+    click.echo("─── TASKS ───")
+    for t in meta.get("tasks") or []:
+        prompt = (t.get("prompt") or "").replace("\n", " ")
+        completed = t.get("completed_turns", "?")
+        click.echo(f"  {t.get('task_id', '?')}: ({completed} turns) {prompt}")
+
+
+@cli.command("_preview", hidden=True)
+@click.argument("request_id")
+def _preview_cmd(request_id: str) -> None:
+    """Internal: dual TASK + REQUEST view used by the fzf preview pane.
+
+    Not part of the public CLI surface — hidden from ``--help``. The
+    user-facing inspector is ``agentcap inspect <rid>``.
+    """
+    import json as _json
+    import re
+
+    # Hovered a section-header line in the picker — render nothing.
+    if not re.fullmatch(r"[0-9a-f]+", request_id):
+        click.echo("(section header — navigate to a request id)")
+        return
+
+    full_rid, body, resp_rec, req_rec = _resolve_request_id(request_id, None)
+    messages = body.get("messages") or []
+    last_user = next(
+        (m.get("content") for m in reversed(messages) if m.get("role") == "user"),
+        "",
+    )
+    if isinstance(last_user, list):
+        last_user = " ".join(
+            p.get("text", "") for p in last_user if isinstance(p, dict)
+        )
+    import time as _time
+
+    status = (
+        resp_rec.get("status_code") if resp_rec is not None else "?"
+    )
+    serialized = _json.dumps(body, ensure_ascii=False)
+    size_b = len(serialized.encode("utf-8"))
+    task_id = (req_rec or {}).get("task_id")
+    turn = (req_rec or {}).get("turn")
+    captured_at = (req_rec or {}).get("captured_at")
+    ts = (
+        _time.strftime("%H:%M:%S", _time.gmtime(int(captured_at)))
+        if captured_at else "?"
+    )
+    # Step = this rid's position among peers with the same (task, turn)
+    # in its capture dir. Computed live since it's not stored per-call.
+    step = "?"
+    if task_id and turn is not None:
+        from . import replay as _replay
+        found = _replay.resolve_workspace_rid(_workspace_root(), full_rid)
+        if found is not None:
+            cap_dir, _ = found
+            peers: list[tuple[int, str]] = []
+            for p in cap_dir.glob("*.request.json"):
+                try:
+                    rec = _json.loads(p.read_text())
+                except (OSError, _json.JSONDecodeError):
+                    continue
+                if rec.get("task_id") == task_id and rec.get("turn") == turn:
+                    peers.append((
+                        int(rec.get("captured_at", 0)),
+                        p.stem.split(".")[0],
+                    ))
+            peers.sort()
+            n = len(peers)
+            idx = next(
+                (i for i, (_, rid_) in enumerate(peers, start=1)
+                 if rid_ == full_rid),
+                None,
+            )
+            if idx is not None:
+                step = f"{idx}/{n}"
+    click.echo(f"rid:    {full_rid}")
+    if task_id is not None or turn is not None:
+        click.echo(f"task:   {task_id or '?'}  turn={turn if turn is not None else '?'}  step={step}")
+    click.echo(f"time:   {ts}")
+    click.echo(f"status: {status}")
+    click.echo(f"model:  {body.get('model', '?')}")
+    click.echo(f"size:   {size_b:,} bytes (~{size_b // 4:,} tokens)")
+    click.echo()
+    click.echo("─── PROMPT ──────────────────────────────────────────────")
+    click.echo(last_user or "(no user message)")
+    click.echo()
+    click.echo("─── REQUEST ─────────────────────────────────────────────")
+    click.echo(_json.dumps(body, indent=2, ensure_ascii=False))
+
+
+def _render_sse_stream(chunks) -> int:
+    """Parse an OpenAI-compatible SSE stream and emit only the generated
+    content (and tool-call name/arguments) to stdout. Returns the total
+    number of raw bytes consumed so the caller can report it."""
+    import json as _json
+
+    buf = ""
+    total = 0
+    tool_open = False
+    for chunk in chunks:
+        total += len(chunk)
+        buf += chunk.decode("utf-8", errors="replace")
+        while True:
+            sep = buf.find("\n\n")
+            if sep < 0:
+                break
+            event, buf = buf[: sep], buf[sep + 2:]
+            for line in event.split("\n"):
+                if not line.startswith("data:"):
+                    continue
+                payload = line[5:].strip()
+                if not payload or payload == "[DONE]":
+                    continue
+                try:
+                    obj = _json.loads(payload)
+                except _json.JSONDecodeError:
+                    continue
+                delta = (obj.get("choices") or [{}])[0].get("delta") or {}
+                content = delta.get("content")
+                if content:
+                    sys.stdout.write(content)
+                    sys.stdout.flush()
+                for tc in delta.get("tool_calls") or []:
+                    fn = tc.get("function") or {}
+                    name = fn.get("name")
+                    if name:
+                        prefix = ")\n" if tool_open else ""
+                        sys.stdout.write(f"{prefix}[tool:{name}](")
+                        tool_open = True
+                    args = fn.get("arguments")
+                    if args:
+                        sys.stdout.write(args)
+                        sys.stdout.flush()
+    if tool_open:
+        sys.stdout.write(")\n")
+    elif not buf.endswith("\n"):
+        sys.stdout.write("\n")
+    sys.stdout.flush()
+    return total
+
+
+def _render_buffered_completion(obj: dict) -> None:
+    """Render a non-streamed /v1/chat/completions response: just the
+    message text, then a compact tool-call summary if any."""
+    msg = ((obj.get("choices") or [{}])[0].get("message")) or {}
+    content = msg.get("content") or ""
+    if content:
+        sys.stdout.write(content)
+        if not content.endswith("\n"):
+            sys.stdout.write("\n")
+    for tc in msg.get("tool_calls") or []:
+        fn = tc.get("function") or {}
+        sys.stdout.write(f"[tool:{fn.get('name', '?')}]({fn.get('arguments', '')})\n")
+    sys.stdout.flush()
+
+
+@cli.command("replay")
+@click.argument("request_id", required=False, shell_complete=_complete_request_ids)
+@click.option(
+    "--target",
+    required=True,
+    help="Base URL of an OpenAI-compatible server (e.g. "
+    "http://127.0.0.1:8000). The captured JSON object is POSTed to "
+    "<target>/v1/chat/completions with no agentcap-side "
+    "normalisation (the original wire whitespace / key ordering is "
+    "not preserved by capture, only the JSON object is).",
+)
+@click.option(
+    "--source",
+    default=None,
+    help="Where to look up the request (see ``agentcap inspect``). "
+    "Defaults to scanning the local workspace.",
+)
+@click.option(
+    "--timeout",
+    type=float,
+    default=600.0,
+    show_default=True,
+    help="Per-request HTTP timeout in seconds.",
+)
+@click.option(
+    "--raw", "raw_output", is_flag=True,
+    help="Dump the raw response bytes (SSE for streamed, JSON for "
+    "buffered) instead of rendering just the generated text. Use "
+    "when debugging the wire shape.",
+)
+def replay_cmd(
+    request_id: str | None, target: str, source: str | None,
+    timeout: float, raw_output: bool,
+) -> None:
+    """Re-issue one captured request to an OpenAI-compatible endpoint.
+
+    Without a request-id, opens the same fzf picker as ``agentcap inspect``
+    and replays whatever you select. Single-turn only — multi-turn replay
+    diverges as soon as the new model responds differently. The captured
+    JSON object is sent without agentcap-side normalisation (captures
+    store parsed JSON, so the original byte sequence isn't preserved).
+    Streams the rendered generation (assistant text + ``[tool:NAME](args)``
+    markers) to stdout; pass ``--raw`` to dump the SSE / JSON response
+    bytes from the target instead. Status and timing go to stderr.
+    """
+    import json as _json
+    import time
+
+    import httpx
+
+    if request_id is None:
+        if source is not None:
+            raise click.UsageError(
+                "request-id is required when --source points outside the workspace"
+            )
+        run = _pick_workspace_run()
+        if run is None:
+            return
+        picked = _pick_workspace_request(run)
+        if picked is None:
+            return  # cancelled or no-fzf table-only path (already printed)
+        request_id = picked
+    full_rid, body, _, _ = _resolve_request_id(request_id, source)
+    url = target.rstrip("/") + "/v1/chat/completions"
+    is_stream = bool(body.get("stream"))
+    # Rough input size — chars/4 is a coarse token estimate but it sets
+    # expectations: 15k tokens means "wait a minute," not "something's wrong".
+    msgs_chars = sum(
+        len(_json.dumps(m, ensure_ascii=False))
+        for m in (body.get("messages") or [])
+    )
+    click.echo(
+        f"  rid={full_rid} POST {url} "
+        f"({'streaming' if is_stream else 'buffered'}, "
+        f"messages={len(body.get('messages') or [])}, "
+        f"tools={len(body.get('tools') or [])}, "
+        f"~{msgs_chars // 4} input tokens)…",
+        err=True,
+    )
+    t0 = time.monotonic()
+    n_bytes = 0
+    status: int | None = None
+    try:
+        if is_stream:
+            # Stream chunks to stdout as they arrive so a long generation
+            # gives immediate feedback instead of a wall of silence.
+            with httpx.stream("POST", url, json=body, timeout=timeout) as resp:
+                status = resp.status_code
+                click.echo(
+                    f"  ← headers status={status} content-type="
+                    f"{resp.headers.get('content-type', '?')}",
+                    err=True,
+                )
+                if raw_output or status != 200:
+                    # Errors come back as a single JSON object, not SSE.
+                    # Always dump them raw so the user sees the message.
+                    for chunk in resp.iter_raw():
+                        sys.stdout.buffer.write(chunk)
+                        sys.stdout.buffer.flush()
+                        n_bytes += len(chunk)
+                else:
+                    n_bytes = _render_sse_stream(resp.iter_raw())
+        else:
+            resp = httpx.post(url, json=body, timeout=timeout)
+            status = resp.status_code
+            n_bytes = len(resp.content)
+            if raw_output or status != 200:
+                try:
+                    click.echo(_json.dumps(resp.json(), indent=2, ensure_ascii=False))
+                except ValueError:
+                    sys.stdout.buffer.write(resp.content)
+                    sys.stdout.buffer.write(b"\n")
+            else:
+                _render_buffered_completion(resp.json())
+    except httpx.HTTPError as exc:
+        raise click.ClickException(f"replay failed: {exc}")
+    dt = time.monotonic() - t0
+    click.echo(
+        f"  status={status} duration={dt:.2f}s bytes={n_bytes}",
+        err=True,
+    )
 
 
 def main() -> int:

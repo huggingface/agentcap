@@ -23,7 +23,7 @@ from agentcap.drivers.hermes import HermesDriver
 from agentcap.drivers.opencode import OpenCodeDriver
 from agentcap.drivers.pi import PiDriver
 
-from .conftest import DOCSTRING_PROMPT, _HELLO_PY, reset_hello_py
+from .conftest import _HELLO_PY, docstring_prompt, reset_hello_py
 
 
 def _log(msg: str) -> None:
@@ -91,7 +91,7 @@ def test_goose_live(live_proxy_base_url, live_model, agent_proj_for):
         cwd=proj,
     )
     try:
-        turn = _run_with_retry(drv, DOCSTRING_PROMPT, sandbox, proj, timeout=900)
+        turn = _run_with_retry(drv, docstring_prompt(proj), sandbox, proj, timeout=900)
         assert turn.session_id and turn.session_id.startswith("agentcap-")
         _assert_infrastructure_works(sandbox, proj, turn)
     finally:
@@ -108,7 +108,7 @@ def test_pi_live(live_proxy_base_url, live_model, agent_proj_for):
         cwd=proj,
     )
     try:
-        turn = _run_with_retry(drv, DOCSTRING_PROMPT, sandbox, proj, timeout=900)
+        turn = _run_with_retry(drv, docstring_prompt(proj), sandbox, proj, timeout=900)
         _assert_infrastructure_works(sandbox, proj, turn)
     finally:
         drv.close()
@@ -142,7 +142,7 @@ def test_opencode_live(live_proxy_base_url, live_model, agent_proj_for):
         minimal_agent=True,
     )
     try:
-        turn = _run_with_retry(drv, DOCSTRING_PROMPT, sandbox, proj, timeout=900)
+        turn = _run_with_retry(drv, docstring_prompt(proj), sandbox, proj, timeout=900)
         _assert_infrastructure_works(sandbox, proj, turn)
     finally:
         drv.close()
@@ -160,7 +160,7 @@ def test_hermes_live(live_proxy_base_url, agent_proj_for):
         toolsets="file",
     )
     try:
-        turn = _run_with_retry(drv, DOCSTRING_PROMPT, sandbox, proj, timeout=900)
+        turn = _run_with_retry(drv, docstring_prompt(proj), sandbox, proj, timeout=900)
         assert turn.session_id is not None
         _assert_infrastructure_works(sandbox, proj, turn)
     finally:

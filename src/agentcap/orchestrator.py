@@ -73,11 +73,13 @@ class Orchestrator:
         followup: FollowUp,
         *,
         sessions_dir: Path | str | None = None,
+        set_capture_context: Callable[..., None] | None = None,
         on_event: Callable[..., None] | None = None,
     ) -> None:
         self.driver = driver
         self.followup = followup
         self.sessions_dir = Path(sessions_dir) if sessions_dir else None
+        self.set_capture_context = set_capture_context or (lambda **_: None)
         if self.sessions_dir is not None:
             self.sessions_dir.mkdir(parents=True, exist_ok=True)
         self.on_event = on_event or (lambda **_: None)
@@ -104,6 +106,7 @@ class Orchestrator:
 
         # Turn 1: open session
         self.on_event(event="task_start", task_id=task_id, prompt=prompt, turns=turns)
+        self.set_capture_context(task_id=task_id, turn=1)
         t0 = time.time()
         try:
             first = self.driver.start(prompt, timeout=timeout)
@@ -151,6 +154,7 @@ class Orchestrator:
             next_prompt = self.followup.next(
                 original_task=prompt, last_response=last_response, turn=turn
             )
+            self.set_capture_context(task_id=task_id, turn=turn)
             t0 = time.time()
             try:
                 fu = self.driver.resume(next_prompt, session_id=sid, timeout=timeout)

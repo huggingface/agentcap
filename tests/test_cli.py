@@ -142,7 +142,10 @@ def test_run_hf_router_api_key_auto_from_hf_token_env(
 
     @contextlib.contextmanager
     def fake_proxy(*args, **kwargs):
-        yield types.SimpleNamespace(host="127.0.0.1", port=18001)
+        yield types.SimpleNamespace(
+            host="127.0.0.1", port=18001,
+            set_context=lambda **_: None,
+        )
 
     monkeypatch.setattr("agentcap.proxy.serve_in_thread", fake_proxy)
     monkeypatch.setenv("HF_TOKEN", "hf_env_token")
@@ -275,3 +278,155 @@ def test_export_all_walks_workspace_in_one_commit(
     assert result.exit_code == 0, result.output
     assert len(fake_hf_api.commits) == 1
     assert len(fake_hf_api.commits[0]["operations"]) == 2
+
+
+def _seed_workspace_run(root: Path, run_id: str, rids: list[tuple[str, str]]) -> None:
+    """Create a fake workspace run with captures for each (rid, prompt)."""
+    import json as _json
+    cap = root / ".agentcap" / run_id / "captures"
+    cap.mkdir(parents=True)
+    for i, (rid, prompt) in enumerate(rids):
+        body = {"model": "m", "messages": [{"role": "user", "content": prompt}]}
+        (cap / f"{rid}.request.json").write_text(_json.dumps({
+            "request_id": rid, "captured_at": 1000 + i,
+            "upstream_url": "http://x", "body": body,
+        }))
+        (cap / f"{rid}.response.json").write_text(_json.dumps({
+            "request_id": rid, "captured_at_resp": 1001 + i,
+            "status_code": 200, "body": {},
+        }))
+
+
+def _seed_workspace_run_with_meta(
+    root: Path, run_id: str, *, agent: str = "hermes", model: str = "m",
+) -> None:
+    """Like _seed_workspace_run but also writes a minimal run.json so
+    the run picker discovers it."""
+    import json as _json
+    _seed_workspace_run(root, run_id, [("aaa", "p1")])
+    (root / ".agentcap" / run_id / "run.json").write_text(_json.dumps({
+        "agent": agent, "model": model, "upstream": "http://x",
+        "turns_per_task": 1,
+        "tasks": [{
+            "task_id": "task_01", "prompt": "p1", "completed_turns": 1,
+            "turns": [{"turn": 1, "returncode": 0, "duration_s": 1.0}],
+        }],
+    }))
+
+
+def test_inspect_resolves_rid_from_workspace(tmp_path: Path, monkeypatch):
+    import json as _json
+    monkeypatch.setenv("AGENTCAP_WORKSPACE", str(tmp_path))
+    cap = tmp_path / ".agentcap" / "hermes-local-20260101-000000" / "captures"
+    cap.mkdir(parents=True)
+    body = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
+    (cap / "rid.request.json").write_text(_json.dumps({
+        "request_id": "rid", "captured_at": 1,
+        "upstream_url": "http://x", "body": body,
+    }))
+    (cap / "rid.response.json").write_text(_json.dumps({
+        "request_id": "rid", "captured_at_resp": 2,
+        "status_code": 200, "body": {},
+    }))
+
+    result = CliRunner().invoke(cli, ["inspect", "rid"])
+    assert result.exit_code == 0, result.stderr
+    assert _json.loads(result.stdout) == body
+
+
+def test_inspect_unknown_rid_errors(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("AGENTCAP_WORKSPACE", str(tmp_path))
+    (tmp_path / ".agentcap").mkdir()
+    result = CliRunner().invoke(cli, ["inspect", "ghost"])
+    assert result.exit_code != 0
+    assert "ghost" in result.output
+
+
+def test_inspect_run_id_falls_back_to_table_without_fzf(
+    tmp_path: Path, monkeypatch
+):
+    """Without fzf on PATH the picker prints a plain table."""
+    monkeypatch.setenv("AGENTCAP_WORKSPACE", str(tmp_path))
+    monkeypatch.setenv("PATH", "")
+    _seed_workspace_run(
+        tmp_path, "hermes-local-20260101-000000",
+        [("aaa", "first prompt"), ("bbb", "second prompt")],
+    )
+
+    result = CliRunner().invoke(cli, ["inspect", "hermes-local-20260101-000000"])
+    assert result.exit_code == 0, result.output
+    assert "aaa" in result.output and "bbb" in result.output
+    assert "first prompt" in result.output
+
+
+def test_inspect_no_arg_opens_run_picker(tmp_path: Path, monkeypatch):
+    """With no arg, inspect now opens the run picker first. Without fzf
+    the run table is printed and inspect exits (user must re-invoke
+    with an explicit run-id)."""
+    monkeypatch.setenv("AGENTCAP_WORKSPACE", str(tmp_path))
+    monkeypatch.setenv("PATH", "")
+    # Seed a run with run.json so the run picker finds it.
+    _seed_workspace_run_with_meta(
+        tmp_path, "hermes-local-20260101-000000",
+        agent="hermes", model="m",
+    )
+
+    result = CliRunner().invoke(cli, ["inspect"])
+    assert result.exit_code == 0, result.output
+    # The run table includes the run-id.
+    assert "hermes-local-20260101-000000" in result.output
+
+
+def test_inspect_no_arg_empty_workspace_errors(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("AGENTCAP_WORKSPACE", str(tmp_path))
+    (tmp_path / ".agentcap").mkdir()
+    result = CliRunner().invoke(cli, ["inspect"])
+    assert result.exit_code != 0
+    assert "no runs" in result.output or "no workspace" in result.output
+
+
+def test_replay_posts_body_to_target(tmp_path: Path, monkeypatch):
+    """Replay POSTs the captured body verbatim and surfaces the response."""
+    import json as _json
+
+    monkeypatch.setenv("AGENTCAP_WORKSPACE", str(tmp_path))
+    cap = tmp_path / ".agentcap" / "hermes-local-20260101-000000" / "captures"
+    cap.mkdir(parents=True)
+    body = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
+    (cap / "rid.request.json").write_text(_json.dumps({
+        "request_id": "rid", "captured_at": 1,
+        "upstream_url": "http://x", "body": body,
+    }))
+
+    seen: dict = {}
+
+    class _FakeResponse:
+        status_code = 200
+        content = b'{"choices":[{"message":{"content":"hello world"}}]}'
+        def json(self) -> dict:
+            return {"choices": [{"message": {"content": "hello world"}}]}
+
+    def _fake_post(url, json=None, timeout=None):  # noqa: A002
+        seen["url"] = url
+        seen["json"] = json
+        seen["timeout"] = timeout
+        return _FakeResponse()
+
+    import httpx
+    monkeypatch.setattr(httpx, "post", _fake_post)
+
+    result = CliRunner().invoke(
+        cli, ["replay", "rid", "--target", "http://server:9"],
+    )
+    assert result.exit_code == 0, result.stderr
+    assert seen["url"] == "http://server:9/v1/chat/completions"
+    assert seen["json"] == body
+    # Default rendering: just the assistant's content text.
+    assert "hello world" in result.stdout
+
+    # --raw surfaces the pretty JSON dump instead.
+    result = CliRunner().invoke(
+        cli, ["replay", "rid", "--target", "http://server:9", "--raw"],
+    )
+    assert result.exit_code == 0, result.stderr
+    assert '"choices"' in result.stdout
