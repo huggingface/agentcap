@@ -14,9 +14,12 @@
 #
 # Env (sensible defaults):
 #   HOST=0.0.0.0  PORT=8000  CTX_SIZE=32768  REASONING=auto
-#   N_GPU_LAYERS=999  TENSOR_SPLIT=1,1,1,1
 #   FIT=off  (auto-fit hits GGML_SCHED_MAX_SPLIT_INPUTS on multi-GPU
 #            for some models; ``on`` re-enables it)
+#   N_GPU_LAYERS  GPU-only. Omit on CPU / macOS. Common value:
+#                 ``999`` (force all layers to VRAM).
+#   TENSOR_SPLIT  GPU-only, multi-GPU. Omit elsewhere. Common
+#                 values: ``1,1`` (2 GPUs), ``1,1,1,1`` (4 GPUs).
 
 set -euo pipefail
 
@@ -25,6 +28,15 @@ REPO="${1:?usage: $0 <hf-repo>[:<quant>]}"
 command -v llama >/dev/null 2>&1 || curl -fsSL https://llama.app/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
 
+# Only pass GPU-only flags when the env var is set. ``--n-gpu-layers``
+# and ``--tensor-split`` are nonsensical on CPU / macOS — leaving
+# them unset lets llama use its native auto-detection there.
+# ``${opt[@]+"${opt[@]}"}`` is the empty-array-safe expansion under
+# ``set -u`` (bare ``"${opt[@]}"`` would error on an empty array).
+opt=()
+[ -n "${N_GPU_LAYERS:-}" ] && opt+=(--n-gpu-layers "$N_GPU_LAYERS")
+[ -n "${TENSOR_SPLIT:-}" ] && opt+=(--tensor-split "$TENSOR_SPLIT")
+
 exec llama serve \
     -hf "$REPO" \
     --alias "${REPO%:*}" \
@@ -32,7 +44,6 @@ exec llama serve \
     --port "${PORT:-8000}" \
     --ctx-size "${CTX_SIZE:-32768}" \
     --reasoning "${REASONING:-auto}" \
-    --n-gpu-layers "${N_GPU_LAYERS:-999}" \
-    --tensor-split "${TENSOR_SPLIT:-1,1,1,1}" \
     --fit "${FIT:-off}" \
+    ${opt[@]+"${opt[@]}"} \
     --jinja
