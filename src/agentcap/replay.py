@@ -18,8 +18,8 @@ def load_request(source: str, request_id: str) -> dict:
     ``source`` resolves any of:
       - a local capture dir (``<rid>.request.json`` files),
       - a local ``.parquet`` produced by ``agentcap export``,
-      - ``hf://datasets/<owner>/<name>[/<subdir>]`` or the bare
-        ``<owner>/<name>[/<subdir>]`` form.
+      - ``hf://datasets/<owner>/<name>`` or the bare ``<owner>/<name>``
+        form.
 
     Raises ``KeyError`` if the id is not found.
     """
@@ -37,19 +37,20 @@ def load_requests(
     if not wanted:
         return {}
 
-    if _looks_like_hf_source(source):
+    # Resolve local paths first — an existing dir/file wins over the HF
+    # heuristic, so ``runs/abc/captures`` isn't misclassified as a repo.
+    p = Path(source).expanduser()
+    if p.is_dir():
+        bodies = _load_from_capture_dir(p, wanted)
+    elif p.is_file() and p.suffix == ".parquet":
+        bodies = _load_from_parquet(p, wanted)
+    elif _looks_like_hf_source(source):
         bodies = _load_from_hf_dataset(source, wanted)
     else:
-        p = Path(source)
-        if p.is_dir():
-            bodies = _load_from_capture_dir(p, wanted)
-        elif p.is_file() and p.suffix == ".parquet":
-            bodies = _load_from_parquet(p, wanted)
-        else:
-            raise ValueError(
-                f"source must be a capture dir, a .parquet file, or an "
-                f"hf://datasets/... URI — got {source!r}"
-            )
+        raise ValueError(
+            f"source must be a capture dir, a .parquet file, or an "
+            f"hf://datasets/... URI — got {source!r}"
+        )
 
     missing = wanted - set(bodies)
     if missing:
@@ -62,11 +63,11 @@ def load_requests(
 def _looks_like_hf_source(source: str) -> bool:
     if source.startswith("hf://"):
         return True
-    # Bare ``<owner>/<name>`` — a single ``/`` and no path-separator
+    # Bare ``<owner>/<name>`` — exactly one ``/`` and no path-separator
     # prefix. Heuristic for distinguishing an HF repo from a local path.
     if source.startswith((".", "/", "~")):
         return False
-    return "/" in source
+    return source.count("/") == 1
 
 
 def _load_from_capture_dir(
@@ -90,7 +91,9 @@ def _load_from_parquet(
     import pyarrow.parquet as pq
 
     table = pq.read_table(
-        str(parquet_path), columns=["request_id", "request"]
+        str(parquet_path),
+        columns=["request_id", "request"],
+        filters=[("request_id", "in", list(wanted))],
     )
     return _scan_arrow_table(table, wanted)
 
@@ -119,7 +122,11 @@ def _load_from_hf_dataset(
         if entry.get("type") != "file" or not entry["name"].endswith(".parquet"):
             continue
         with fs.open(entry["name"], "rb") as fh:
-            table = pq.read_table(fh, columns=["request_id", "request"])
+            table = pq.read_table(
+                fh,
+                columns=["request_id", "request"],
+                filters=[("request_id", "in", list(remaining))],
+            )
         found = _scan_arrow_table(table, remaining)
         out.update(found)
         remaining -= set(found)

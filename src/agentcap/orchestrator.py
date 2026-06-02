@@ -79,10 +79,6 @@ class Orchestrator:
         self.driver = driver
         self.followup = followup
         self.sessions_dir = Path(sessions_dir) if sessions_dir else None
-        # Called as ``set_capture_context(task_id=..., turn=...)`` before
-        # each driver call so the proxy can stamp captured requests with
-        # their owning turn. Default is a no-op so the orchestrator runs
-        # standalone without a proxy.
         self.set_capture_context = set_capture_context or (lambda **_: None)
         if self.sessions_dir is not None:
             self.sessions_dir.mkdir(parents=True, exist_ok=True)

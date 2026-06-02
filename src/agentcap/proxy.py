@@ -342,7 +342,7 @@ class ProxyHandle:
 
     def __init__(
         self, server, thread, host: str, port: int,
-        proxy: CaptureProxy | None = None,
+        proxy: CaptureProxy,
     ) -> None:
         self._server = server
         self._thread = thread
@@ -353,8 +353,7 @@ class ProxyHandle:
     def set_context(self, *, task_id: str | None, turn: int | None) -> None:
         """Forward to the underlying ``CaptureProxy`` so subsequent
         captures are stamped with the given orchestrator-turn context."""
-        if self.proxy is not None:
-            self.proxy.set_context(task_id=task_id, turn=turn)
+        self.proxy.set_context(task_id=task_id, turn=turn)
 
     @property
     def base_url(self) -> str:

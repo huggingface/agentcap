@@ -863,9 +863,10 @@ def _resolve_request_id(
 
 def _enumerate_workspace_requests(scope: str | None) -> list[dict]:
     """Walk captures across the workspace (or one run if ``scope`` is a
-    run-id) and return one row per captured request, in chronological
-    order. Each row has ``run_id``, ``rid``, ``captured_at``, ``status``,
-    and ``preview`` (last user message, truncated)."""
+    run-id) and return one row per captured request, grouped by run
+    then chronological within each run. Each row has ``run_id``,
+    ``rid``, ``captured_at``, ``status``, and ``preview`` (last user
+    message, truncated)."""
     import json as _json
 
     root = _workspace_root()
@@ -1386,7 +1387,9 @@ def replay_cmd(
     and replays whatever you select. Single-turn only — multi-turn replay
     diverges as soon as the new model responds differently (see
     ROADMAP.md). The body is sent byte-faithfully; no normalisation.
-    Prints the response JSON to stdout and status / timing to stderr.
+    Streams the rendered generation (assistant text + ``[tool:NAME](args)``
+    markers) to stdout; pass ``--raw`` to dump the verbatim SSE / JSON
+    response instead. Status and timing go to stderr.
     """
     import json as _json
     import time

@@ -273,12 +273,9 @@ class BwrapSandbox:
             env=env,
             cwd=cwd,
         )
-        # stdin=DEVNULL is load-bearing for hermes: recent releases
-        # display a first-run consent prompt that reads from the TTY
-        # even with ``-Q --yolo --accept-hooks``, and would hang
-        # indefinitely if stdin were inherited from the parent tmux
-        # pty. Closing stdin gives hermes an immediate EOF and the
-        # agent loop proceeds normally.
+        # agentcap is headless; close stdin so any agent that probes
+        # the TTY (consent prompts, ``read -p``) gets immediate EOF
+        # instead of hanging.
         return subprocess.run(
             wrapped,
             stdin=subprocess.DEVNULL,
