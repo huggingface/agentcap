@@ -35,11 +35,10 @@ agentcap-compatible capture dir. The corpus is just a `tasks.txt`.
    works with `llama.cpp`, Inference Endpoints, Inference Providers,
    anything that speaks `/v1/chat/completions`. Capture is dumb —
    no tokenizer, no rendering, just persist the bytes.
-3. **Dataset export** (`agentcap export`) — bundles the captured
-   capture dir into a parquet, one row per chat-completion request,
-   and pushes to a Hugging Face Dataset repo. Files land under
-   `data/` so the Hub Dataset Viewer renders them automatically;
-   consumers `load_dataset(...)`. The default filename embeds
+3. **Dataset export** (`agentcap export`) — bundles each run's
+   captures into a parquet (one row per chat-completion request) and
+   pushes a paired ``-captures`` / ``-traces`` dataset pair to the
+   Hub, grouped under a Collection. The captures filename embeds
    `(agent, model, provider)` so a single repo holds many tuples
    without aliasing.
 
@@ -159,8 +158,7 @@ pip install -e .
 #
 #  (c) Local llama.cpp — full control over quant and chat template.
 #      Right for research that needs model-implementation detail.
-GGUF_PATH=/path/to/model-Q4_K_M.gguf REASONING=off \
-    ./scripts/start_llama_cpp_server.sh &
+./scripts/start_llama_cpp_server.sh ggml-org/gemma-4-E4B-it-GGUF &
 
 # Drive an agent through a corpus. Each run mints a fresh subdir
 # under .agentcap/ in the workspace ($AGENTCAP_WORKSPACE or cwd):
@@ -183,12 +181,14 @@ agentcap run \
 # Browse what's captured.
 agentcap ls
 
-# Push everything to a Dataset repo.
-agentcap export --all --push my-org/my-captures/<corpus>
+# Push everything. ``--push <owner>/<base>`` produces a paired
+# ``<owner>/<base>-captures`` / ``<owner>/<base>-traces`` dataset
+# pair and groups them in a Collection named ``<base>``.
+agentcap export --all --push my-org/my-captures
 
 # Or push selected runs only.
 agentcap export hermes-local-20260512-162345 \
-    --push my-org/my-captures/<corpus>
+    --push my-org/my-captures
 
 # Browse captured requests (fzf-driven picker with body preview;
 # falls back to a plain table if fzf isn't on PATH).
@@ -207,15 +207,11 @@ for which model + agent combinations have been validated end-to-end.
 
 For `agentcap run`, `--model` is required for all drivers.
 
-When `--followup synthesized` is enabled, `--synth-upstream` defaults
-to `--upstream` and `--synth-model` defaults to `--model`. Pass synth
-flags only when you intentionally want a different synth backend/model.
-
 ## Workspace and `agentcap ls`
 
 `agentcap run` writes each invocation to
-`$AGENTCAP_WORKSPACE/.agentcap/<agent>-<provider>-<utc>/` (or cwd if
-`AGENTCAP_WORKSPACE` is unset). Pass `--workdir` to override.
+`$AGENTCAP_WORKSPACE/.agentcap/<agent>-<provider>-<utc>/` (or
+`./.agentcap/...` when `AGENTCAP_WORKSPACE` is unset).
 
 ```bash
 agentcap ls                # short table
@@ -224,35 +220,36 @@ agentcap ls --long         # add upstream + per-run capture counts
 
 ## Pushing to a Dataset repo
 
-`agentcap export` walks one or more runs and uploads each as a parquet
-file into a Hugging Face Dataset repo (auto-created on first push).
-Files land under `data/[<subdir>/]<file>.parquet` so the Hub Dataset
-Viewer renders the parquet automatically.
+`agentcap export --push <owner>/<base>` walks one or more runs and
+uploads two paired Hugging Face Dataset repos (auto-created on first
+push):
+
+- `<owner>/<base>-captures` — one parquet per run (one row per
+  chat-completion request). Filenames embed `(agent, model, provider)`
+  so a single repo can hold many tuples without aliasing. Consumers
+  read the union via `load_dataset("<owner>/<base>-captures")`.
+- `<owner>/<base>-traces` — the agent's native session-log files
+  for runs that produced any (one parquet per agent, e.g.
+  `<owner>/<base>-hermes-traces`).
+
+Both repos are added to a Collection titled `<base>` under `<owner>`
+so they surface together on the Hub.
 
 ```bash
 # Push every run in the workspace.
-agentcap export --all --push my-org/my-captures/<corpus>
+agentcap export --all --push my-org/my-captures
 
 # Or push selected runs (run-ids from `agentcap ls`).
 agentcap export hermes-local-20260512-162345 goose-local-20260512-170000 \
-    --push my-org/my-captures/<corpus>
+    --push my-org/my-captures
 
 # Or point at an arbitrary workdir / capture dir directly.
-agentcap export ./some/workdir --push me/d
+agentcap export ./some/workdir --push my-org/my-captures
 ```
 
-Each run lands as a unique parquet file. The default filename embeds
-`(agent, model, provider)` so a single repo can hold many tuples
-without aliasing —
-`train-<agent>-<model>-<provider>-YYYYMMDDTHHMMSS-HEX6.parquet`.
-`<agent>` is read from `run.json`; `<model>` and `<provider>` are
-derived from the captured requests. Consumers read the union via
-`load_dataset("my-org/my-captures")`.
-
-One `agentcap export` invocation produces one git commit, regardless
-of how many runs it bundles. On the first push to an empty repo,
-agentcap also seeds a dataset card (`README.md`); subsequent pushes
-leave any existing card untouched.
+Before pushing, `agentcap export` runs `trufflehog` against each run
+directory and aborts on any **verified** secret hit (pattern-only hits
+are surfaced but don't block). Pass `--no-scan` to skip this gate.
 
 ## What lands on disk
 
@@ -297,8 +294,7 @@ yourself — a 5-line job via `transformers.AutoTokenizer.apply_chat_template`.
 
 ## Server backends
 
-The proxy is backend-agnostic. Document the menu so users pick the
-right one per use case:
+The proxy is backend-agnostic. Pick whichever fits the use case:
 
 | backend | when to use |
 |---|---|
@@ -326,8 +322,10 @@ run when a model endpoint is reachable, skip otherwise. Either set
 `AGENTCAP_TEST_LLM_URL=http://host:port/v1`, or have the `llama`
 executable on `$PATH` so the fixture spawns one via `llama serve`
 (install with `curl -fsSL https://llama.app/install.sh | sh`).
-Override the agent's model id with `AGENTCAP_TEST_MODEL` (default
-`gemma-4-E4B-it`).
+Override the agent's model id with `AGENTCAP_TEST_MODEL` and the
+GGUF with `AGENTCAP_TEST_GGUF` (defaults to Qwen3-1.7B-Q8 fetched
+from the Hub — small + fast enough to chain a tool call on CPU,
+which is what the live tests assert).
 
 The per-agent sandbox is built / booted lazily on first use (same
 lifecycle as `agentcap run`), so the first session pays a multi-
