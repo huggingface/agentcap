@@ -36,13 +36,16 @@ def _log(msg: str) -> None:
     sys.stderr.flush()
 
 
-# Default test target. ``hf_hub_download`` of the gemma-4-E4B-it Q4_K_M
-# is the "click and run" path — agentcap fetches the model bytes,
-# user doesn't manage GGUF files. unsloth's repo is picked because its
-# filename matches the convention without a vendor-name prefix.
-_DEFAULT_GGUF_REPO = "unsloth/gemma-4-E4B-it-GGUF"
-_DEFAULT_GGUF_FILE = "gemma-4-E4B-it-Q4_K_M.gguf"
-_DEFAULT_MODEL_ALIAS = "gemma-4-E4B-it"
+# Default test target. ``hf_hub_download`` of Qwen3-0.6B Q8_0 is the
+# "click and run" path — agentcap fetches the model bytes, user
+# doesn't manage GGUF files. Qwen3-0.6B is chosen for live tests
+# because it (a) emits valid tool-call JSON in ~1s on CPU and (b)
+# weighs ~600 MB — small enough to download and load on CI runners
+# in seconds. Semantic correctness is intentionally not graded; the
+# live tests verify the wire path, not the agent's task quality.
+_DEFAULT_GGUF_REPO = "Qwen/Qwen3-1.7B-GGUF"
+_DEFAULT_GGUF_FILE = "Qwen3-1.7B-Q8_0.gguf"
+_DEFAULT_MODEL_ALIAS = "Qwen3-1.7B"
 
 
 def _fetch_default_gguf() -> str | None:
