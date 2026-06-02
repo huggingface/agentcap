@@ -25,8 +25,8 @@ The loop:
   lima on macOS). Multi-turn follow-ups, optional skill injection.
 - **Capture every wire interaction** — an in-process OpenAI-compat
   proxy sits between the agent and any backend that speaks
-  `/v1/chat/completions` (llama.cpp, Inference Endpoints, Inference
-  Providers, vLLM). Request bodies are persisted as parsed JSON (the
+  `/v1/chat/completions` (llama.app, Inference Providers, vLLM).
+  Request bodies are persisted as parsed JSON (the
   object, not the original byte sequence); streamed responses keep
   the raw SSE bytes. No tokenisation, no rendering — just persist
   what crossed the wire.
@@ -41,100 +41,85 @@ The loop:
   over runs and captures with a body preview; `agentcap replay <rid>`
   re-issues any captured request against any OpenAI-compatible target.
 
-## Sandbox prerequisites
+## Quick start
 
-`agentcap run` executes the agent inside a per-agent sandbox. Nothing
-on the host is visible to the agent except paths the driver explicitly
-bind-mounts. The agent CLI itself lives **in the image / VM, not on
-the host** — agentcap builds it from a declarative spec on first use,
-then reuses the build across runs.
-
-### Linux
+Install the sandbox prereqs (one-time) and agentcap itself.
 
 ```bash
-sudo apt install -y bubblewrap buildah        # one-time
-# Ubuntu 24.04 only: allow unprivileged user namespaces for bwrap.
+# macOS
+brew install lima
+
+# Linux
+sudo apt install -y bubblewrap buildah
+# Ubuntu 24.04+ only: unprivileged user namespaces for bwrap.
 sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 echo 'kernel.apparmor_restrict_unprivileged_userns=0' \
     | sudo tee /etc/sysctl.d/60-agentcap-bwrap.conf
-```
 
-Each agent has a Containerfile at `containers/agentcap-<agent>.Containerfile`.
-First `agentcap run --agent <agent>` builds it (1–5 min cold); a
-Containerfile change is detected via label hash and forces a rebuild.
-
-### macOS
-
-```bash
-brew install lima                              # one-time
-```
-
-Each agent has a Lima template at `scripts/lima/agentcap-<agent>.yaml`.
-First `agentcap run --agent <agent>` provisions the per-agent VM
-(~30 s cold boot) and reuses it on subsequent runs.
-
-## Quick start
-
-```bash
+# Both
 pip install -e .
+```
 
-# Pick a server. Three flavours, same proxy front-end.
-#
-#  (a) Inference Providers — zero infra, curated model catalogue,
-#      pay per token. Right default for casual capture.
-#      --upstream https://router.huggingface.co
-#
-#  (b) Inference Endpoints — dedicated GPU + specific model +
-#      scale-to-zero. Right for repeatable runs against one model.
-#
-#  (c) Local llama.cpp — full control over quant and chat template.
-#      Right for research that needs model-implementation detail.
+Pick a server. The two common ones (see [Server backends](#server-backends) for the full list):
+
+(a) Inference Providers `--upstream https://router.huggingface.co`
+(b) Local inference server (like llama.app) `--upstream http://127.0.0.1:8000`
+
+Example with a local `llama.app` server
+
+```bash
 ./scripts/start_llama_cpp_server.sh ggml-org/gemma-4-E4B-it-GGUF &
+```
 
-# Drive an agent through a corpus. Each run mints a fresh subdir
-# under .agentcap/ in the workspace ($AGENTCAP_WORKSPACE or cwd).
+Drive an agent through a corpus. Each run mints a fresh subdir under .agentcap/ in the workspace ($AGENTCAP_WORKSPACE or cwd).
+
+```bash
 agentcap run \
     --agent hermes \
     --model google/gemma-4-E4B-it \
     --upstream http://127.0.0.1:8000 \
     --tasks examples/transformers-coding-session/tasks.txt \
     --turns 4 --followup synthesized
+```
 
-# Run a second agent on the same corpus, side by side.
-agentcap run \
-    --agent goose \
-    --model google/gemma-4-E4B-it \
-    --upstream http://127.0.0.1:8000 \
-    --tasks examples/transformers-coding-session/tasks.txt \
-    --turns 4 --followup synthesized
+Note: For `agentcap run`, `--model` is required for all agents.
 
-# Browse what's captured. ``--long`` adds upstream + per-run counts.
+Browse what's captured. ``--long`` adds upstream + per-run counts.
+
+```bash
 agentcap ls
+```
 
-# Push everything. ``--push <owner>/<base>`` produces paired
-# captures + traces datasets and groups them in a Collection.
+Push everything. ``--push <owner>/<base>`` produces paired captures + traces
+datasets and groups them in a Collection.
+
+```bash
 agentcap export --all --push my-org/my-captures
+```
 
-# Or push selected runs only.
+Or push selected runs only.
+
+```bash
 agentcap export hermes-local-20260512-162345 \
     --push my-org/my-captures
+```
 
-# Browse captured requests (fzf-driven picker with body preview;
-# falls back to a plain table if fzf isn't on PATH).
+Browse captured requests
+
+```bash
 agentcap inspect                       # everything in the workspace
 agentcap inspect <run-id>              # one run only
 agentcap inspect <request-id>          # dump a specific body
+```
 
-# Re-issue a single captured request to an OpenAI-compatible target.
+Re-issue a single captured request to an OpenAI-compatible target.
+
+```bash
 agentcap replay <request-id> --target http://127.0.0.1:8000
-# Compose with the picker:
-agentcap replay $(agentcap inspect --rid) --target http://127.0.0.1:8000
 ```
 
 See [docs/tested-models-and-agents.md](docs/tested-models-and-agents.md)
 for which model + agent combinations have been validated end-to-end.
-
-For `agentcap run`, `--model` is required for all drivers.
 
 ## Vocabulary
 
@@ -278,8 +263,7 @@ The proxy is backend-agnostic. Pick whichever fits the use case:
 | backend | when to use |
 |---|---|
 | **Inference Providers** (`router.huggingface.co`) | demos, casual capture; zero infra; curated model catalogue; pay per token |
-| **Inference Endpoints** | dedicated GPU + specific model + scale-to-zero between corpus runs; OpenAI-compat by default |
-| **Local `llama.cpp` server** (`llama serve`) | full control over quant / chat template / sampler; required for research that depends on model-implementation detail (e.g. kv-cache-reuse splice work) |
+| **Local `llama.app` server** (`llama serve`) | full control over quant / chat template / sampler; required for research that depends on model-implementation detail (e.g. kv-cache-reuse splice work) |
 | `transformers serve` | works for small models, awkward for big ones at long context |
 
 For which (backend, model, agent) combinations have been validated

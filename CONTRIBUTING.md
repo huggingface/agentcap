@@ -44,8 +44,8 @@ relitigated.
 If you exercise a new `(agent, model)` tuple end-to-end, a PR
 extending [docs/tested-models-and-agents.md](docs/tested-models-and-agents.md)
 with the result is the most useful contribution. Include the model
-quant (for GGUFs), the backend (llama.cpp / Inference Endpoints /
-Inference Providers), and any agent-specific gotchas that surfaced.
+quant (for GGUFs), the backend (llama.app / Inference Providers), and
+any agent-specific gotchas that surfaced.
 
 ## Filing issues
 
