@@ -28,12 +28,12 @@ jobs:
         # assertions.
         env:
           TRUFFLEHOG_VERSION: 3.95.3
+          TRUFFLEHOG_SHA256: 5d836eae522540a32ca0f1a1e00efd4c3153a52462466a4b4008fac1e6c1a548
         run: |
           set -euo pipefail
           cd /tmp
           curl -sSfL -O "https://github.com/trufflesecurity/trufflehog/releases/download/v${TRUFFLEHOG_VERSION}/trufflehog_${TRUFFLEHOG_VERSION}_linux_amd64.tar.gz"
-          curl -sSfL -O "https://github.com/trufflesecurity/trufflehog/releases/download/v${TRUFFLEHOG_VERSION}/trufflehog_${TRUFFLEHOG_VERSION}_checksums.txt"
-          sha256sum --ignore-missing -c "trufflehog_${TRUFFLEHOG_VERSION}_checksums.txt"
+          echo "${TRUFFLEHOG_SHA256}  trufflehog_${TRUFFLEHOG_VERSION}_linux_amd64.tar.gz" | sha256sum -c -
           mkdir -p "$HOME/.local/bin"
           tar -xzf "trufflehog_${TRUFFLEHOG_VERSION}_linux_amd64.tar.gz" -C "$HOME/.local/bin" trufflehog
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"

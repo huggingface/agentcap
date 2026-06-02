@@ -25,7 +25,7 @@ The loop:
   lima on macOS). Multi-turn follow-ups, optional skill injection.
 - **Capture every wire interaction** — an in-process OpenAI-compat
   proxy sits between the agent and any backend that speaks
-  `/v1/chat/completions`(llama.app, Inference Providers, vLLM).
+  `/v1/chat/completions` (llama.app, Inference Providers, vLLM).
   Request bodies are persisted as parsed JSON (the
   object, not the original byte sequence); streamed responses keep
   the raw SSE bytes. No tokenisation, no rendering — just persist
@@ -60,7 +60,7 @@ echo 'kernel.apparmor_restrict_unprivileged_userns=0' \
 pip install -e .
 ```
 
-Pick a server. Two flavours, same proxy front-end.
+Pick a server. The two common ones (see [Server backends](#server-backends) for the full list):
 
 (a) Inference Providers `--upstream https://router.huggingface.co`
 (b) Local inference server (like llama.app) `--upstream http://127.0.0.1:8000`
