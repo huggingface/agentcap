@@ -9,7 +9,7 @@ the model card or agent revs.
 | `gemma-4-E4B-it`               | ✅ | ✅ | ✅ | ✅ |
 | `gemma-4-26B-A4B-it`           | ✅ | ✅ | ✅ | ✅ |
 | `Qwen3.6-35B-A3B`              | ✅ | ✅ | ✅ | ✅ |
-| `Qwen3-Coder-30B-A3B-Instruct` | — | ✅ | ✅ | — |
+| `Qwen3-Coder-30B-A3B-Instruct` | ✅ | ✅ | ✅ | ✅ |
 
 `—` = not exercised. Captures live in the
 [`transformers-coding-session`](https://huggingface.co/collections/dacorvo/transformers-coding-session-6a1de25f14ed2323176e6c39)
