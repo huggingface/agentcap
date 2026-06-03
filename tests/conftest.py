@@ -141,6 +141,14 @@ def live_llama_url():
             "podman not on PATH; install with brew install podman "
             "(macOS) or apt install podman (Linux)."
         )
+    # macOS: bring the podman machine up before any ``podman run`` so
+    # a stopped/uninitialised machine surfaces as a clear skip with
+    # an install hint, not a generic ``podman run`` failure.
+    from agentcap.sandbox.podman_provisioning import ensure_machine_running
+    try:
+        ensure_machine_running(log=_log)
+    except RuntimeError as exc:
+        pytest.skip(str(exc))
     gguf = os.environ.get("AGENTCAP_TEST_GGUF") or _fetch_default_gguf()
     if not gguf:
         pytest.skip(
