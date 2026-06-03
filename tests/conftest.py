@@ -183,7 +183,9 @@ def live_llama_url():
         f"spawning llama container {name} on :{port} "
         f"(image={image}, gguf={gguf_name}, ctx={ctx})"
     )
-    r = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+    # 10 min covers a cold-cache image pull (~1 GB) on a slow CI
+    # runner plus the actual ``podman run -d`` setup.
+    r = subprocess.run(argv, capture_output=True, text=True, timeout=600)
     if r.returncode != 0:
         # ``podman run`` failing once the host has podman is a real
         # problem (bad flags, pull failure, permissions), not a missing
