@@ -134,10 +134,10 @@ def _autodetect_backend() -> str:
     if system == "Linux":
         return "bwrap"
     if system == "Darwin":
-        return "lima"
+        return "podman"
     raise NotImplementedError(
-        f"agentcap sandboxing is only supported on Linux (bwrap) and "
-        f"macOS (lima); host is {system!r}."
+        f"agentcap sandboxing is only supported on Linux and macOS; "
+        f"host is {system!r}."
     )
 
 
