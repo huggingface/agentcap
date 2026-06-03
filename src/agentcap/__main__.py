@@ -24,10 +24,22 @@ def _is_hf_router_upstream(upstream: str) -> bool:
     return host == "router.huggingface.co"
 
 
-def _is_lima_host() -> bool:
-    import platform
-    import shutil
-    return platform.system() == "Darwin" and shutil.which("limactl") is not None
+def _proxy_host_pair() -> tuple[str, str]:
+    """Return (bind_host, agent_host) for the in-process capture proxy.
+
+    Bwrap shares the host network namespace, so ``127.0.0.1`` works on
+    both sides. Lima and podman put the agent on a separate netns
+    (Lima VM, podman machine VM, or rootless slirp4netns) where the
+    host's ``127.0.0.1`` isn't reachable; bind on ``0.0.0.0`` and tell
+    the agent to dial the backend-specific host alias.
+    """
+    from .sandbox import _autodetect_backend
+    backend = _autodetect_backend()
+    if backend == "lima":
+        return "0.0.0.0", "host.lima.internal"
+    if backend == "podman":
+        return "0.0.0.0", "host.containers.internal"
+    return "127.0.0.1", "127.0.0.1"
 
 
 def _read_hf_token_cache() -> str | None:
@@ -483,12 +495,7 @@ def run_cmd(
     def _on_event(event: str, **kw):
         click.echo(f"  [{event}] " + " ".join(f"{k}={v}" for k, v in kw.items()), err=True)
 
-    # Lima VM sees 127.0.0.1 as its own loopback — bind on all ifs and
-    # advertise the host bridge instead.
-    bind_host, agent_host = (
-        ("0.0.0.0", "host.lima.internal") if _is_lima_host()
-        else ("127.0.0.1", "127.0.0.1")
-    )
+    bind_host, agent_host = _proxy_host_pair()
     with serve_in_thread(upstream, captures, host=bind_host) as proxy:
         proxy_url = f"http://{agent_host}:{proxy.port}/v1"
         click.echo(f"  [proxy] {proxy_url}", err=True)
