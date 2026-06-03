@@ -20,12 +20,12 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - name: Install system deps (bwrap + buildah)
-        # Required by ``agentcap.sandbox.bwrap``. Both ship in
-        # Ubuntu's default apt sources.
+      - name: Install system deps (podman)
+        # Required by ``agentcap.sandbox.podman``. Ships in Ubuntu's
+        # default apt sources; rootless mode uses the runner user.
         run: |
           sudo apt-get update
-          sudo apt-get install -y bubblewrap buildah
+          sudo apt-get install -y podman
       - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
@@ -66,19 +66,17 @@ jobs:
           key: hf-hub-gguf-${{ hashFiles('tests/conftest.py') }}
           restore-keys: |
             hf-hub-gguf-
-      - name: Cache buildah images
+      - name: Cache sandbox images
         # Per-agent sandbox images (hermes is the heaviest at ~900 MB)
-        # are built on first use and stamped with a hash of their
-        # Containerfile + build-context dir. Caching the rootless
-        # buildah storage between runs lets ``ensure_image`` short-
-        # circuit on hash match. Key invalidates whenever any
-        # Containerfile or per-agent script changes.
+        # are built on first use and stamped with a hash label. Caching
+        # the rootless containers/storage between runs lets
+        # ``ensure_image`` short-circuit on hash match.
         uses: actions/cache@v5
         with:
           path: ~/.local/share/containers
-          key: buildah-images-${{ hashFiles('containers/**') }}
+          key: sandbox-images-${{ hashFiles('containers/**') }}
           restore-keys: |
-            buildah-images-
+            sandbox-images-
       - name: Pre-build sandbox images
         # Idempotent build of every per-agent image. On a cache hit
         # this is a no-op (hash match in ``ensure_image``); on a miss

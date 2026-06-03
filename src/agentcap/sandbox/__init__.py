@@ -131,9 +131,7 @@ def _autodetect_backend() -> str:
     if env_choice:
         return env_choice
     system = platform.system()
-    if system == "Linux":
-        return "bwrap"
-    if system == "Darwin":
+    if system in ("Linux", "Darwin"):
         return "podman"
     raise NotImplementedError(
         f"agentcap sandboxing is only supported on Linux and macOS; "
