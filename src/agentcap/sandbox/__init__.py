@@ -83,10 +83,11 @@ def require_sandbox_or_die(
     Triggers an image build on first use."""
     system = platform.system()
     if system not in ("Linux", "Darwin"):
-        raise NotImplementedError(
-            f"agentcap sandboxing is only supported on Linux and macOS; "
-            f"host is {system!r}."
+        sys.stderr.write(
+            f"{command}: agentcap sandboxing is only supported on "
+            f"Linux and macOS; host is {system!r}.\n"
         )
+        sys.exit(2)
     if not shutil.which("podman"):
         sys.stderr.write(
             f"{command}: podman is required.\n"
