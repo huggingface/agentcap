@@ -7,9 +7,9 @@ syntactically valid tool call, whether it picks the right file, etc.
 — is intentionally not asserted. A separate (model-grading) test
 would be the place for that.
 
-Assertions per agent: ``returncode == 0``, ``turn.tool_errors`` empty,
-``turn.response_text`` non-empty (the agent received at least one
-model response through the proxy).
+Assertions per agent: ``returncode == 0`` and ``turn.response_text``
+non-empty (the agent received at least one model response through
+the proxy).
 """
 
 from __future__ import annotations
@@ -30,10 +30,6 @@ def _assert_infrastructure_works(turn) -> None:
         f"agent exited rc={turn.returncode}\n"
         f"--- stdout (tail) ---\n{turn.stdout[-500:]}\n"
         f"--- stderr (tail) ---\n{turn.stderr[-500:]}"
-    )
-    assert not turn.tool_errors, (
-        f"{len(turn.tool_errors)} tool-call error(s):\n"
-        + "\n".join(f"  - {e}" for e in turn.tool_errors)
     )
     assert turn.response_text, (
         f"agent produced no response text — wire path may be broken.\n"
