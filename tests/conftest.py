@@ -4,9 +4,8 @@ Live tests run when prereqs are present, skip otherwise. Prereqs:
 
   - Agent binary present in the per-agent sandbox
     (``agentcap run --agent <name>`` once provisions it).
-  - A ``/v1`` endpoint reachable — set ``AGENTCAP_TEST_LLM_URL`` or
-    have ``llama`` (with the ``serve`` subcommand) executable on PATH
-    so the fixture spawns one. Install via:
+  - ``llama`` (with the ``serve`` subcommand) on PATH so the
+    fixture can spawn it. Install via
     ``curl -fsSL https://llama.app/install.sh | sh``.
 """
 
@@ -117,15 +116,9 @@ def live_llama_url():
     """Host-side server root of the llama backend (no ``/v1`` suffix).
 
     For tests that spawn their own proxy on top and need a directly-
-    reachable upstream. Honors ``AGENTCAP_TEST_LLM_URL`` (with or
-    without the ``/v1`` tail), reuses an existing ``llama serve`` on
+    reachable upstream. Reuses an existing ``llama serve`` on
     8000/8080, or spawns one with the bundled GGUF.
     """
-    override = os.environ.get("AGENTCAP_TEST_LLM_URL")
-    if override:
-        yield override[:-3] if override.endswith("/v1") else override
-        return
-
     for probe_port in (8000, 8080):
         try:
             with urlopen(
@@ -142,9 +135,8 @@ def live_llama_url():
     if not llama:
         pytest.skip(
             "llama not on PATH; install it with `curl -fsSL "
-            "https://llama.app/install.sh | sh`, set "
-            "AGENTCAP_TEST_LLAMA_BIN, OR set AGENTCAP_TEST_LLM_URL "
-            "to point at an existing /v1 endpoint."
+            "https://llama.app/install.sh | sh` or set "
+            "AGENTCAP_TEST_LLAMA_BIN."
         )
     gguf = os.environ.get("AGENTCAP_TEST_GGUF") or _fetch_default_gguf()
     if not gguf:
@@ -203,14 +195,8 @@ def live_proxy_base_url(live_llama_url):
     """Agent-side ``/v1`` URL of the in-process capture proxy.
 
     For tests that exercise the agent ↔ proxy ↔ llama path from
-    outside. When ``AGENTCAP_TEST_LLM_URL`` is set the caller is
-    presumed to own capture wiring and the proxy is not spawned —
-    the override URL is yielded directly.
+    outside.
     """
-    if os.environ.get("AGENTCAP_TEST_LLM_URL"):
-        yield f"{live_llama_url}/v1"
-        return
-
     import tempfile
 
     from agentcap.proxy import serve_in_thread

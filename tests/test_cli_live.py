@@ -1,10 +1,9 @@
 """End-to-end live test for ``agentcap run``.
 
 Exercises the full CLI → orchestrator → sandbox → real agent path
-against a real OpenAI-compat ``/v1`` server (set
-``AGENTCAP_TEST_LLM_URL`` or have ``llama`` on PATH so the fixture
-runs ``llama serve``). Replaces the heavily-mocked plumbing tests
-previously in ``test_cli.py``:
+against a real OpenAI-compat ``/v1`` server (have ``llama`` on PATH
+so the fixture runs ``llama serve``). Replaces the heavily-mocked
+plumbing tests previously in ``test_cli.py``:
 ``test_run_synthesized_defaults_from_upstream_and_model`` and
 ``test_run_invokes_orchestrator_under_proxy``.
 
