@@ -62,9 +62,8 @@ explicitly first.
    entirely via the Sandbox protocol (`sandbox.mkdtemp` then `sh -c
    "cp -aL ~/.hermes/. <overlay>"` then `rm -rf` of
    `_HERMES_FRESH_PER_RUN` entries then `sandbox.write_text` of the
-   rewritten `config.yaml`). On Linux/bwrap the sandbox-side
-   `~/.hermes/` is the host's; on Lima it's the VM-provisioned
-   home inside the `agentcap-hermes` VM. Either way the user's
+   rewritten `config.yaml`). The sandbox-side `~/.hermes/` lives
+   inside the per-run podman container's filesystem; the user's
    actual home is never touched.
 
    - **Snapshot**: identity content (`skills/`, `SOUL.md`,
@@ -178,11 +177,10 @@ explicitly first.
 3. **vLLM backend smoke test.** llama.cpp is the validated default;
    verify the proxy stays transparent against vLLM too.
 
-4. **Corpus-specific VM mounts.** With the default `mounts: []`,
-   corpora that need specific host content inside the VM — e.g.
-   `transformers-coding-session`'s transformers source tree — must
-   either ship a corpus-specific Lima template variant (mounting
-   that path read-only) or use `limactl edit <vm>` to amend the
-   provisioned VM and restart it. Tokens / per-run secrets (e.g.
+4. **Corpus-specific mounts.** Corpora that need host content inside
+   the container — e.g. `transformers-coding-session`'s transformers
+   source tree — pass it through as `--sandbox <host-path>` (writable)
+   or `--skills <host-path>` (read-only); the driver hands those to
+   ``PodmanSandbox`` as bind mounts. Tokens / per-run secrets (e.g.
    `HF_TOKEN`) flow through `sandbox.run(env={…})` →
-   `limactl shell -- env KEY=VAL …`, no mount required.
+   `podman run -e KEY=VAL …`, no mount required.

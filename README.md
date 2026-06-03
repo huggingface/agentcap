@@ -21,8 +21,8 @@ The loop:
 
 - **Run agents through a corpus** — `agentcap run` drives one of the
   registered coding-agent CLIs (`hermes`, `opencode`, `goose`, `pi`)
-  through a `tasks.txt`, inside a per-agent sandbox (bwrap on Linux,
-  lima on macOS). Multi-turn follow-ups, optional skill injection.
+  through a `tasks.txt`, inside a per-agent podman container.
+  Multi-turn follow-ups, optional skill injection.
 - **Capture every wire interaction** — an in-process OpenAI-compat
   proxy sits between the agent and any backend that speaks
   `/v1/chat/completions` (llama.app, Inference Providers, vLLM).
@@ -43,18 +43,16 @@ The loop:
 
 ## Quick start
 
-Install the sandbox prereqs (one-time) and agentcap itself.
+Install the sandbox prereq (one-time) and agentcap itself.
 
 ```bash
 # macOS
-brew install lima
+brew install podman
+podman machine init --memory 8192    # one-time; needs ≥4 GB for the test GGUF
+podman machine start
 
 # Linux
-sudo apt install -y bubblewrap buildah
-# Ubuntu 24.04+ only: unprivileged user namespaces for bwrap.
-sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-echo 'kernel.apparmor_restrict_unprivileged_userns=0' \
-    | sudo tee /etc/sysctl.d/60-agentcap-bwrap.conf
+sudo apt install -y podman
 
 # Both
 pip install -e .

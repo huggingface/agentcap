@@ -19,8 +19,8 @@ orchestrator that bind-mounts host paths into a sandbox. Issues we
 care about include:
 
 - **Proxy**: request smuggling, header injection, capture bypass.
-- **Sandbox**: agent escape from the bwrap/Lima boundary into the
-  host filesystem or network.
+- **Sandbox**: agent escape from the podman container boundary into
+  the host filesystem or network.
 - **Export**: credential leakage into captured `.request.json` /
   `.response.json` files or pushed parquets. (Authorization headers
   are deliberately not persisted; report any path that breaks this.)
