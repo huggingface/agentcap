@@ -219,21 +219,6 @@ def live_model() -> str:
     return os.environ.get("AGENTCAP_TEST_MODEL", _DEFAULT_MODEL_ALIAS)
 
 
-def docstring_prompt(proj: str) -> str:
-    # Hermes's edit/patch tools resolve paths literally, not against
-    # $PWD — so a bare ``hello.py`` makes small models guess (and
-    # Qwen3-1.7B guesses ``/root/hello.py`` ≈ $HOME). Pass the
-    # sandbox-side absolute path so the model has nothing to fill in.
-    return (
-        f"Add a one-line docstring to the hello function in "
-        f"{proj}/hello.py describing what it does. "
-        f"Use your edit tool. Then stop."
-    )
-
-
-_HELLO_PY = 'def hello():\n    print("Hello, world!")\n'
-
-
 @pytest.fixture(scope="session")
 def sandbox_for(
     agentcap_image_for, live_proxy_base_url, live_model,
@@ -275,17 +260,12 @@ def sandbox_for(
 
 @pytest.fixture
 def agent_proj_for(sandbox_for):
-    """Factory: ``agent_proj_for("hermes")`` ensures the
-    ``hermes`` binary is installed in the sandbox, then mints a
-    sandbox-side temp dir seeded with ``hello.py`` for the
-    docstring task. Returns ``(sandbox, proj_path)``.
+    """Factory: ``agent_proj_for("hermes")`` returns
+    ``(sandbox, proj_path)``. The sandbox is probed for the agent
+    binary (test skips if it's missing) and a fresh empty project
+    dir is minted to serve as ``cwd``.
 
-    Cleanup: ``proj_path`` is removed at the end of the test via
-    ``sandbox.rmtree``.
-
-    Skips (with ``pytest.skip``) when the agent binary isn't on the
-    sandbox's PATH — capture rigs should provision the per-agent VM
-    or apt-install the agent before running live tests.
+    The dir is removed at the end of the test.
     """
     created: list[tuple[object, str]] = []
 
@@ -297,12 +277,10 @@ def agent_proj_for(sandbox_for):
         )
         if r.returncode != 0:
             pytest.skip(
-                f"{agent!r} is not on the sandbox's PATH; provision "
-                f"the agentcap-{agent} VM (or install on the Linux "
-                f"host) before running live tests."
+                f"{agent!r} is not on the sandbox's PATH; build the "
+                f"agentcap-{agent} image before running live tests."
             )
         proj = sb.mkdtemp(prefix=f"agentcap-{agent}-proj-")
-        sb.write_text(f"{proj}/hello.py", _HELLO_PY)
         _log(f"{agent} project: {proj}")
         created.append((sb, proj))
         return sb, proj
@@ -310,13 +288,6 @@ def agent_proj_for(sandbox_for):
     yield _build
     for sb, proj in created:
         sb.rmtree(proj)
-
-
-def reset_hello_py(sandbox, proj: str) -> None:
-    """Reset the project's ``hello.py`` to its starting content —
-    used by the retry helper in test_drivers_live so each attempt
-    sees a clean slate."""
-    sandbox.write_text(f"{proj}/hello.py", _HELLO_PY)
 
 
 @pytest.fixture
