@@ -7,8 +7,6 @@ podman is wired into the test fixtures (commit 4).
 
 from __future__ import annotations
 
-import pytest
-
 from agentcap.sandbox import Sandbox
 from agentcap.sandbox.podman import PodmanSandbox, build_command
 
