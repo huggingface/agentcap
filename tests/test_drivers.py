@@ -4,7 +4,8 @@ These cover the *parser*, *config-builder*, and *overlay-scaffolding*
 helpers — none of which shell out to a real agent. Live integration
 tests for each driver (which actually invoke the agent CLI against a
 running model server) live in ``test_drivers_live.py`` and are gated
-on the agent binary being on PATH and ``llama serve`` available.
+on the agent binary being available in the sandbox image and on
+``podman`` being on the host PATH.
 """
 
 from __future__ import annotations

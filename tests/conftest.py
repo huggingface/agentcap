@@ -4,9 +4,8 @@ Live tests run when prereqs are present, skip otherwise. Prereqs:
 
   - Agent binary present in the per-agent sandbox
     (``agentcap run --agent <name>`` once provisions it).
-  - ``llama`` (with the ``serve`` subcommand) on PATH so the
-    fixture can spawn it. Install via
-    ``curl -fsSL https://llama.app/install.sh | sh``.
+  - ``podman`` on PATH (the fixture pulls and runs the official
+    ``ghcr.io/ggml-org/llama.cpp`` server image).
 """
 
 from __future__ import annotations
