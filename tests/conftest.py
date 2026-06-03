@@ -46,6 +46,12 @@ _DEFAULT_GGUF_REPO = "Qwen/Qwen3-1.7B-GGUF"
 _DEFAULT_GGUF_FILE = "Qwen3-1.7B-Q8_0.gguf"
 _DEFAULT_MODEL_ALIAS = "Qwen3-1.7B"
 
+# Official llama.cpp server image, version-pinned per llama.cpp
+# commit. Override via ``AGENTCAP_TEST_LLAMA_IMAGE`` to test a
+# different release. CPU-only; the GPU variants are tagged
+# ``server-cuda13-*`` / ``server-vulkan-*``.
+_DEFAULT_LLAMA_IMAGE = "ghcr.io/ggml-org/llama.cpp:server-b9487"
+
 
 def _fetch_default_gguf() -> str | None:
     """Pull the default GGUF from HF Hub. Cached in the HF default
@@ -117,7 +123,7 @@ def live_llama_url():
 
     For tests that spawn their own proxy on top and need a directly-
     reachable upstream. Reuses an existing ``llama serve`` on
-    8000/8080, or spawns one with the bundled GGUF.
+    8000/8080, or spawns one as a podman container.
     """
     for probe_port in (8000, 8080):
         try:
@@ -131,12 +137,10 @@ def live_llama_url():
         except Exception:
             pass
 
-    llama = os.environ.get("AGENTCAP_TEST_LLAMA_BIN") or shutil.which("llama")
-    if not llama:
+    if not shutil.which("podman"):
         pytest.skip(
-            "llama not on PATH; install it with `curl -fsSL "
-            "https://llama.app/install.sh | sh` or set "
-            "AGENTCAP_TEST_LLAMA_BIN."
+            "podman not on PATH; install with brew install podman "
+            "(macOS) or apt install podman (Linux)."
         )
     gguf = os.environ.get("AGENTCAP_TEST_GGUF") or _fetch_default_gguf()
     if not gguf:
@@ -144,50 +148,50 @@ def live_llama_url():
             "couldn't obtain a GGUF; HF fetch failed and no "
             "AGENTCAP_TEST_GGUF override set."
         )
+    # HF cache stores GGUFs as symlinks into ``blobs/``; the container
+    # needs the realpath's parent dir bound in.
+    real_gguf = Path(gguf).resolve()
+    gguf_dir = real_gguf.parent
+    gguf_name = real_gguf.name
 
+    image = os.environ.get(
+        "AGENTCAP_TEST_LLAMA_IMAGE", _DEFAULT_LLAMA_IMAGE,
+    )
     port = _free_port()
     ctx = os.environ.get("AGENTCAP_TEST_CTX_SIZE", "8192")
-    ngl = os.environ.get("AGENTCAP_TEST_NGL", "999")
+    name = f"agentcap-llama-{os.getpid()}"
     argv = [
-        llama, "serve",
-        "--model", gguf,
-        # 0.0.0.0 so the podman container reaches the host via
-        # host.containers.internal; 127.0.0.1 would be loopback-only.
+        "podman", "run", "--rm", "-d", "--name", name,
+        "-p", f"127.0.0.1:{port}:8080",
+        "--mount", f"type=bind,src={gguf_dir},dst=/models,ro",
+        image,
+        "--model", f"/models/{gguf_name}",
         "--host", "0.0.0.0",
-        "--port", str(port),
+        "--port", "8080",
         "--ctx-size", ctx,
-        "--reasoning", "off",
+        "--reasoning-format", "none",
         "--jinja",
-        "--n-gpu-layers", ngl,
-        # ``--fit off`` skips llama.cpp's ``common_params_fit_impl``
-        # auto parameter-fitting step. We pass ``--n-gpu-layers``
-        # explicitly so the auto-fit is redundant, and recent
-        # llama.cpp builds crash inside the fit step on some models.
-        "--fit", "off",
     ]
-    log_path = "/tmp/agentcap-pytest-llama.log"
-    log = open(log_path, "w")
     _log(
-        f"spawning llama serve on :{port} "
-        f"(gguf={Path(gguf).name}, ctx={ctx}, ngl={ngl}); "
-        f"server log -> {log_path}"
+        f"spawning llama container {name} on :{port} "
+        f"(image={image}, gguf={gguf_name}, ctx={ctx})"
     )
-    proc = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT)
+    r = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+    if r.returncode != 0:
+        pytest.skip(f"podman run failed: {r.stderr.strip()}")
     try:
         _wait_ready(
             f"http://127.0.0.1:{port}/v1/models",
             timeout=180,
             log=_log,
         )
-        _log(f"llama serve ready at :{port}")
+        _log(f"llama container ready at :{port}")
         yield f"http://127.0.0.1:{port}"
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=30)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-        log.close()
+        subprocess.run(
+            ["podman", "rm", "-f", name],
+            capture_output=True, text=True, timeout=30,
+        )
 
 
 @pytest.fixture(scope="session")
