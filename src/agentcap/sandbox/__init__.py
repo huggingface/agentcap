@@ -150,17 +150,13 @@ def require_sandbox_or_die(
     readonly_paths: list[Path] | None = None,
     writable_paths: list[Path] | None = None,
 ) -> "Sandbox":
-    """Return a real sandbox for the current host, or exit 2 with an
-    install hint. Triggers an image / VM build on first use.
-
-    On Linux a missing ``bwrap`` or ``buildah`` causes exit 2 with a
-    one-line ``apt install`` hint. On macOS a missing ``limactl``
-    likewise.
-    """
+    """Return a real sandbox for the resolved backend, or exit 2 with
+    an install hint. Triggers an image / VM build on first use."""
     import sys
 
-    system = platform.system()
-    if system == "Linux":
+    backend = _autodetect_backend()
+
+    if backend == "bwrap":
         missing = [
             tool for tool in ("bwrap", "buildah") if not shutil.which(tool)
         ]
@@ -176,11 +172,12 @@ def require_sandbox_or_die(
         from .image_provisioning import ensure_image
         ensure_image(agent, log=log)
         return get_sandbox(
-            agent=agent, env=env,
+            agent=agent, prefer=backend, env=env,
             readonly_paths=readonly_paths,
             writable_paths=writable_paths,
         )
-    if system == "Darwin":
+
+    if backend == "lima":
         if not shutil.which("limactl"):
             sys.stderr.write(
                 f"{command}: Lima is required on macOS for agent sandboxing.\n"
@@ -194,13 +191,34 @@ def require_sandbox_or_die(
             writable_paths=writable_paths,
         )
         return get_sandbox(
-            agent=agent, env=env,
+            agent=agent, prefer=backend, env=env,
             readonly_paths=readonly_paths,
             writable_paths=writable_paths,
         )
+
+    if backend == "podman":
+        if not shutil.which("podman"):
+            sys.stderr.write(
+                f"{command}: podman is required for the podman backend.\n"
+                "    Install with: brew install podman (macOS) "
+                "or apt install podman (Linux)\n"
+            )
+            sys.exit(2)
+        from .podman_provisioning import ensure_image, ensure_machine_running
+        try:
+            ensure_machine_running(log=log)
+        except RuntimeError as exc:
+            sys.stderr.write(f"{command}: {exc}\n")
+            sys.exit(2)
+        ensure_image(agent, log=log)
+        return get_sandbox(
+            agent=agent, prefer=backend, env=env,
+            readonly_paths=readonly_paths,
+            writable_paths=writable_paths,
+        )
+
     raise NotImplementedError(
-        f"agentcap sandboxing is only supported on Linux (bwrap) and "
-        f"macOS (lima); host is {system!r}."
+        f"unknown sandbox backend {backend!r}"
     )
 
 
