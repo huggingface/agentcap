@@ -14,6 +14,7 @@ image/VM, never on the host.
 
 from __future__ import annotations
 
+import os
 import platform
 import shutil
 import subprocess
@@ -91,6 +92,7 @@ def get_sandbox(
     from .bwrap import BwrapSandbox
     from .image_provisioning import image_tag
     from .lima import LimaSandbox
+    from .podman import PodmanSandbox
 
     backend = prefer or _autodetect_backend()
 
@@ -108,12 +110,26 @@ def get_sandbox(
             writable_paths=writable_paths,
         )
 
+    if backend == "podman":
+        return PodmanSandbox(
+            image=f"localhost/agentcap-{agent}:latest", env=env,
+            readonly_paths=readonly_paths,
+            writable_paths=writable_paths,
+        )
+
     raise ValueError(
-        f"unknown sandbox backend {backend!r}; expected 'bwrap' or 'lima'"
+        f"unknown sandbox backend {backend!r}; "
+        f"expected 'bwrap', 'lima', or 'podman'"
     )
 
 
 def _autodetect_backend() -> str:
+    """``AGENTCAP_SANDBOX`` env var wins over OS detection so users can
+    switch backends without code changes. ``prefer=`` on
+    :func:`get_sandbox` wins over both — it's the test-override knob."""
+    env_choice = os.environ.get("AGENTCAP_SANDBOX")
+    if env_choice:
+        return env_choice
     system = platform.system()
     if system == "Linux":
         return "bwrap"

@@ -36,6 +36,31 @@ def test_get_sandbox_explicit_override_lima():
     assert sb.vm == "agentcap-goose"
 
 
+def test_get_sandbox_explicit_override_podman():
+    """Forcing podman returns a PodmanSandbox keyed on the canonical
+    per-agent image ref."""
+    from agentcap.sandbox.podman import PodmanSandbox
+    sb = get_sandbox(agent="goose", prefer="podman")
+    assert isinstance(sb, PodmanSandbox)
+    assert sb.image == "localhost/agentcap-goose:latest"
+
+
+def test_get_sandbox_env_var_selects_podman(monkeypatch):
+    """``AGENTCAP_SANDBOX=podman`` overrides OS autodetect."""
+    from agentcap.sandbox.podman import PodmanSandbox
+    monkeypatch.setenv("AGENTCAP_SANDBOX", "podman")
+    sb = get_sandbox(agent="goose")
+    assert isinstance(sb, PodmanSandbox)
+
+
+def test_get_sandbox_prefer_wins_over_env(monkeypatch):
+    """``prefer=`` is the test-override knob — it wins over the user-
+    facing ``AGENTCAP_SANDBOX`` env var."""
+    monkeypatch.setenv("AGENTCAP_SANDBOX", "podman")
+    sb = get_sandbox(agent="goose", prefer="lima")
+    assert isinstance(sb, LimaSandbox)
+
+
 def test_get_sandbox_rejects_unknown():
     with pytest.raises(ValueError, match="unknown sandbox backend"):
         get_sandbox(agent="goose", prefer="firejail")
