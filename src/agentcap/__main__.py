@@ -26,16 +26,10 @@ def _is_hf_router_upstream(upstream: str) -> bool:
 
 def _proxy_host_pair() -> tuple[str, str]:
     """Return (bind_host, agent_host) for the in-process capture proxy.
-
-    Bwrap shares the host network namespace, so ``127.0.0.1`` works on
-    both sides. Podman puts the agent on a separate netns (podman
-    machine VM or rootless slirp4netns) where the host's ``127.0.0.1``
-    isn't reachable; bind on ``0.0.0.0`` and dial ``host.containers.internal``.
-    """
-    from .sandbox import _autodetect_backend
-    if _autodetect_backend() == "podman":
-        return "0.0.0.0", "host.containers.internal"
-    return "127.0.0.1", "127.0.0.1"
+    Podman isolates the agent in its own netns (podman machine VM or
+    rootless slirp4netns); the host is reachable as
+    ``host.containers.internal``."""
+    return "0.0.0.0", "host.containers.internal"
 
 
 def _read_hf_token_cache() -> str | None:
@@ -474,9 +468,8 @@ def run_cmd(
         "tasks": [],
     }, indent=2))
 
-    # Resolve --sandbox up front: it joins the per-VM mount set
-    # alongside --skills (RO) and the traces dir (RW), so the Lima
-    # backend can configure all three at provision time.
+    # Resolve --sandbox up front: it joins the bind-mount set
+    # alongside --skills (RO) and the traces dir (RW).
     if sandbox_dir is not None:
         sandbox_cwd = str(Path(sandbox_dir).resolve())
     else:

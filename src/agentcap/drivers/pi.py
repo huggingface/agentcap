@@ -10,9 +10,9 @@ the model id at the CLI.
 Native sessions: pi tracks the most recent session under
 ``PI_CODING_AGENT_SESSION_DIR`` and resumes via ``--continue``. The
 driver lets pi mint its own UUID on ``start`` (no flag), then passes
-``--continue`` on ``resume``. Session state lives in the buildah
-container's OverlayFS upper layer — survives across turns within
-one ``agentcap run``, discarded when the sandbox closes.
+``--continue`` on ``resume``. The image's init script symlinks
+``PI_CODING_AGENT_SESSION_DIR`` at the bind-mounted ``traces/`` dir
+so session state survives ``podman run --rm`` boundaries.
 """
 
 from __future__ import annotations
@@ -98,8 +98,7 @@ class PiDriver(AgentDriver):
         self.extra_args = list(extra_args)
 
     def close(self) -> None:
-        """No-op. Per-run state lives in the buildah container's
-        OverlayFS upper layer."""
+        """No-op."""
 
     def _build_argv(
         self,

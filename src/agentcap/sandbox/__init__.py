@@ -1,15 +1,9 @@
 """Filesystem / network sandbox for capture-run subprocesses.
 
-Backends:
-
-  * podman (default on Linux and macOS) — :class:`PodmanSandbox`,
-    one container per ``run()``, built from
-    ``containers/agentcap-<agent>.Containerfile``.
-  * bwrap (Linux only, opt-in via ``AGENTCAP_SANDBOX=bwrap``) —
-    :class:`BwrapSandbox`, namespace-only sandbox on the host kernel.
-
-``agentcap run`` requires a real sandbox on every supported host —
-the agent CLI lives inside the per-agent image, never on the host.
+Single backend: podman, on both Linux and macOS. The agent CLI lives
+inside the per-agent image (``containers/agentcap-<agent>.Containerfile``),
+never on the host. Each ``run()`` is an ephemeral
+``podman run --rm`` against that image.
 """
 
 from __future__ import annotations
@@ -66,26 +60,14 @@ def get_sandbox(
     readonly_paths: list[Path] | None = None,
     writable_paths: list[Path] | None = None,
 ) -> Sandbox:
-    """Pick the sandbox backend for the current host. Pure: does not
-    build images.
+    """Return a sandbox handle. Pure: does not build images.
 
-    ``prefer`` forces a specific backend (``"bwrap"`` or ``"podman"``);
-    useful for tests on a host where autodetect would pick the other.
     Callers must call :func:`require_sandbox_or_die` to provision the
     runtime before using the returned sandbox.
     """
-    from .bwrap import BwrapSandbox
-    from .image_provisioning import image_tag
     from .podman import PodmanSandbox
 
     backend = prefer or _autodetect_backend()
-
-    if backend == "bwrap":
-        return BwrapSandbox(
-            image=image_tag(agent), env=env,
-            readonly_paths=readonly_paths,
-            writable_paths=writable_paths,
-        )
 
     if backend == "podman":
         return PodmanSandbox(
@@ -95,8 +77,7 @@ def get_sandbox(
         )
 
     raise ValueError(
-        f"unknown sandbox backend {backend!r}; "
-        f"expected 'bwrap' or 'podman'"
+        f"unknown sandbox backend {backend!r}; expected 'podman'"
     )
 
 
@@ -125,56 +106,34 @@ def require_sandbox_or_die(
     readonly_paths: list[Path] | None = None,
     writable_paths: list[Path] | None = None,
 ) -> "Sandbox":
-    """Return a real sandbox for the resolved backend, or exit 2 with
-    an install hint. Triggers an image build on first use."""
+    """Return a sandbox handle, or exit 2 with an install hint.
+    Triggers an image build on first use."""
     import sys
 
     backend = _autodetect_backend()
-
-    if backend == "bwrap":
-        missing = [
-            tool for tool in ("bwrap", "buildah") if not shutil.which(tool)
-        ]
-        if missing:
-            sys.stderr.write(
-                f"{command}: missing required tools on Linux: "
-                f"{', '.join(missing)}\n"
-                f"    Install with: apt install {' '.join(missing)}\n"
-                "    bubblewrap also needs unprivileged user namespaces — "
-                "see README 'Sandbox prerequisites' for Ubuntu 24.04.\n"
-            )
-            sys.exit(2)
-        from .image_provisioning import ensure_image
-        ensure_image(agent, log=log)
-        return get_sandbox(
-            agent=agent, prefer=backend, env=env,
-            readonly_paths=readonly_paths,
-            writable_paths=writable_paths,
+    if backend != "podman":
+        raise NotImplementedError(
+            f"unknown sandbox backend {backend!r}"
         )
 
-    if backend == "podman":
-        if not shutil.which("podman"):
-            sys.stderr.write(
-                f"{command}: podman is required for the podman backend.\n"
-                "    Install with: brew install podman (macOS) "
-                "or apt install podman (Linux)\n"
-            )
-            sys.exit(2)
-        from .podman_provisioning import ensure_image, ensure_machine_running
-        try:
-            ensure_machine_running(log=log)
-        except RuntimeError as exc:
-            sys.stderr.write(f"{command}: {exc}\n")
-            sys.exit(2)
-        ensure_image(agent, log=log)
-        return get_sandbox(
-            agent=agent, prefer=backend, env=env,
-            readonly_paths=readonly_paths,
-            writable_paths=writable_paths,
+    if not shutil.which("podman"):
+        sys.stderr.write(
+            f"{command}: podman is required.\n"
+            "    Install with: brew install podman (macOS) "
+            "or apt install podman (Linux)\n"
         )
-
-    raise NotImplementedError(
-        f"unknown sandbox backend {backend!r}"
+        sys.exit(2)
+    from .podman_provisioning import ensure_image, ensure_machine_running
+    try:
+        ensure_machine_running(log=log)
+    except RuntimeError as exc:
+        sys.stderr.write(f"{command}: {exc}\n")
+        sys.exit(2)
+    ensure_image(agent, log=log)
+    return get_sandbox(
+        agent=agent, prefer=backend, env=env,
+        readonly_paths=readonly_paths,
+        writable_paths=writable_paths,
     )
 
 

@@ -1,6 +1,5 @@
 """Per-agent podman image lifecycle: ``ensure_image`` for
-``agentcap run`` and the pytest fixture both. Mirror of
-``image_provisioning.py`` for the podman backend.
+``agentcap run`` and the pytest fixture both.
 
 The Containerfile is the source of truth: its SHA256 is baked into
 the built image as a label, and a hash mismatch on subsequent runs

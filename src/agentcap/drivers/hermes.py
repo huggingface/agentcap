@@ -8,11 +8,10 @@ length pointing at the in-process proxy — see
 no per-run config rewriting.
 
 Identity content (``SOUL.md``, etc.) and per-run state (``memories/``,
-``sessions/``, ``logs/``) all live under the image's ``/root/.hermes/``;
-writes from the agent go to the buildah container's OverlayFS upper
-layer and are discarded when the sandbox closes. Session
-continuity across turns within one ``agentcap run`` falls out of the
-container's persistence.
+``sessions/``, ``logs/``) live under the image's ``/root/.hermes/``;
+state-db symlinks redirect SQLite writes to the bind-mounted
+``state/`` dir so session continuity survives ``podman run --rm``
+boundaries between turns.
 """
 
 from __future__ import annotations
@@ -133,8 +132,7 @@ class HermesDriver(AgentDriver):
         self.toolsets = toolsets
 
     def close(self) -> None:
-        """No-op. Per-run state lives in the buildah container's
-        OverlayFS upper layer."""
+        """No-op."""
 
     def _build_argv(
         self, prompt: str, *, session_id: str | None

@@ -3,7 +3,7 @@
 Each ``run()`` is a fresh ``podman run --rm`` against a pre-built
 image. Host paths in ``writable_paths`` / ``readonly_paths`` are
 bind-mounted into the container at the same path so the agent sees
-identical paths inside and outside, matching the bwrap convention.
+identical paths inside and outside.
 
 The image is *not* built here — callers must ensure it exists in the
 local podman image store before constructing the sandbox.

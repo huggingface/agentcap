@@ -7,9 +7,8 @@ ENV (see [containers/agentcap-goose.Containerfile](
 sets ``GOOSE_MODEL`` per run.
 
 Goose's own session state lives at ``~/.config/goose/sessions/``
-inside the sandbox. The buildah working container's OverlayFS upper
-layer captures those writes — they survive between turns within one
-``agentcap run`` and are discarded when the sandbox closes.
+inside the sandbox, redirected to the bind-mounted ``state/`` dir
+so it survives ``podman run --rm`` boundaries between turns.
 """
 
 from __future__ import annotations
@@ -43,15 +42,13 @@ class GooseDriver(AgentDriver):
         self.sandbox = sandbox
         self.binary = binary
         self.model = model
-        # ``cwd`` is sandbox-side; on bwrap a host path bound into
-        # the sandbox by BwrapSandbox.
+        # ``cwd`` is sandbox-side: a host path bind-mounted into the
+        # container at the same path.
         self.cwd = str(cwd) if cwd is not None else None
         self.extra_args = list(extra_args)
 
     def close(self) -> None:
-        """No-op. Session state lives in the buildah container's
-        OverlayFS upper layer, which the sandbox tears down when
-        it's closed."""
+        """No-op."""
 
     def _build_argv(
         self, prompt: str, *, session_name: str | None, resume: bool

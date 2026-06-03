@@ -118,13 +118,12 @@ def test_pi_live(live_proxy_base_url, live_model, agent_proj_for):
 @pytest.mark.skip(
     reason=(
         "opencode 1.15.x doesn't pick up the baked ``agent.minimal`` from "
-        "``~/.config/opencode/opencode.json`` inside the bwrap sandbox — "
-        "fails with ``agent \"minimal\" not found`` and ``Model not "
-        "found`` even with ``mode: primary`` + explicit model. Was "
-        "previously passing only because the cached image had no "
-        "opencode installed and the test skipped on missing PATH binary. "
-        "Needs investigation: instrument the init script with ``opencode "
-        "debug config`` to see what config opencode actually resolves."
+        "``~/.config/opencode/opencode.json`` inside the per-agent "
+        "container — fails with ``agent \"minimal\" not found`` and "
+        "``Model not found`` even with ``mode: primary`` + explicit "
+        "model. Needs investigation: instrument the init script with "
+        "``opencode debug config`` to see what config opencode actually "
+        "resolves."
     )
 )
 def test_opencode_live(live_proxy_base_url, live_model, agent_proj_for):

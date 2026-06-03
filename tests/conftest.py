@@ -106,14 +106,10 @@ def _wait_ready(
 
 
 def _agent_reachable_host() -> str:
-    """Hostname the agent (inside the sandbox) uses to reach a
-    host-side server. Bwrap shares the host netns (127.0.0.1
-    works); podman puts the agent on a separate netns and exposes
-    the host as ``host.containers.internal``."""
-    from agentcap.sandbox import _autodetect_backend
-    if _autodetect_backend() == "podman":
-        return "host.containers.internal"
-    return "127.0.0.1"
+    """Hostname the agent (inside the podman container) uses to reach
+    a host-side server. Podman exposes the host gateway as
+    ``host.containers.internal``."""
+    return "host.containers.internal"
 
 
 @pytest.fixture(scope="session")
@@ -126,11 +122,8 @@ def live_proxy_base_url():
 
     Otherwise, if ``AGENTCAP_TEST_GGUF`` is set and ``llama`` is on
     PATH, spawn ``llama serve`` on ``0.0.0.0:<free port>`` so the
-    sandbox can connect (the agent inside a Lima VM cannot reach
-    the Mac host's loopback). The URL returned uses
-    :func:`_agent_reachable_host` so it works on both bwrap (where
-    ``127.0.0.1`` is fine) and Lima (where the host is
-    ``host.lima.internal``).
+    podman container can dial it via ``host.containers.internal``
+    — the container's netns can't see the host's loopback.
     """
     url = os.environ.get("AGENTCAP_TEST_LLM_URL")
     if url:
@@ -176,8 +169,8 @@ def live_proxy_base_url():
     argv = [
         llama, "serve",
         "--model", gguf,
-        # 0.0.0.0 so the Lima VM can reach the host via
-        # host.lima.internal; 127.0.0.1 would be loopback-only.
+        # 0.0.0.0 so the podman container reaches the host via
+        # host.containers.internal; 127.0.0.1 would be loopback-only.
         "--host", "0.0.0.0",
         "--port", str(port),
         "--ctx-size", ctx,
@@ -211,10 +204,11 @@ def live_proxy_base_url():
 
         # Start the in-process proxy on a free port (don't hardcode
         # 8001 — collides with whatever the user has running). Bind
-        # 0.0.0.0 so the Lima VM can reach it via host.lima.internal.
-        # ``sandbox_for`` propagates the resulting URL into each
-        # sandbox as ``AGENTCAP_PROXY_URL``; the per-agent
-        # ``agentcap-init`` substitutes that into the baked config.
+        # 0.0.0.0 so the podman container reaches it via
+        # host.containers.internal. ``sandbox_for`` propagates the
+        # resulting URL into each sandbox as ``AGENTCAP_PROXY_URL``;
+        # the per-agent ``agentcap-init`` substitutes it into the
+        # baked config.
         import tempfile
 
         from agentcap.proxy import serve_in_thread
@@ -264,40 +258,26 @@ _HELLO_PY = 'def hello():\n    print("Hello, world!")\n'
 
 @pytest.fixture(scope="session")
 def sandbox_for(
-    agentcap_buildah_image_for,
-    agentcap_podman_image_for,
-    live_proxy_base_url, live_model,
+    agentcap_image_for, live_proxy_base_url, live_model,
 ):
     """Factory: ``sandbox_for("hermes")`` returns a Sandbox keyed on
-    the given agent. On macOS this is the ``agentcap-<agent>``
-    LimaSandbox (the fixture ensures the VM is up first); on Linux
-    it's the host BwrapSandbox mounted on the per-agent buildah image
-    (the fixture ensures the image is built); on other hosts it skips.
+    the given agent. The image fixture ensures the per-agent podman
+    image is built first.
 
     The sandbox env is seeded with ``AGENTCAP_PROXY_URL`` *and*
     ``AGENTCAP_MODEL`` so the per-agent entrypoint can start — the
     opencode init script bails out without ``AGENTCAP_MODEL``, which
     is enough to make ``command -v opencode`` (used as a skip probe
     by ``agent_proj_for``) exit non-zero and silently skip the test.
-
-    Sandboxes are closed at session teardown so the BwrapSandbox's
-    persistent buildah working container is removed (otherwise it
-    accumulates across pytest sessions).
     """
-    from agentcap.sandbox import _autodetect_backend, get_sandbox
+    from agentcap.sandbox import get_sandbox
 
     cache: dict[str, object] = {}
 
     def _get(agent: str):
         if agent in cache:
             return cache[agent]
-        backend = _autodetect_backend()
-        if backend == "bwrap":
-            agentcap_buildah_image_for(agent)
-        elif backend == "podman":
-            agentcap_podman_image_for(agent)
-        else:
-            pytest.skip(f"no fixture wiring for sandbox backend {backend!r}")
+        agentcap_image_for(agent)
         sb = get_sandbox(
             agent=agent,
             env={
@@ -545,9 +525,8 @@ class _RecordingHandler(http.server.BaseHTTPRequestHandler):
 @pytest.fixture
 def mock_http_server():
     """Spin up a tiny in-process HTTP server on a free port for the
-    duration of one test. Bound to ``0.0.0.0`` so a Lima VM can
-    reach it via ``host.lima.internal`` — the Mac loopback
-    ``127.0.0.1`` is not network-reachable from inside the VM.
+    duration of one test. Bound to ``0.0.0.0`` so a podman container
+    can reach it via ``host.containers.internal``.
 
     Yields ``(port, received_paths)``: the port the server is
     listening on, and a list (live, mutated by request handlers)

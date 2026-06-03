@@ -169,8 +169,7 @@ class OpenCodeDriver(AgentDriver):
         self.minimal_agent = minimal_agent
 
     def close(self) -> None:
-        """No-op. Per-run state lives in the buildah container's
-        OverlayFS upper layer."""
+        """No-op."""
 
     def _build_argv(
         self, prompt: str, *, session_id: str | None = None
