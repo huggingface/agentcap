@@ -289,22 +289,20 @@ def sandbox_for(
     persistent buildah working container is removed (otherwise it
     accumulates across pytest sessions).
     """
-    from agentcap.sandbox import get_sandbox
+    from agentcap.sandbox import _autodetect_backend, get_sandbox
 
     cache: dict[str, object] = {}
 
     def _get(agent: str):
         if agent in cache:
             return cache[agent]
-        import platform as _platform
-        if _platform.system() == "Darwin":
+        backend = _autodetect_backend()
+        if backend == "lima":
             lima_vm_for(agent)
-        elif _platform.system() == "Linux":
+        elif backend in ("bwrap", "podman"):
             agentcap_image_for(agent)
         else:
-            pytest.skip(
-                "live tests require Linux (bwrap+buildah) or macOS (lima)"
-            )
+            pytest.skip(f"no fixture wiring for sandbox backend {backend!r}")
         sb = get_sandbox(
             agent=agent,
             env={

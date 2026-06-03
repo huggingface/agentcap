@@ -20,12 +20,12 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import os
 import sys
 
 import pytest
 
 from agentcap.drivers import known_drivers
-from agentcap.sandbox.image_provisioning import ensure_image
 
 
 def _log(msg: str) -> None:
@@ -33,9 +33,21 @@ def _log(msg: str) -> None:
     sys.stderr.flush()
 
 
-def build_one(agent: str) -> str:
-    """Build (or reuse) the ``agentcap-<agent>:latest`` image."""
+def _ensure_image_for_backend(agent: str) -> str:
+    if os.environ.get("AGENTCAP_SANDBOX") == "podman":
+        from agentcap.sandbox.podman_provisioning import (
+            ensure_image, ensure_machine_running,
+        )
+        ensure_machine_running(log=_log)
+        return ensure_image(agent, log=_log)
+    from agentcap.sandbox.image_provisioning import ensure_image
     return ensure_image(agent, log=_log)
+
+
+def build_one(agent: str) -> str:
+    """Build (or reuse) the per-agent sandbox image for the selected
+    backend (buildah for bwrap, podman otherwise)."""
+    return _ensure_image_for_backend(agent)
 
 
 def build_many(agents: list[str]) -> dict[str, str | Exception]:
