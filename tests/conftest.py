@@ -106,20 +106,13 @@ def _wait_ready(
 
 
 def _agent_reachable_host() -> str:
-    """The hostname the agent (inside the sandbox) should use to
-    talk to a host-side server.
-
-    * Linux/bwrap: the namespace shares the host network, so
-      ``127.0.0.1`` reaches the host.
-    * macOS/Lima: the VM has its own loopback, so the host appears
-      as ``host.lima.internal`` (Lima's well-known DNS alias).
-
-    Anything else falls back to ``127.0.0.1`` and is the user's
-    problem to make reachable.
-    """
-    import platform as _platform
-    if _platform.system() == "Darwin" and shutil.which("limactl"):
-        return "host.lima.internal"
+    """Hostname the agent (inside the sandbox) uses to reach a
+    host-side server. Bwrap shares the host netns (127.0.0.1
+    works); podman puts the agent on a separate netns and exposes
+    the host as ``host.containers.internal``."""
+    from agentcap.sandbox import _autodetect_backend
+    if _autodetect_backend() == "podman":
+        return "host.containers.internal"
     return "127.0.0.1"
 
 
@@ -271,7 +264,6 @@ _HELLO_PY = 'def hello():\n    print("Hello, world!")\n'
 
 @pytest.fixture(scope="session")
 def sandbox_for(
-    lima_vm_for,
     agentcap_buildah_image_for,
     agentcap_podman_image_for,
     live_proxy_base_url, live_model,
@@ -300,9 +292,7 @@ def sandbox_for(
         if agent in cache:
             return cache[agent]
         backend = _autodetect_backend()
-        if backend == "lima":
-            lima_vm_for(agent)
-        elif backend == "bwrap":
+        if backend == "bwrap":
             agentcap_buildah_image_for(agent)
         elif backend == "podman":
             agentcap_podman_image_for(agent)
@@ -369,40 +359,6 @@ def reset_hello_py(sandbox, proj: str) -> None:
     used by the retry helper in test_drivers_live so each attempt
     sees a clean slate."""
     sandbox.write_text(f"{proj}/hello.py", _HELLO_PY)
-
-
-# ---------------------------------------------------------------------------
-# Per-agent runtime fixtures: Lima VM on macOS, buildah image on Linux
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture(scope="session")
-def lima_vm_for():
-    """Factory: ``lima_vm_for("hermes")`` ensures the
-    ``agentcap-hermes`` VM is running. Delegates to
-    :func:`agentcap.sandbox.lima_provisioning.ensure_vm` — same
-    lifecycle as ``agentcap run``. VMs touched by the fixture are
-    stopped at session exit."""
-    from agentcap.sandbox.lima_provisioning import ensure_vm, stop_vm
-
-    cache: dict[str, str] = {}
-
-    def _ensure(agent: str) -> str:
-        if agent in cache:
-            return cache[agent]
-        try:
-            vm = ensure_vm(agent, log=_log)
-        except (FileNotFoundError, RuntimeError) as e:
-            pytest.skip(str(e))
-        cache[agent] = vm
-        return vm
-
-    yield _ensure
-    for vm in cache.values():
-        _log(f"stopping {vm}…")
-        stop_vm(vm)
-
-
 
 
 @pytest.fixture

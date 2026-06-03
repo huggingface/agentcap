@@ -28,16 +28,12 @@ def _proxy_host_pair() -> tuple[str, str]:
     """Return (bind_host, agent_host) for the in-process capture proxy.
 
     Bwrap shares the host network namespace, so ``127.0.0.1`` works on
-    both sides. Lima and podman put the agent on a separate netns
-    (Lima VM, podman machine VM, or rootless slirp4netns) where the
-    host's ``127.0.0.1`` isn't reachable; bind on ``0.0.0.0`` and tell
-    the agent to dial the backend-specific host alias.
+    both sides. Podman puts the agent on a separate netns (podman
+    machine VM or rootless slirp4netns) where the host's ``127.0.0.1``
+    isn't reachable; bind on ``0.0.0.0`` and dial ``host.containers.internal``.
     """
     from .sandbox import _autodetect_backend
-    backend = _autodetect_backend()
-    if backend == "lima":
-        return "0.0.0.0", "host.lima.internal"
-    if backend == "podman":
+    if _autodetect_backend() == "podman":
         return "0.0.0.0", "host.containers.internal"
     return "127.0.0.1", "127.0.0.1"
 

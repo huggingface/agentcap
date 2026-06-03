@@ -234,6 +234,6 @@ def test_rewrite_config_preserves_existing_auxiliary_keys():
 # sandbox. Behaviour previously verified by 5 unit tests against
 # fake user-homes is now covered by the live driver test
 # (tests/test_drivers_live.py::test_hermes_live) which exercises
-# the full path against a real Lima VM (macOS) or bwrap'd host
-# (Linux). The pure-Python parts that survived as standalone
-# helpers (`_rewrite_config`) keep their own tests above.
+# the full path against a real podman container. The pure-Python
+# parts that survived as standalone helpers (`_rewrite_config`)
+# keep their own tests above.

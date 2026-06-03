@@ -20,20 +20,11 @@ from agentcap.sandbox import (
     get_sandbox,
 )
 from agentcap.sandbox.bwrap import BwrapSandbox, build_command
-from agentcap.sandbox.lima import LimaSandbox, build_command as build_lima_command
 
 
 # ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
-
-
-def test_get_sandbox_explicit_override_lima():
-    """Forcing lima skips the host autodetect; the result is a
-    LimaSandbox with the canonical per-agent VM name."""
-    sb = get_sandbox(agent="goose", prefer="lima")
-    assert isinstance(sb, LimaSandbox)
-    assert sb.vm == "agentcap-goose"
 
 
 def test_get_sandbox_explicit_override_podman():
@@ -57,8 +48,8 @@ def test_get_sandbox_prefer_wins_over_env(monkeypatch):
     """``prefer=`` is the test-override knob — it wins over the user-
     facing ``AGENTCAP_SANDBOX`` env var."""
     monkeypatch.setenv("AGENTCAP_SANDBOX", "podman")
-    sb = get_sandbox(agent="goose", prefer="lima")
-    assert isinstance(sb, LimaSandbox)
+    sb = get_sandbox(agent="goose", prefer="bwrap")
+    assert isinstance(sb, BwrapSandbox)
 
 
 def test_get_sandbox_rejects_unknown():
@@ -79,10 +70,6 @@ def test_get_sandbox_requires_agent():
     is per-agent."""
     with pytest.raises(TypeError):
         get_sandbox()  # type: ignore[call-arg]
-
-
-def test_lima_sandbox_implements_protocol():
-    assert isinstance(LimaSandbox(), Sandbox)
 
 
 def test_bwrap_sandbox_implements_protocol():
@@ -167,154 +154,14 @@ def test_bwrap_command_propagates_cwd(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Lima — argv assembly
-# ---------------------------------------------------------------------------
-
-
-def test_lima_wraps_argv_in_limactl_shell():
-    """LimaSandbox.wrap() emits a flat `limactl shell <vm> -- argv`
-    — no inner bwrap. The VM is the sandbox."""
-    cmd = build_lima_command(["echo", "hi"], vm="agentcap-opencode")
-    assert cmd[0] == "limactl"
-    assert cmd[1] == "shell"
-    assert "agentcap-opencode" in cmd
-    sep = cmd.index("--")
-    assert cmd[sep + 1 :] == ["echo", "hi"]
-    # No bwrap layer inside.
-    assert "bwrap" not in cmd
-
-
-def test_lima_passes_workdir_to_limactl(tmp_path):
-    cmd = build_lima_command(["true"], workdir=tmp_path)
-    assert "--workdir" in cmd
-    i = cmd.index("--workdir")
-    assert cmd[i + 1] == str(tmp_path)
-
-
-def test_lima_respects_custom_vm_name():
-    cmd = build_lima_command(["true"], vm="my-vm")
-    assert "my-vm" in cmd
-    assert "agentcap-unset" not in cmd
-
-
-def test_lima_deny_network_warns_and_no_ops(tmp_path, capfd):
-    """Lima has no per-call network policy; deny_network=True must
-    warn to stderr (so callers can see it) and proceed without
-    changing the argv."""
-    sb = LimaSandbox()
-    argv_with = sb.wrap(["true"], writable_paths=[tmp_path], deny_network=True)
-    argv_without = sb.wrap(["true"], writable_paths=[tmp_path], deny_network=False)
-    assert argv_with == argv_without
-    err = capfd.readouterr().err
-    assert "deny_network" in err
-    assert "Lima" in err
-
-
-# ---------------------------------------------------------------------------
-# Lima — end-to-end (uses lima_vm_for fixture in conftest)
+# Bwrap — end-to-end (Linux + bwrap + buildah)
 # ---------------------------------------------------------------------------
 
 # The sandbox primitives (mount semantics, network reachability) are
-# agent-agnostic; we exercise them on the opencode VM because it has
-# the smallest install surface (`curl … | bash`). Any provisioned
-# per-agent VM would work the same.
+# agent-agnostic; we exercise them on the opencode image because it
+# has the smallest install surface. Any provisioned per-agent image
+# would work the same.
 _SANDBOX_TEST_AGENT = "opencode"
-
-
-def test_lima_vm_can_reach_host_server(lima_vm_for, mock_http_server):
-    """End-to-end: a process inside the Lima VM can reach a server
-    running on the Mac host via ``host.lima.internal``. This is the
-    same network path the capture proxy will use when the agent
-    runs inside the VM — without it, the capture flow is
-    structurally impossible. Asserts both that the VM-side HTTP call
-    succeeds AND that the host-side process saw the request."""
-    vm = lima_vm_for(_SANDBOX_TEST_AGENT)
-    port, received = mock_http_server
-    # opencode-init refuses to start without AGENTCAP_MODEL — same shim
-    # as the bwrap end-to-end tests below.
-    sb = LimaSandbox(vm=vm, env={"AGENTCAP_MODEL": "test/dummy"})
-    code = (
-        "import urllib.request, sys; "
-        f"r = urllib.request.urlopen("
-        f"'http://host.lima.internal:{port}/ping', timeout=10); "
-        "sys.stdout.write(r.read().decode())"
-    )
-    r = subprocess.run(
-        sb.wrap(["python3", "-c", code], writable_paths=[]),
-        capture_output=True, text=True, timeout=30,
-    )
-    assert r.returncode == 0, r.stderr
-    assert '"ok": true' in r.stdout
-    assert "/ping" in received, received
-
-
-def test_lima_fs_methods_inside_vm(lima_vm_for):
-    """End-to-end: ``mkdtemp`` / ``write_text`` / ``read_text`` /
-    ``rmtree`` on LimaSandbox execute inside the VM via
-    ``limactl shell -- mktemp / cat / base64 / rm``."""
-    vm = lima_vm_for(_SANDBOX_TEST_AGENT)
-    sb = LimaSandbox(vm=vm)
-
-    d = sb.mkdtemp(prefix="agentcap-test-")
-    try:
-        assert d.startswith("/tmp/agentcap-test-")
-        assert not Path(d).exists()
-        payload = 'first\n"quoted"\n$ENV_VAR\n'
-        sb.write_text(f"{d}/file.txt", payload)
-        assert sb.read_text(f"{d}/file.txt") == payload
-    finally:
-        sb.rmtree(d)
-    r = sb.run(["test", "-d", d])
-    assert r.returncode != 0
-
-
-def test_lima_run_propagates_env_into_vm(lima_vm_for):
-    vm = lima_vm_for(_SANDBOX_TEST_AGENT)
-    sb = LimaSandbox(vm=vm, env={"AGENTCAP_MODEL": "test/dummy"})
-    r = sb.run(["sh", "-c", "echo $HF_TOKEN"], env={"HF_TOKEN": "tok123"})
-    assert r.returncode == 0
-    assert r.stdout.strip() == "tok123"
-
-
-def test_lima_run_uses_cwd_inside_vm(lima_vm_for):
-    vm = lima_vm_for(_SANDBOX_TEST_AGENT)
-    sb = LimaSandbox(vm=vm, env={"AGENTCAP_MODEL": "test/dummy"})
-    d = sb.mkdtemp(prefix="lima-cwd-test-")
-    try:
-        r = sb.run(["pwd"], cwd=d)
-        assert r.returncode == 0
-        assert r.stdout.strip() == d
-    finally:
-        sb.rmtree(d)
-
-
-def test_lima_vm_has_no_host_filesystem_visibility(lima_vm_for):
-    """End-to-end: the VM is fully isolated from the Mac filesystem.
-    Per-agent templates declare ``mounts: []``, so no Mac path is
-    visible inside the VM — neither the user's $HOME nor pytest's
-    tmp dir."""
-    vm = lima_vm_for(_SANDBOX_TEST_AGENT)
-    sb = LimaSandbox(vm=vm)
-    home = str(Path.home())
-    r = subprocess.run(
-        sb.wrap(["mount", "-t", "virtiofs"], writable_paths=[]),
-        capture_output=True, text=True, timeout=10,
-    )
-    if home in r.stdout:
-        pytest.skip(
-            f"VM {vm!r} was created with a `~` mount (pre-mounts:[] "
-            f"template). Delete it (`limactl delete {vm}`) and re-run."
-        )
-    r = subprocess.run(
-        sb.wrap(["ls", home], writable_paths=[]),
-        capture_output=True, text=True, timeout=10,
-    )
-    assert r.returncode != 0
-
-
-# ---------------------------------------------------------------------------
-# Bwrap — end-to-end (Linux + bwrap + buildah)
-# ---------------------------------------------------------------------------
 
 
 _HAS_BWRAP_AND_BUILDAH = (
