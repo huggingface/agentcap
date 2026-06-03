@@ -49,11 +49,12 @@ def test_templates_followup_rejects_empty_pool():
 def test_synthesized_followup_calls_synth_with_prompt():
     captured: dict = {}
 
-    def fake_call(*, upstream, model, prompt, timeout):
+    def fake_call(*, upstream, model, prompt, timeout, api_key=None):
         captured["upstream"] = upstream
         captured["model"] = model
         captured["prompt"] = prompt
         captured["timeout"] = timeout
+        captured["api_key"] = api_key
         return "  Show me the migration plan.  "
 
     fu = SynthesizedFollowUp(
@@ -76,7 +77,7 @@ def test_synthesized_followup_calls_synth_with_prompt():
     assert "Here's a draft plan." in captured["prompt"]
 
 
-def test_synthesized_followup_falls_back_on_exception():
+def test_synthesized_followup_falls_back_on_exception(capsys):
     def boom(**_):
         raise RuntimeError("synth down")
 
@@ -84,6 +85,12 @@ def test_synthesized_followup_falls_back_on_exception():
         upstream="http://synth", model="m", call=boom, fallback="continue"
     )
     assert fu.next(original_task="t", last_response="r", turn=2) == "continue"
+    # Fallback must be noisy — silence here used to mask 401s against
+    # authenticated upstreams while run.json kept claiming
+    # ``followup: synthesized``.
+    err = capsys.readouterr().err
+    assert "synthesized turn=2 fell back to 'continue'" in err
+    assert "RuntimeError" in err and "synth down" in err
 
 
 def test_synthesized_followup_falls_back_on_empty_response():
@@ -121,8 +128,9 @@ def test_default_call_synth_accepts_upstream_with_v1_suffix(monkeypatch):
 
     captured = {}
 
-    def fake_post(url, json, timeout):
+    def fake_post(url, json, timeout, headers=None):
         captured["url"] = url
+        captured["headers"] = headers
         return _Resp()
 
     monkeypatch.setattr(httpx, "post", fake_post)
@@ -135,3 +143,44 @@ def test_default_call_synth_accepts_upstream_with_v1_suffix(monkeypatch):
     )
     assert out == "ok"
     assert captured["url"] == "https://router.huggingface.co/v1/chat/completions"
+    assert captured["headers"] is None  # no api_key => no Authorization
+
+
+def test_default_call_synth_sends_bearer_when_api_key_given(monkeypatch):
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+    captured = {}
+
+    def fake_post(url, json, timeout, headers=None):
+        captured["headers"] = headers
+        return _Resp()
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    _default_call_synth(
+        upstream="https://router.huggingface.co",
+        model="m",
+        prompt="p",
+        timeout=5,
+        api_key="hf_xyz",
+    )
+    assert captured["headers"] == {"Authorization": "Bearer hf_xyz"}
+
+
+def test_synthesized_followup_passes_api_key_to_call():
+    seen = {}
+
+    def fake(*, upstream, model, prompt, timeout, api_key):
+        seen["api_key"] = api_key
+        return "next"
+
+    fu = SynthesizedFollowUp(
+        upstream="http://synth", model="m", call=fake, api_key="hf_abc"
+    )
+    fu.next(original_task="t", last_response="r", turn=2)
+    assert seen["api_key"] == "hf_abc"

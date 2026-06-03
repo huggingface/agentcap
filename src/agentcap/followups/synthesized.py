@@ -12,6 +12,7 @@ the synthesizer is just a way to produce realistic next user inputs.
 from __future__ import annotations
 
 import json
+import sys
 from typing import Callable
 
 from . import FollowUp
@@ -39,6 +40,7 @@ def _default_call_synth(
     model: str,
     prompt: str,
     timeout: float | None,
+    api_key: str | None = None,
 ) -> str:
     """Default OpenAI-compat chat-completion call."""
     import httpx
@@ -57,7 +59,8 @@ def _default_call_synth(
         url = base + "/chat/completions"
     else:
         url = base + "/v1/chat/completions"
-    resp = httpx.post(url, json=body, timeout=timeout)
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
+    resp = httpx.post(url, json=body, timeout=timeout, headers=headers)
     resp.raise_for_status()
     data = resp.json()
     try:
@@ -81,15 +84,20 @@ class SynthesizedFollowUp(FollowUp):
         call: Callable[..., str] | None = None,
         prompt_template: str = PROMPT_TEMPLATE,
         fallback: str = "continue",
+        api_key: str | None = None,
     ) -> None:
         """``upstream`` should point at the model server **directly**,
-        not at the capture proxy. ``call`` is overridable for tests."""
+        not at the capture proxy. ``call`` is overridable for tests.
+        ``api_key`` is forwarded as ``Authorization: Bearer …`` on each
+        synthesizer call — required for authenticated upstreams like
+        the HF Router."""
         self.upstream = upstream
         self.model = model
         self.timeout = timeout
         self._call = call or _default_call_synth
         self.prompt_template = prompt_template
         self.fallback = fallback
+        self.api_key = api_key
 
     def next(self, *, original_task: str, last_response: str, turn: int) -> str:
         prompt = self.prompt_template.format(
@@ -101,8 +109,18 @@ class SynthesizedFollowUp(FollowUp):
                 model=self.model,
                 prompt=prompt,
                 timeout=self.timeout,
+                api_key=self.api_key,
             )
-        except Exception:
+        except Exception as exc:
+            # Silence here used to mask 401s against authenticated upstreams,
+            # making the whole sweep produce ``continue`` follow-ups while
+            # ``run.json`` still claimed ``followup: synthesized``.
+            print(
+                f"[followups] synthesized turn={turn} fell back to "
+                f"{self.fallback!r}: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
             return self.fallback
         text = text.strip()
         return text or self.fallback
