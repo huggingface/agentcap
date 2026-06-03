@@ -177,7 +177,10 @@ def live_llama_url():
     )
     r = subprocess.run(argv, capture_output=True, text=True, timeout=120)
     if r.returncode != 0:
-        pytest.skip(f"podman run failed: {r.stderr.strip()}")
+        # ``podman run`` failing once the host has podman is a real
+        # problem (bad flags, pull failure, permissions), not a missing
+        # prereq. Fail loud so CI doesn't silently green over it.
+        pytest.fail(f"podman run failed: {r.stderr.strip()}")
     try:
         _wait_ready(
             f"http://127.0.0.1:{port}/v1/models",
