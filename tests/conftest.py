@@ -113,37 +113,27 @@ def _agent_reachable_host() -> str:
 
 
 @pytest.fixture(scope="session")
-def live_proxy_base_url():
-    """OpenAI-compat ``/v1`` URL the agent (inside the sandbox) hits.
+def live_llama_url():
+    """Host-side server root of the llama backend (no ``/v1`` suffix).
 
-    If ``AGENTCAP_TEST_LLM_URL`` is set, return it as-is (caller is
-    responsible for the server and for making it reachable from the
-    sandbox).
-
-    Otherwise, if ``AGENTCAP_TEST_GGUF`` is set and ``llama`` is on
-    PATH, spawn ``llama serve`` on ``0.0.0.0:<free port>`` so the
-    podman container can dial it via ``host.containers.internal``
-    — the container's netns can't see the host's loopback.
+    For tests that spawn their own proxy on top and need a directly-
+    reachable upstream. Honors ``AGENTCAP_TEST_LLM_URL`` (with or
+    without the ``/v1`` tail), reuses an existing ``llama serve`` on
+    8000/8080, or spawns one with the bundled GGUF.
     """
-    url = os.environ.get("AGENTCAP_TEST_LLM_URL")
-    if url:
-        yield url
+    override = os.environ.get("AGENTCAP_TEST_LLM_URL")
+    if override:
+        yield override[:-3] if override.endswith("/v1") else override
         return
 
-    # Probe common ports for an already-running llama serve before
-    # spawning. Lets the user keep one server alive across many
-    # `pytest` invocations (per their explicit workflow preference)
-    # without having to set AGENTCAP_TEST_LLM_URL every time.
     for probe_port in (8000, 8080):
         try:
             with urlopen(
                 f"http://127.0.0.1:{probe_port}/v1/models", timeout=1,
             ) as r:
                 if r.status == 200:
-                    _log(
-                        f"reusing existing llama serve on :{probe_port}"
-                    )
-                    yield f"http://127.0.0.1:{probe_port}/v1"
+                    _log(f"reusing existing llama serve on :{probe_port}")
+                    yield f"http://127.0.0.1:{probe_port}"
                     return
         except Exception:
             pass
@@ -177,11 +167,10 @@ def live_proxy_base_url():
         "--reasoning", "off",
         "--jinja",
         "--n-gpu-layers", ngl,
-        # `--fit off` skips llama.cpp's `common_params_fit_impl` auto
-        # parameter-fitting step. We're passing --n-gpu-layers
-        # explicitly so the auto-fit is redundant, and recent llama.cpp
-        # builds (b9039+) crash inside the fit step on some models
-        # (gemma-4 on multi-GPU hits GGML_SCHED_MAX_SPLIT_INPUTS).
+        # ``--fit off`` skips llama.cpp's ``common_params_fit_impl``
+        # auto parameter-fitting step. We pass ``--n-gpu-layers``
+        # explicitly so the auto-fit is redundant, and recent
+        # llama.cpp builds crash inside the fit step on some models.
         "--fit", "off",
     ]
     log_path = "/tmp/agentcap-pytest-llama.log"
@@ -192,8 +181,6 @@ def live_proxy_base_url():
         f"server log -> {log_path}"
     )
     proc = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT)
-    # Probe on 127.0.0.1 from the host side — that's what
-    # the local _wait_ready can reach.
     try:
         _wait_ready(
             f"http://127.0.0.1:{port}/v1/models",
@@ -201,32 +188,7 @@ def live_proxy_base_url():
             log=_log,
         )
         _log(f"llama serve ready at :{port}")
-
-        # Start the in-process proxy on a free port (don't hardcode
-        # 8001 — collides with whatever the user has running). Bind
-        # 0.0.0.0 so the podman container reaches it via
-        # host.containers.internal. ``sandbox_for`` propagates the
-        # resulting URL into each sandbox as ``AGENTCAP_PROXY_URL``;
-        # the per-agent ``agentcap-init`` substitutes it into the
-        # baked config.
-        import tempfile
-
-        from agentcap.proxy import serve_in_thread
-        upstream = f"http://127.0.0.1:{port}"
-        proxy_port = _free_port()
-        capture_dir = tempfile.mkdtemp(prefix="agentcap-pytest-captures-")
-        agent_url = (
-            f"http://{_agent_reachable_host()}:{proxy_port}/v1"
-        )
-        _log(
-            f"starting in-process proxy on 0.0.0.0:{proxy_port} "
-            f"-> {upstream} (agents reach it at {agent_url})"
-        )
-        with serve_in_thread(
-            upstream, capture_dir,
-            host="0.0.0.0", port=proxy_port,
-        ):
-            yield agent_url
+        yield f"http://127.0.0.1:{port}"
     finally:
         proc.terminate()
         try:
@@ -234,6 +196,36 @@ def live_proxy_base_url():
         except subprocess.TimeoutExpired:
             proc.kill()
         log.close()
+
+
+@pytest.fixture(scope="session")
+def live_proxy_base_url(live_llama_url):
+    """Agent-side ``/v1`` URL of the in-process capture proxy.
+
+    For tests that exercise the agent ↔ proxy ↔ llama path from
+    outside. When ``AGENTCAP_TEST_LLM_URL`` is set the caller is
+    presumed to own capture wiring and the proxy is not spawned —
+    the override URL is yielded directly.
+    """
+    if os.environ.get("AGENTCAP_TEST_LLM_URL"):
+        yield f"{live_llama_url}/v1"
+        return
+
+    import tempfile
+
+    from agentcap.proxy import serve_in_thread
+    proxy_port = _free_port()
+    capture_dir = tempfile.mkdtemp(prefix="agentcap-pytest-captures-")
+    agent_url = f"http://{_agent_reachable_host()}:{proxy_port}/v1"
+    _log(
+        f"starting in-process proxy on 0.0.0.0:{proxy_port} "
+        f"-> {live_llama_url} (agents reach it at {agent_url})"
+    )
+    with serve_in_thread(
+        live_llama_url, capture_dir,
+        host="0.0.0.0", port=proxy_port,
+    ):
+        yield agent_url
 
 
 @pytest.fixture(scope="session")

@@ -28,7 +28,7 @@ from agentcap.__main__ import cli
 def test_agentcap_run_live(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    live_proxy_base_url: str,
+    live_llama_url: str,
     live_model: str,
     agentcap_image_for,
 ):
@@ -59,11 +59,11 @@ def test_agentcap_run_live(
     workspace.mkdir()
     monkeypatch.setenv("AGENTCAP_WORKSPACE", str(workspace))
 
-    # ``live_proxy_base_url`` ends with ``/v1`` (agent-side path);
-    # ``--upstream`` wants the server root.
-    upstream = live_proxy_base_url
-    if upstream.endswith("/v1"):
-        upstream = upstream[: -len("/v1")]
+    # ``--upstream`` wants the server root reachable from the host
+    # (the in-process proxy will forward to it). ``live_llama_url``
+    # is host-side; ``live_proxy_base_url`` is agent-side and would
+    # not resolve from the host process.
+    upstream = live_llama_url
 
     runner = CliRunner()
     result = runner.invoke(
