@@ -1,8 +1,8 @@
 """Structural tests for :mod:`agentcap.sandbox.podman`.
 
-Argv-assembly tests run anywhere — they don't shell out to podman.
-End-to-end execution against a real ``podman run`` lands once
-podman is wired into the test fixtures (commit 4).
+Argv-assembly only — these don't shell out to podman. End-to-end
+coverage against a real ``podman run`` lives in
+``tests/test_drivers_live.py`` via the live driver tests.
 """
 
 from __future__ import annotations
