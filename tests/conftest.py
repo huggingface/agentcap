@@ -271,7 +271,10 @@ _HELLO_PY = 'def hello():\n    print("Hello, world!")\n'
 
 @pytest.fixture(scope="session")
 def sandbox_for(
-    lima_vm_for, agentcap_image_for, live_proxy_base_url, live_model,
+    lima_vm_for,
+    agentcap_buildah_image_for,
+    agentcap_podman_image_for,
+    live_proxy_base_url, live_model,
 ):
     """Factory: ``sandbox_for("hermes")`` returns a Sandbox keyed on
     the given agent. On macOS this is the ``agentcap-<agent>``
@@ -299,8 +302,10 @@ def sandbox_for(
         backend = _autodetect_backend()
         if backend == "lima":
             lima_vm_for(agent)
-        elif backend in ("bwrap", "podman"):
-            agentcap_image_for(agent)
+        elif backend == "bwrap":
+            agentcap_buildah_image_for(agent)
+        elif backend == "podman":
+            agentcap_podman_image_for(agent)
         else:
             pytest.skip(f"no fixture wiring for sandbox backend {backend!r}")
         sb = get_sandbox(

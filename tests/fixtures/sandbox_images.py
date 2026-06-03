@@ -1,31 +1,29 @@
-"""Per-agent buildah sandbox image lifecycle: pytest fixture + CLI.
+"""Per-agent sandbox image lifecycle: pytest fixtures + CLI.
 
-Two use cases for the same logic:
+Two backend-specific fixtures expose the same shape:
 
-* ``python tests/fixtures/sandbox_images.py`` — pre-build every
-  ``agentcap-<agent>:latest`` image as a CI setup step, so the test
-  runner doesn't pay the cold-build cost (a few minutes per image).
-* ``agentcap_image_for`` pytest fixture — same logic, on demand,
-  when a test requests it. Idempotent: ``ensure_image`` short-circuits
-  if the on-disk image matches the Containerfile hash.
+* ``agentcap_buildah_image_for`` — buildah-built image for the bwrap
+  end-to-end tests.
+* ``agentcap_podman_image_for`` — podman-built image for the podman
+  end-to-end tests and the default ``sandbox_for`` factory.
+
+A test binds to whichever fixture matches its backend; ``sandbox_for``
+dispatches to the right one based on the autodetected backend.
 
 Registered as a pytest plugin in ``tests/conftest.py`` via
-``pytest_plugins``. Pattern mirrors
-``huggingface/optimum-neuron``'s ``tests/fixtures/llm/export_models.py``
-(separate "prepare heavy artefacts" from "run tests" so CI can cache
-the artefacts independently).
+``pytest_plugins``.
 """
 
 from __future__ import annotations
 
 import argparse
 import fnmatch
-import os
 import sys
 
 import pytest
 
 from agentcap.drivers import known_drivers
+from agentcap.sandbox import _autodetect_backend
 
 
 def _log(msg: str) -> None:
@@ -33,60 +31,72 @@ def _log(msg: str) -> None:
     sys.stderr.flush()
 
 
-def _ensure_image_for_backend(agent: str) -> str:
-    if os.environ.get("AGENTCAP_SANDBOX") == "podman":
-        from agentcap.sandbox.podman_provisioning import (
-            ensure_image, ensure_machine_running,
-        )
-        ensure_machine_running(log=_log)
-        return ensure_image(agent, log=_log)
+def _ensure_buildah_image(agent: str) -> str:
     from agentcap.sandbox.image_provisioning import ensure_image
     return ensure_image(agent, log=_log)
 
 
-def build_one(agent: str) -> str:
-    """Build (or reuse) the per-agent sandbox image for the selected
-    backend (buildah for bwrap, podman otherwise)."""
-    return _ensure_image_for_backend(agent)
+def _ensure_podman_image(agent: str) -> str:
+    from agentcap.sandbox.podman_provisioning import (
+        ensure_image, ensure_machine_running,
+    )
+    ensure_machine_running(log=_log)
+    return ensure_image(agent, log=_log)
 
 
-def build_many(agents: list[str]) -> dict[str, str | Exception]:
-    """Build a set of images, capturing per-agent failures instead
-    of stopping on the first one. CI surfaces the full failure set
-    in one go."""
+def build_many(agents: list[str], builder) -> dict[str, str | Exception]:
+    """Run ``builder(agent)`` for each agent, capturing per-agent
+    failures so CI surfaces the full failure set in one go."""
     out: dict[str, str | Exception] = {}
     for agent in agents:
         try:
-            out[agent] = build_one(agent)
+            out[agent] = builder(agent)
         except (FileNotFoundError, RuntimeError) as exc:
             out[agent] = exc
     return out
 
 
-# ---------------------------------------------------------------------------
-# pytest fixture — registered via `pytest_plugins` in tests/conftest.py
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture(scope="session")
-def agentcap_image_for():
-    """Factory: ``agentcap_image_for("goose")`` ensures the
-    ``agentcap-goose:latest`` image is built and current. Same
-    lifecycle as ``agentcap run`` on Linux."""
-
+def _image_fixture(builder):
+    """Wrap a per-backend image builder in a session-scoped cache +
+    pytest.skip on missing tooling."""
     cache: dict[str, str] = {}
 
     def _ensure(agent: str) -> str:
         if agent in cache:
             return cache[agent]
         try:
-            tag = build_one(agent)
+            tag = builder(agent)
         except (FileNotFoundError, RuntimeError) as exc:
             pytest.skip(str(exc))
         cache[agent] = tag
         return tag
 
     return _ensure
+
+
+@pytest.fixture(scope="session")
+def agentcap_buildah_image_for():
+    """Factory for the bwrap end-to-end tests."""
+    return _image_fixture(_ensure_buildah_image)
+
+
+@pytest.fixture(scope="session")
+def agentcap_podman_image_for():
+    """Factory for the podman end-to-end tests."""
+    return _image_fixture(_ensure_podman_image)
+
+
+@pytest.fixture(scope="session")
+def agentcap_image_for():
+    """Factory that follows the autodetected backend — buildah for
+    bwrap, podman otherwise. For tests that exercise whatever
+    ``agentcap run`` itself would use."""
+    builder = (
+        _ensure_buildah_image
+        if _autodetect_backend() == "bwrap"
+        else _ensure_podman_image
+    )
+    return _image_fixture(builder)
 
 
 # ---------------------------------------------------------------------------
@@ -97,7 +107,7 @@ def agentcap_image_for():
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Build the per-agent buildah sandbox images used by "
+            "Pre-build the per-agent sandbox images used by "
             "`agentcap run` and the live driver tests."
         ),
     )
@@ -105,6 +115,15 @@ def main() -> int:
         "--list",
         action="store_true",
         help="List available agent names and exit.",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=("auto", "buildah", "podman"),
+        default="auto",
+        help=(
+            "Image-builder backend. ``auto`` follows AGENTCAP_SANDBOX "
+            "/ the OS default (buildah for bwrap, podman otherwise)."
+        ),
     )
     parser.add_argument(
         "pattern",
@@ -124,6 +143,12 @@ def main() -> int:
             print(name)
         return 0
 
+    if args.backend == "auto":
+        builder_kind = "buildah" if _autodetect_backend() == "bwrap" else "podman"
+    else:
+        builder_kind = args.backend
+    builder = _ensure_buildah_image if builder_kind == "buildah" else _ensure_podman_image
+
     targets = [a for a in all_agents if fnmatch.fnmatch(a, args.pattern)]
     if not targets:
         print(
@@ -133,8 +158,8 @@ def main() -> int:
         )
         return 1
 
-    _log(f"building: {', '.join(targets)}")
-    results = build_many(targets)
+    _log(f"building ({builder_kind}): {', '.join(targets)}")
+    results = build_many(targets, builder)
 
     ok = {a: t for a, t in results.items() if not isinstance(t, Exception)}
     failed = {a: e for a, e in results.items() if isinstance(e, Exception)}

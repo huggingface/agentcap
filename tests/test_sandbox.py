@@ -328,12 +328,12 @@ _HAS_BWRAP_AND_BUILDAH = (
     not _HAS_BWRAP_AND_BUILDAH,
     reason="Linux + bwrap + buildah required",
 )
-def test_bwrap_runs_inside_image_rootfs(agentcap_image_for):
+def test_bwrap_runs_inside_image_rootfs(agentcap_buildah_image_for):
     """End-to-end: bwrap mounts the per-agent image rootfs and the
     agent's binary is on PATH inside the sandbox — but NOT on the
     host (in general). The image-build fixture ensures the image
     exists before the test."""
-    tag = agentcap_image_for(_SANDBOX_TEST_AGENT)
+    tag = agentcap_buildah_image_for(_SANDBOX_TEST_AGENT)
     # opencode-init refuses to start without AGENTCAP_MODEL (it bakes
     # the model id into ``~/.config/opencode/opencode.json``). The
     # value is not exercised by this test, only by the entrypoint.
@@ -349,11 +349,11 @@ def test_bwrap_runs_inside_image_rootfs(agentcap_image_for):
     not _HAS_BWRAP_AND_BUILDAH,
     reason="Linux + bwrap + buildah required",
 )
-def test_bwrap_blocks_writes_outside_allowlist(agentcap_image_for, tmp_path):
+def test_bwrap_blocks_writes_outside_allowlist(agentcap_buildah_image_for, tmp_path):
     """End-to-end: write to a path in ``writable_paths`` succeeds;
     write outside fails. The image rootfs is read-only and the host
     filesystem (apart from explicitly bound paths) is invisible."""
-    tag = agentcap_image_for(_SANDBOX_TEST_AGENT)
+    tag = agentcap_buildah_image_for(_SANDBOX_TEST_AGENT)
     env = {"AGENTCAP_MODEL": "test/dummy"}
     with BwrapSandbox(image=tag, env=env) as sb:
         inside = tmp_path / "inside.txt"
@@ -384,7 +384,7 @@ def test_bwrap_blocks_writes_outside_allowlist(agentcap_image_for, tmp_path):
     not _HAS_BWRAP_AND_BUILDAH,
     reason="Linux + bwrap + buildah required",
 )
-def test_bwrap_image_has_no_host_home_visibility(agentcap_image_for):
+def test_bwrap_image_has_no_host_home_visibility(agentcap_buildah_image_for):
     """End-to-end: host ``$HOME`` content is NOT visible inside the
     image-mounted sandbox. The path may coincidentally exist
     (``ubuntu:24.04`` ships a skeleton ``/home/ubuntu/``) — what
@@ -392,7 +392,7 @@ def test_bwrap_image_has_no_host_home_visibility(agentcap_image_for):
 
     Asserts by probing a path that exists on the host (the agentcap
     repo's pyproject.toml) but cannot exist in the image."""
-    tag = agentcap_image_for(_SANDBOX_TEST_AGENT)
+    tag = agentcap_buildah_image_for(_SANDBOX_TEST_AGENT)
     with BwrapSandbox(image=tag) as sb:
         # cwd of pytest is the agentcap repo root, which lives under the
         # host's $HOME. The repo's pyproject.toml definitely exists on
