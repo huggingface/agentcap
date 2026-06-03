@@ -98,10 +98,10 @@ def require_sandbox_or_die(
     from .podman_provisioning import ensure_image, ensure_machine_running
     try:
         ensure_machine_running(log=log)
-    except RuntimeError as exc:
+        ensure_image(agent, log=log)
+    except (FileNotFoundError, RuntimeError) as exc:
         sys.stderr.write(f"{command}: {exc}\n")
         sys.exit(2)
-    ensure_image(agent, log=log)
     return get_sandbox(
         agent=agent, env=env,
         readonly_paths=readonly_paths,
