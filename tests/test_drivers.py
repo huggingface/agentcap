@@ -4,8 +4,8 @@ These cover the *parser*, *config-builder*, and *overlay-scaffolding*
 helpers — none of which shell out to a real agent. Live integration
 tests for each driver (which actually invoke the agent CLI against a
 running model server) live in ``test_drivers_live.py`` and are gated
-on the agent binary being on PATH plus an ``AGENTCAP_TEST_LLM_URL``
-endpoint.
+on the agent binary being available in the sandbox image and on
+``podman`` being on the host PATH.
 """
 
 from __future__ import annotations
@@ -234,6 +234,6 @@ def test_rewrite_config_preserves_existing_auxiliary_keys():
 # sandbox. Behaviour previously verified by 5 unit tests against
 # fake user-homes is now covered by the live driver test
 # (tests/test_drivers_live.py::test_hermes_live) which exercises
-# the full path against a real Lima VM (macOS) or bwrap'd host
-# (Linux). The pure-Python parts that survived as standalone
-# helpers (`_rewrite_config`) keep their own tests above.
+# the full path against a real podman container. The pure-Python
+# parts that survived as standalone helpers (`_rewrite_config`)
+# keep their own tests above.

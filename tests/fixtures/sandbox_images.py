@@ -1,19 +1,15 @@
-"""Per-agent buildah sandbox image lifecycle: pytest fixture + CLI.
+"""Per-agent sandbox image lifecycle: pytest fixture + CLI.
 
-Two use cases for the same logic:
+Two callers for the same logic:
 
 * ``python tests/fixtures/sandbox_images.py`` — pre-build every
-  ``agentcap-<agent>:latest`` image as a CI setup step, so the test
-  runner doesn't pay the cold-build cost (a few minutes per image).
+  per-agent image as a CI setup step so the test runner doesn't pay
+  the cold-build cost.
 * ``agentcap_image_for`` pytest fixture — same logic, on demand,
-  when a test requests it. Idempotent: ``ensure_image`` short-circuits
-  if the on-disk image matches the Containerfile hash.
+  when a test requests it.
 
 Registered as a pytest plugin in ``tests/conftest.py`` via
-``pytest_plugins``. Pattern mirrors
-``huggingface/optimum-neuron``'s ``tests/fixtures/llm/export_models.py``
-(separate "prepare heavy artefacts" from "run tests" so CI can cache
-the artefacts independently).
+``pytest_plugins``.
 """
 
 from __future__ import annotations
@@ -25,7 +21,9 @@ import sys
 import pytest
 
 from agentcap.drivers import known_drivers
-from agentcap.sandbox.image_provisioning import ensure_image
+from agentcap.sandbox.podman_provisioning import (
+    ensure_image, ensure_machine_running,
+)
 
 
 def _log(msg: str) -> None:
@@ -34,14 +32,13 @@ def _log(msg: str) -> None:
 
 
 def build_one(agent: str) -> str:
-    """Build (or reuse) the ``agentcap-<agent>:latest`` image."""
+    ensure_machine_running(log=_log)
     return ensure_image(agent, log=_log)
 
 
 def build_many(agents: list[str]) -> dict[str, str | Exception]:
-    """Build a set of images, capturing per-agent failures instead
-    of stopping on the first one. CI surfaces the full failure set
-    in one go."""
+    """Build each agent's image, capturing per-agent failures so CI
+    surfaces the full failure set in one go."""
     out: dict[str, str | Exception] = {}
     for agent in agents:
         try:
@@ -51,17 +48,11 @@ def build_many(agents: list[str]) -> dict[str, str | Exception]:
     return out
 
 
-# ---------------------------------------------------------------------------
-# pytest fixture — registered via `pytest_plugins` in tests/conftest.py
-# ---------------------------------------------------------------------------
-
-
 @pytest.fixture(scope="session")
 def agentcap_image_for():
-    """Factory: ``agentcap_image_for("goose")`` ensures the
-    ``agentcap-goose:latest`` image is built and current. Same
-    lifecycle as ``agentcap run`` on Linux."""
-
+    """Factory: ``agentcap_image_for("hermes")`` ensures the
+    per-agent podman image is built and current. Skips if podman
+    or its machine isn't available."""
     cache: dict[str, str] = {}
 
     def _ensure(agent: str) -> str:
@@ -85,7 +76,7 @@ def agentcap_image_for():
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Build the per-agent buildah sandbox images used by "
+            "Pre-build the per-agent sandbox images used by "
             "`agentcap run` and the live driver tests."
         ),
     )

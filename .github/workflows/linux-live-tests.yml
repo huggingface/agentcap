@@ -9,10 +9,10 @@ on:
 jobs:
   tests:
     # Live end-to-end tests: build per-agent sandbox images, spawn
-    # ``llama serve`` locally, and run real agent CLIs against the
-    # spawned model. Failures here block merges — these are the only
-    # tests that exercise the full sandbox + proxy + agent stack
-    # end-to-end.
+    # the llama.cpp server as a sibling podman container, and run
+    # real agent CLIs against it. Failures here block merges — these
+    # are the only tests that exercise the full sandbox + proxy +
+    # agent stack end-to-end.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -20,45 +20,19 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - name: Install system deps (bwrap + buildah)
-        # Required by ``agentcap.sandbox.bwrap``. Both ship in
-        # Ubuntu's default apt sources.
+      - name: Install system deps (podman)
+        # Required by ``agentcap.sandbox.podman``. Ships in Ubuntu's
+        # default apt sources; rootless mode uses the runner user.
         run: |
           sudo apt-get update
-          sudo apt-get install -y bubblewrap buildah
+          sudo apt-get install -y podman
       - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
           pip install -e '.[dev]'
-      - name: Install llama
-        # ``live_proxy_base_url`` invokes ``llama serve`` to spawn a
-        # local model server. The installer reads ``LLAMA_VERSION``
-        # from env and pins the binary release; without it the
-        # script grabs whatever ``$REPO/latest`` returns at install
-        # time. Pinning keeps CI deterministic across llama.cpp
-        # releases that change CLI flags or server defaults.
-        #
-        # NB the pin tracks llama.app's HF bucket
-        # (``huggingface.co/buckets/ggml-org/install.sh``), which is
-        # a subset of the upstream ``ggml-org/llama.cpp`` release
-        # tags. Don't copy an upstream tag here — query
-        # ``$REPO/latest`` first to see what the bucket actually
-        # publishes.
-        #
-        # ``SKIP_CUDA`` / ``SKIP_ROCM`` / ``SKIP_VULKAN`` make the
-        # installer go straight to the CPU build — the runner has
-        # no GPU and the probe downloads would fail and waste time.
-        env:
-          LLAMA_VERSION: b9444
-          SKIP_CUDA: "1"
-          SKIP_ROCM: "1"
-          SKIP_VULKAN: "1"
-        run: |
-          curl -fsSL https://llama.app/install.sh | sh
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Cache GGUF weights
-        # The default test GGUF (gemma-4-E4B-it Q4_K_M, ~5 GB) lands
-        # in the HF hub cache. Caching it keeps live runs cheap after
+        # The default test GGUF (Qwen3-1.7B Q8_0, ~1.8 GB) lands in
+        # the HF hub cache. Caching it keeps live runs cheap after
         # the first download.
         uses: actions/cache@v5
         with:
@@ -66,19 +40,17 @@ jobs:
           key: hf-hub-gguf-${{ hashFiles('tests/conftest.py') }}
           restore-keys: |
             hf-hub-gguf-
-      - name: Cache buildah images
+      - name: Cache sandbox images
         # Per-agent sandbox images (hermes is the heaviest at ~900 MB)
-        # are built on first use and stamped with a hash of their
-        # Containerfile + build-context dir. Caching the rootless
-        # buildah storage between runs lets ``ensure_image`` short-
-        # circuit on hash match. Key invalidates whenever any
-        # Containerfile or per-agent script changes.
+        # are built on first use and stamped with a hash label. Caching
+        # the rootless containers/storage between runs lets
+        # ``ensure_image`` short-circuit on hash match.
         uses: actions/cache@v5
         with:
           path: ~/.local/share/containers
-          key: buildah-images-${{ hashFiles('containers/**') }}
+          key: sandbox-images-${{ hashFiles('containers/**') }}
           restore-keys: |
-            buildah-images-
+            sandbox-images-
       - name: Pre-build sandbox images
         # Idempotent build of every per-agent image. On a cache hit
         # this is a no-op (hash match in ``ensure_image``); on a miss

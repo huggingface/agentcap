@@ -4,10 +4,8 @@ Live tests run when prereqs are present, skip otherwise. Prereqs:
 
   - Agent binary present in the per-agent sandbox
     (``agentcap run --agent <name>`` once provisions it).
-  - A ``/v1`` endpoint reachable — set ``AGENTCAP_TEST_LLM_URL`` or
-    have ``llama`` (with the ``serve`` subcommand) executable on PATH
-    so the fixture spawns one. Install via:
-    ``curl -fsSL https://llama.app/install.sh | sh``.
+  - ``podman`` on PATH (the fixture pulls and runs the official
+    ``ghcr.io/ggml-org/llama.cpp`` server image).
 """
 
 from __future__ import annotations
@@ -46,6 +44,12 @@ def _log(msg: str) -> None:
 _DEFAULT_GGUF_REPO = "Qwen/Qwen3-1.7B-GGUF"
 _DEFAULT_GGUF_FILE = "Qwen3-1.7B-Q8_0.gguf"
 _DEFAULT_MODEL_ALIAS = "Qwen3-1.7B"
+
+# Official llama.cpp server image, version-pinned per llama.cpp
+# commit. Override via ``AGENTCAP_TEST_LLAMA_IMAGE`` to test a
+# different release. CPU-only; the GPU variants are tagged
+# ``server-cuda13-*`` / ``server-vulkan-*``.
+_DEFAULT_LLAMA_IMAGE = "ghcr.io/ggml-org/llama.cpp:server-b9487"
 
 
 def _fetch_default_gguf() -> str | None:
@@ -106,147 +110,124 @@ def _wait_ready(
 
 
 def _agent_reachable_host() -> str:
-    """The hostname the agent (inside the sandbox) should use to
-    talk to a host-side server.
-
-    * Linux/bwrap: the namespace shares the host network, so
-      ``127.0.0.1`` reaches the host.
-    * macOS/Lima: the VM has its own loopback, so the host appears
-      as ``host.lima.internal`` (Lima's well-known DNS alias).
-
-    Anything else falls back to ``127.0.0.1`` and is the user's
-    problem to make reachable.
-    """
-    import platform as _platform
-    if _platform.system() == "Darwin" and shutil.which("limactl"):
-        return "host.lima.internal"
-    return "127.0.0.1"
+    """Hostname the agent (inside the podman container) uses to reach
+    a host-side server. Podman exposes the host gateway as
+    ``host.containers.internal``."""
+    return "host.containers.internal"
 
 
 @pytest.fixture(scope="session")
-def live_proxy_base_url():
-    """OpenAI-compat ``/v1`` URL the agent (inside the sandbox) hits.
+def live_llama_url():
+    """Host-side server root of the llama backend (no ``/v1`` suffix).
 
-    If ``AGENTCAP_TEST_LLM_URL`` is set, return it as-is (caller is
-    responsible for the server and for making it reachable from the
-    sandbox).
-
-    Otherwise, if ``AGENTCAP_TEST_GGUF`` is set and ``llama`` is on
-    PATH, spawn ``llama serve`` on ``0.0.0.0:<free port>`` so the
-    sandbox can connect (the agent inside a Lima VM cannot reach
-    the Mac host's loopback). The URL returned uses
-    :func:`_agent_reachable_host` so it works on both bwrap (where
-    ``127.0.0.1`` is fine) and Lima (where the host is
-    ``host.lima.internal``).
+    For tests that spawn their own proxy on top and need a directly-
+    reachable upstream. Reuses an existing ``llama serve`` on
+    8000/8080, or spawns one as a podman container.
     """
-    url = os.environ.get("AGENTCAP_TEST_LLM_URL")
-    if url:
-        yield url
-        return
-
-    # Probe common ports for an already-running llama serve before
-    # spawning. Lets the user keep one server alive across many
-    # `pytest` invocations (per their explicit workflow preference)
-    # without having to set AGENTCAP_TEST_LLM_URL every time.
     for probe_port in (8000, 8080):
         try:
             with urlopen(
                 f"http://127.0.0.1:{probe_port}/v1/models", timeout=1,
             ) as r:
                 if r.status == 200:
-                    _log(
-                        f"reusing existing llama serve on :{probe_port}"
-                    )
-                    yield f"http://127.0.0.1:{probe_port}/v1"
+                    _log(f"reusing existing llama serve on :{probe_port}")
+                    yield f"http://127.0.0.1:{probe_port}"
                     return
         except Exception:
             pass
 
-    llama = os.environ.get("AGENTCAP_TEST_LLAMA_BIN") or shutil.which("llama")
-    if not llama:
+    if not shutil.which("podman"):
         pytest.skip(
-            "llama not on PATH; install it with `curl -fsSL "
-            "https://llama.app/install.sh | sh`, set "
-            "AGENTCAP_TEST_LLAMA_BIN, OR set AGENTCAP_TEST_LLM_URL "
-            "to point at an existing /v1 endpoint."
+            "podman not on PATH; install with brew install podman "
+            "(macOS) or apt install podman (Linux)."
         )
+    # macOS: bring the podman machine up before any ``podman run`` so
+    # a stopped/uninitialised machine surfaces as a clear skip with
+    # an install hint, not a generic ``podman run`` failure.
+    from agentcap.sandbox.podman_provisioning import ensure_machine_running
+    try:
+        ensure_machine_running(log=_log)
+    except RuntimeError as exc:
+        pytest.skip(str(exc))
     gguf = os.environ.get("AGENTCAP_TEST_GGUF") or _fetch_default_gguf()
     if not gguf:
         pytest.skip(
             "couldn't obtain a GGUF; HF fetch failed and no "
             "AGENTCAP_TEST_GGUF override set."
         )
+    # HF cache stores GGUFs as symlinks into ``blobs/``; the container
+    # needs the realpath's parent dir bound in.
+    real_gguf = Path(gguf).resolve()
+    gguf_dir = real_gguf.parent
+    gguf_name = real_gguf.name
 
+    image = os.environ.get(
+        "AGENTCAP_TEST_LLAMA_IMAGE", _DEFAULT_LLAMA_IMAGE,
+    )
     port = _free_port()
     ctx = os.environ.get("AGENTCAP_TEST_CTX_SIZE", "8192")
-    ngl = os.environ.get("AGENTCAP_TEST_NGL", "999")
+    name = f"agentcap-llama-{os.getpid()}"
     argv = [
-        llama, "serve",
-        "--model", gguf,
-        # 0.0.0.0 so the Lima VM can reach the host via
-        # host.lima.internal; 127.0.0.1 would be loopback-only.
+        "podman", "run", "--rm", "-d", "--name", name,
+        "-p", f"127.0.0.1:{port}:8080",
+        "--mount", f"type=bind,src={gguf_dir},dst=/models,ro",
+        image,
+        "--model", f"/models/{gguf_name}",
         "--host", "0.0.0.0",
-        "--port", str(port),
+        "--port", "8080",
         "--ctx-size", ctx,
-        "--reasoning", "off",
+        "--reasoning-format", "none",
         "--jinja",
-        "--n-gpu-layers", ngl,
-        # `--fit off` skips llama.cpp's `common_params_fit_impl` auto
-        # parameter-fitting step. We're passing --n-gpu-layers
-        # explicitly so the auto-fit is redundant, and recent llama.cpp
-        # builds (b9039+) crash inside the fit step on some models
-        # (gemma-4 on multi-GPU hits GGML_SCHED_MAX_SPLIT_INPUTS).
-        "--fit", "off",
     ]
-    log_path = "/tmp/agentcap-pytest-llama.log"
-    log = open(log_path, "w")
     _log(
-        f"spawning llama serve on :{port} "
-        f"(gguf={Path(gguf).name}, ctx={ctx}, ngl={ngl}); "
-        f"server log -> {log_path}"
+        f"spawning llama container {name} on :{port} "
+        f"(image={image}, gguf={gguf_name}, ctx={ctx})"
     )
-    proc = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT)
-    # Probe on 127.0.0.1 from the host side — that's what
-    # the local _wait_ready can reach.
+    # 10 min covers a cold-cache image pull (~1 GB) on a slow CI
+    # runner plus the actual ``podman run -d`` setup.
+    r = subprocess.run(argv, capture_output=True, text=True, timeout=600)
+    if r.returncode != 0:
+        # ``podman run`` failing once the host has podman is a real
+        # problem (bad flags, pull failure, permissions), not a missing
+        # prereq. Fail loud so CI doesn't silently green over it.
+        pytest.fail(f"podman run failed: {r.stderr.strip()}")
     try:
         _wait_ready(
             f"http://127.0.0.1:{port}/v1/models",
             timeout=180,
             log=_log,
         )
-        _log(f"llama serve ready at :{port}")
-
-        # Start the in-process proxy on a free port (don't hardcode
-        # 8001 — collides with whatever the user has running). Bind
-        # 0.0.0.0 so the Lima VM can reach it via host.lima.internal.
-        # ``sandbox_for`` propagates the resulting URL into each
-        # sandbox as ``AGENTCAP_PROXY_URL``; the per-agent
-        # ``agentcap-init`` substitutes that into the baked config.
-        import tempfile
-
-        from agentcap.proxy import serve_in_thread
-        upstream = f"http://127.0.0.1:{port}"
-        proxy_port = _free_port()
-        capture_dir = tempfile.mkdtemp(prefix="agentcap-pytest-captures-")
-        agent_url = (
-            f"http://{_agent_reachable_host()}:{proxy_port}/v1"
-        )
-        _log(
-            f"starting in-process proxy on 0.0.0.0:{proxy_port} "
-            f"-> {upstream} (agents reach it at {agent_url})"
-        )
-        with serve_in_thread(
-            upstream, capture_dir,
-            host="0.0.0.0", port=proxy_port,
-        ):
-            yield agent_url
+        _log(f"llama container ready at :{port}")
+        yield f"http://127.0.0.1:{port}"
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=30)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-        log.close()
+        subprocess.run(
+            ["podman", "rm", "-f", name],
+            capture_output=True, text=True, timeout=30,
+        )
+
+
+@pytest.fixture(scope="session")
+def live_proxy_base_url(live_llama_url):
+    """Agent-side ``/v1`` URL of the in-process capture proxy.
+
+    For tests that exercise the agent ↔ proxy ↔ llama path from
+    outside.
+    """
+    import tempfile
+
+    from agentcap.proxy import serve_in_thread
+    proxy_port = _free_port()
+    capture_dir = tempfile.mkdtemp(prefix="agentcap-pytest-captures-")
+    agent_url = f"http://{_agent_reachable_host()}:{proxy_port}/v1"
+    _log(
+        f"starting in-process proxy on 0.0.0.0:{proxy_port} "
+        f"-> {live_llama_url} (agents reach it at {agent_url})"
+    )
+    with serve_in_thread(
+        live_llama_url, capture_dir,
+        host="0.0.0.0", port=proxy_port,
+    ):
+        yield agent_url
 
 
 @pytest.fixture(scope="session")
@@ -254,40 +235,19 @@ def live_model() -> str:
     return os.environ.get("AGENTCAP_TEST_MODEL", _DEFAULT_MODEL_ALIAS)
 
 
-def docstring_prompt(proj: str) -> str:
-    # Hermes's edit/patch tools resolve paths literally, not against
-    # $PWD — so a bare ``hello.py`` makes small models guess (and
-    # Qwen3-1.7B guesses ``/root/hello.py`` ≈ $HOME). Pass the
-    # sandbox-side absolute path so the model has nothing to fill in.
-    return (
-        f"Add a one-line docstring to the hello function in "
-        f"{proj}/hello.py describing what it does. "
-        f"Use your edit tool. Then stop."
-    )
-
-
-_HELLO_PY = 'def hello():\n    print("Hello, world!")\n'
-
-
 @pytest.fixture(scope="session")
 def sandbox_for(
-    lima_vm_for, agentcap_image_for, live_proxy_base_url, live_model,
+    agentcap_image_for, live_proxy_base_url, live_model,
 ):
     """Factory: ``sandbox_for("hermes")`` returns a Sandbox keyed on
-    the given agent. On macOS this is the ``agentcap-<agent>``
-    LimaSandbox (the fixture ensures the VM is up first); on Linux
-    it's the host BwrapSandbox mounted on the per-agent buildah image
-    (the fixture ensures the image is built); on other hosts it skips.
+    the given agent. The image fixture ensures the per-agent podman
+    image is built first.
 
     The sandbox env is seeded with ``AGENTCAP_PROXY_URL`` *and*
     ``AGENTCAP_MODEL`` so the per-agent entrypoint can start — the
     opencode init script bails out without ``AGENTCAP_MODEL``, which
     is enough to make ``command -v opencode`` (used as a skip probe
     by ``agent_proj_for``) exit non-zero and silently skip the test.
-
-    Sandboxes are closed at session teardown so the BwrapSandbox's
-    persistent buildah working container is removed (otherwise it
-    accumulates across pytest sessions).
     """
     from agentcap.sandbox import get_sandbox
 
@@ -296,15 +256,7 @@ def sandbox_for(
     def _get(agent: str):
         if agent in cache:
             return cache[agent]
-        import platform as _platform
-        if _platform.system() == "Darwin":
-            lima_vm_for(agent)
-        elif _platform.system() == "Linux":
-            agentcap_image_for(agent)
-        else:
-            pytest.skip(
-                "live tests require Linux (bwrap+buildah) or macOS (lima)"
-            )
+        agentcap_image_for(agent)
         sb = get_sandbox(
             agent=agent,
             env={
@@ -324,17 +276,12 @@ def sandbox_for(
 
 @pytest.fixture
 def agent_proj_for(sandbox_for):
-    """Factory: ``agent_proj_for("hermes")`` ensures the
-    ``hermes`` binary is installed in the sandbox, then mints a
-    sandbox-side temp dir seeded with ``hello.py`` for the
-    docstring task. Returns ``(sandbox, proj_path)``.
+    """Factory: ``agent_proj_for("hermes")`` returns
+    ``(sandbox, proj_path)``. The sandbox is probed for the agent
+    binary (test skips if it's missing) and a fresh empty project
+    dir is minted to serve as ``cwd``.
 
-    Cleanup: ``proj_path`` is removed at the end of the test via
-    ``sandbox.rmtree``.
-
-    Skips (with ``pytest.skip``) when the agent binary isn't on the
-    sandbox's PATH — capture rigs should provision the per-agent VM
-    or apt-install the agent before running live tests.
+    The dir is removed at the end of the test.
     """
     created: list[tuple[object, str]] = []
 
@@ -346,12 +293,10 @@ def agent_proj_for(sandbox_for):
         )
         if r.returncode != 0:
             pytest.skip(
-                f"{agent!r} is not on the sandbox's PATH; provision "
-                f"the agentcap-{agent} VM (or install on the Linux "
-                f"host) before running live tests."
+                f"{agent!r} is not on the sandbox's PATH; build the "
+                f"agentcap-{agent} image before running live tests."
             )
         proj = sb.mkdtemp(prefix=f"agentcap-{agent}-proj-")
-        sb.write_text(f"{proj}/hello.py", _HELLO_PY)
         _log(f"{agent} project: {proj}")
         created.append((sb, proj))
         return sb, proj
@@ -359,47 +304,6 @@ def agent_proj_for(sandbox_for):
     yield _build
     for sb, proj in created:
         sb.rmtree(proj)
-
-
-def reset_hello_py(sandbox, proj: str) -> None:
-    """Reset the project's ``hello.py`` to its starting content —
-    used by the retry helper in test_drivers_live so each attempt
-    sees a clean slate."""
-    sandbox.write_text(f"{proj}/hello.py", _HELLO_PY)
-
-
-# ---------------------------------------------------------------------------
-# Per-agent runtime fixtures: Lima VM on macOS, buildah image on Linux
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture(scope="session")
-def lima_vm_for():
-    """Factory: ``lima_vm_for("hermes")`` ensures the
-    ``agentcap-hermes`` VM is running. Delegates to
-    :func:`agentcap.sandbox.lima_provisioning.ensure_vm` — same
-    lifecycle as ``agentcap run``. VMs touched by the fixture are
-    stopped at session exit."""
-    from agentcap.sandbox.lima_provisioning import ensure_vm, stop_vm
-
-    cache: dict[str, str] = {}
-
-    def _ensure(agent: str) -> str:
-        if agent in cache:
-            return cache[agent]
-        try:
-            vm = ensure_vm(agent, log=_log)
-        except (FileNotFoundError, RuntimeError) as e:
-            pytest.skip(str(e))
-        cache[agent] = vm
-        return vm
-
-    yield _ensure
-    for vm in cache.values():
-        _log(f"stopping {vm}…")
-        stop_vm(vm)
-
-
 
 
 @pytest.fixture
@@ -586,9 +490,8 @@ class _RecordingHandler(http.server.BaseHTTPRequestHandler):
 @pytest.fixture
 def mock_http_server():
     """Spin up a tiny in-process HTTP server on a free port for the
-    duration of one test. Bound to ``0.0.0.0`` so a Lima VM can
-    reach it via ``host.lima.internal`` — the Mac loopback
-    ``127.0.0.1`` is not network-reachable from inside the VM.
+    duration of one test. Bound to ``0.0.0.0`` so a podman container
+    can reach it via ``host.containers.internal``.
 
     Yields ``(port, received_paths)``: the port the server is
     listening on, and a list (live, mutated by request handlers)

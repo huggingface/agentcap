@@ -24,12 +24,6 @@ def _is_hf_router_upstream(upstream: str) -> bool:
     return host == "router.huggingface.co"
 
 
-def _is_lima_host() -> bool:
-    import platform
-    import shutil
-    return platform.system() == "Darwin" and shutil.which("limactl") is not None
-
-
 def _read_hf_token_cache() -> str | None:
     token_path = Path.home() / ".cache" / "huggingface" / "token"
     try:
@@ -466,9 +460,8 @@ def run_cmd(
         "tasks": [],
     }, indent=2))
 
-    # Resolve --sandbox up front: it joins the per-VM mount set
-    # alongside --skills (RO) and the traces dir (RW), so the Lima
-    # backend can configure all three at provision time.
+    # Resolve --sandbox up front: it joins the bind-mount set
+    # alongside --skills (RO) and the traces dir (RW).
     if sandbox_dir is not None:
         sandbox_cwd = str(Path(sandbox_dir).resolve())
     else:
@@ -483,14 +476,11 @@ def run_cmd(
     def _on_event(event: str, **kw):
         click.echo(f"  [{event}] " + " ".join(f"{k}={v}" for k, v in kw.items()), err=True)
 
-    # Lima VM sees 127.0.0.1 as its own loopback — bind on all ifs and
-    # advertise the host bridge instead.
-    bind_host, agent_host = (
-        ("0.0.0.0", "host.lima.internal") if _is_lima_host()
-        else ("127.0.0.1", "127.0.0.1")
-    )
-    with serve_in_thread(upstream, captures, host=bind_host) as proxy:
-        proxy_url = f"http://{agent_host}:{proxy.port}/v1"
+    # Bind on 0.0.0.0 so the podman container (which has its own netns)
+    # can dial in via ``host.containers.internal``. Loopback would be
+    # unreachable from the container side.
+    with serve_in_thread(upstream, captures, host="0.0.0.0") as proxy:
+        proxy_url = f"http://host.containers.internal:{proxy.port}/v1"
         click.echo(f"  [proxy] {proxy_url}", err=True)
 
         sandbox_env = {
