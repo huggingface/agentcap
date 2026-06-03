@@ -4,7 +4,10 @@
     "local": {
       "npm": "@ai-sdk/openai-compatible",
       "name": "Local via agentcap proxy",
-      "options": {"baseURL": "@@AGENTCAP_PROXY_URL@@"},
+      "options": {
+        "baseURL": "@@AGENTCAP_PROXY_URL@@",
+        "apiKey": "{env:OPENAI_API_KEY}"
+      },
       "models": {
         "@@AGENTCAP_MODEL@@": {
           "name": "@@AGENTCAP_MODEL@@",
