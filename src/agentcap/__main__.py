@@ -24,14 +24,6 @@ def _is_hf_router_upstream(upstream: str) -> bool:
     return host == "router.huggingface.co"
 
 
-def _proxy_host_pair() -> tuple[str, str]:
-    """Return (bind_host, agent_host) for the in-process capture proxy.
-    Podman isolates the agent in its own netns (podman machine VM or
-    rootless slirp4netns); the host is reachable as
-    ``host.containers.internal``."""
-    return "0.0.0.0", "host.containers.internal"
-
-
 def _read_hf_token_cache() -> str | None:
     token_path = Path.home() / ".cache" / "huggingface" / "token"
     try:
@@ -484,9 +476,11 @@ def run_cmd(
     def _on_event(event: str, **kw):
         click.echo(f"  [{event}] " + " ".join(f"{k}={v}" for k, v in kw.items()), err=True)
 
-    bind_host, agent_host = _proxy_host_pair()
-    with serve_in_thread(upstream, captures, host=bind_host) as proxy:
-        proxy_url = f"http://{agent_host}:{proxy.port}/v1"
+    # Bind on 0.0.0.0 so the podman container (which has its own netns)
+    # can dial in via ``host.containers.internal``. Loopback would be
+    # unreachable from the container side.
+    with serve_in_thread(upstream, captures, host="0.0.0.0") as proxy:
+        proxy_url = f"http://host.containers.internal:{proxy.port}/v1"
         click.echo(f"  [proxy] {proxy_url}", err=True)
 
         sandbox_env = {
