@@ -1235,6 +1235,26 @@ def _delta_label(removed: int, added: int) -> str:
     return f"+{added}"
 
 
+def _message_text(m: dict) -> str:
+    """Flatten ``message.content`` to a string. Tool / multimodal
+    messages carry list-typed content; join the text parts."""
+    c = m.get("content")
+    if isinstance(c, list):
+        return " ".join(
+            p.get("text", "") for p in c if isinstance(p, dict)
+        )
+    return c or ""
+
+
+def _flatten(s: str, cap: int) -> str:
+    """Single-line, length-capped text. Without this, content with
+    embedded newlines (assistant prose, tool outputs) would blow up to
+    many visible lines and push later messages off fzf's preview
+    window."""
+    s = " ".join(s.split())
+    return s if len(s) <= cap else s[:cap] + "…"
+
+
 @cli.command("_preview", hidden=True)
 @click.argument("request_id")
 def _preview_cmd(request_id: str) -> None:
