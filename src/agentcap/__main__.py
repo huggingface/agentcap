@@ -915,6 +915,13 @@ def _enumerate_workspace_requests(scope: str | None) -> list[dict]:
                 label = f"({_delta_label(len(removed), len(new_msgs))})"
             summary = _message_summary(new_msgs[-1]) if new_msgs else ""
             preview = f"{label} {summary}".replace("\n", " ").strip()
+            # Concatenate every new message's content into a single
+            # searchable blob so fzf can match against deeper content
+            # (e.g. ``hf-cli`` referenced 4 messages back in the diff)
+            # without bloating the visible row.
+            searchable = " ".join(
+                _message_text(m) for m in new_msgs
+            ).replace("\n", " ").replace("\t", " ")
             prev_rid = prev_rid_by_task.get(task_key)
             prev_msgs_by_task[task_key] = messages
             prev_rid_by_task[task_key] = rid
@@ -929,6 +936,7 @@ def _enumerate_workspace_requests(scope: str | None) -> list[dict]:
                 "req_index": idx_by_task[task_key],
                 "prev_rid": prev_rid,
                 "preview": preview,
+                "searchable": searchable,
             })
     rows.sort(key=lambda r: (r["run_id"], r["captured_at"]))
     return rows
@@ -993,7 +1001,14 @@ def _format_inspect_rows(
             line = f"\033[7m{line}\033[0m"
         prev_task = task_id
         display.append(line)
-        fzf.append(f"{line}\t{r['rid']}\t{r.get('prev_rid') or '-'}")
+        # Hidden tab columns (fzf searches all of them by default):
+        #   2 = full rid, 3 = prev rid, 4 = concatenated new-message
+        # bodies so a query like ``hf-cli`` matches rows whose deeper
+        # content references it.
+        fzf.append(
+            f"{line}\t{r['rid']}\t{r.get('prev_rid') or '-'}"
+            f"\t{r.get('searchable') or ''}"
+        )
     return header, display, fzf
 
 
