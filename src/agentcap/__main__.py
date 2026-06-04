@@ -1192,6 +1192,49 @@ def _run_preview_cmd(run_id: str) -> None:
         click.echo(f"  {t.get('task_id', '?')}: ({completed} turns) {prompt}")
 
 
+def _message_key(m: dict) -> tuple:
+    """Canonical key for a ``messages[]`` entry. Compares only the
+    load-bearing fields (role/content/tool_call_id/tool_calls); ignores
+    optional metadata like the tool ``name`` field that some agents
+    include on one turn but not the next (notably hermes when it
+    re-serialises its session DB across turn boundaries)."""
+    import json as _json
+    c = m.get("content")
+    if isinstance(c, list):
+        c = _json.dumps(c, sort_keys=True)
+    tc = m.get("tool_calls")
+    tc_key = _json.dumps(tc, sort_keys=True) if tc else None
+    return (m.get("role"), c, m.get("tool_call_id"), tc_key)
+
+
+def _diff_messages(prev: list, curr: list) -> tuple[list, list]:
+    """``(removed, added)`` — the suffixes of ``prev`` and ``curr`` that
+    diverge. Element-by-element so a length-equal turn boundary (where
+    an agent swaps a meta-prompt for the user's followup at the last
+    index) shows up as a real diff. Pure-append cases yield
+    ``removed=[]``; swaps yield non-empty removed AND added of equal
+    or unequal length depending on the truncation.
+    """
+    prev_keys = [_message_key(m) for m in prev]
+    curr_keys = [_message_key(m) for m in curr]
+    n = min(len(prev_keys), len(curr_keys))
+    i = n
+    for j in range(n):
+        if prev_keys[j] != curr_keys[j]:
+            i = j
+            break
+    return prev[i:], curr[i:]
+
+
+def _delta_label(removed: int, added: int) -> str:
+    """Compact ``messages[]`` delta marker. Hides the removed count
+    when zero (the common pure-append case) so mid-loop rows stay
+    visually quiet; surfaces it for swaps (e.g. ``-1 +1``)."""
+    if removed:
+        return f"-{removed} +{added}"
+    return f"+{added}"
+
+
 @cli.command("_preview", hidden=True)
 @click.argument("request_id")
 def _preview_cmd(request_id: str) -> None:
