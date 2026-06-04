@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -994,7 +995,7 @@ def _fzf_pick(
     lines: list[str],
     preview_cmd: str,
     *,
-    extra_args: list[str] = (),
+    extra_args: Sequence[str] = (),
 ) -> tuple[str | None, bool]:
     """Run fzf over ``lines`` with ``header`` pinned at the top. Returns
     ``(picked, available)``:
