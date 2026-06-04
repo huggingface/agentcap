@@ -1371,7 +1371,7 @@ def _render_preview_message(m: dict) -> None:
     if role == "tool":
         tcid = (m.get("tool_call_id") or "?")[:8]
         click.echo(f"  {_tag(f'tool result, tool_call_id={tcid}')}", color=True)
-        click.echo(f"  {_flatten(_message_text(m), _PREVIEW_MSG_CAP)}")
+        click.echo(f"  {_flatten(_message_text(m), _PREVIEW_MSG_CAP)}", color=True)
         return
     click.echo(
         f"  {_tag(role)} {_flatten(_message_text(m), _PREVIEW_MSG_CAP)}",
