@@ -872,12 +872,22 @@ def _enumerate_workspace_requests(scope: str | None) -> list[dict]:
         captures = run_dir / "captures"
         if not captures.is_dir():
             continue
+        # Load every record up front so we can compute, per row, the
+        # message-array delta vs the immediately preceding capture in
+        # the same task (used for the MESSAGES preview column).
+        recs: list[tuple[str, dict]] = []
         for req_path in captures.glob("*.request.json"):
             rid = req_path.stem.split(".")[0]
             try:
                 req = _json.loads(req_path.read_text())
             except (OSError, _json.JSONDecodeError):
                 continue
+            recs.append((rid, req))
+        recs.sort(
+            key=lambda r: (r[1].get("task_id") or "", r[1].get("captured_at", 0))
+        )
+        prev_len_by_task: dict = {}
+        for rid, req in recs:
             resp_path = captures / f"{rid}.response.json"
             status = "?"
             if resp_path.is_file():
@@ -886,22 +896,23 @@ def _enumerate_workspace_requests(scope: str | None) -> list[dict]:
                 except (OSError, _json.JSONDecodeError):
                     pass
             messages = (req.get("body") or {}).get("messages") or []
-            last_user = next(
-                (m.get("content") for m in reversed(messages) if m.get("role") == "user"),
-                "",
-            )
-            if isinstance(last_user, list):
-                # Tool-result / multi-modal message content can be a list.
-                last_user = " ".join(
-                    p.get("text", "") for p in last_user if isinstance(p, dict)
-                )
-            preview = (last_user or "").replace("\n", " ").strip()
+            task_id = req.get("task_id")
+            prev_len = prev_len_by_task.get(task_id)
+            if prev_len is None:
+                new_msgs = messages
+                label = f"(init {len(new_msgs)})"
+            else:
+                new_msgs = messages[prev_len:]
+                label = f"(+{len(new_msgs)})"
+            prev_len_by_task[task_id] = len(messages)
+            summary = _message_summary(new_msgs[-1]) if new_msgs else ""
+            preview = f"{label} {summary}".replace("\n", " ").strip()
             rows.append({
                 "run_id": run_dir.name,
                 "rid": rid,
                 "captured_at": int(req.get("captured_at", 0)),
                 "status": status,
-                "task_id": req.get("task_id"),
+                "task_id": task_id,
                 "turn": req.get("turn"),
                 "preview": preview,
             })
@@ -938,7 +949,7 @@ def _format_inspect_rows(
         cells.append(prompt)
         return "  ".join(cells)
 
-    header = _row("LOC", "RID", "RUN", "PROMPT")
+    header = _row("LOC", "RID", "RUN", "MESSAGES")
 
     body: list[str] = []
     for r in rows:
@@ -1192,6 +1203,33 @@ def _run_preview_cmd(run_id: str) -> None:
         click.echo(f"  {t.get('task_id', '?')}: ({completed} turns) {prompt}")
 
 
+_PICKER_SUMMARY_CAP = 160
+
+
+def _message_summary(m: dict) -> str:
+    """One-line role-aware summary of one ``messages[]`` entry.
+    Used in the picker's MESSAGES column where we have ~one row to
+    convey 'what's new in this call'. Truncated so a large tool
+    result can't bloat the row."""
+    role = (m or {}).get("role", "?")
+    if role == "assistant":
+        tcs = m.get("tool_calls") or []
+        if tcs:
+            tc = tcs[0]
+            fn = (tc.get("function") or {}).get("name") or "?"
+            args = (tc.get("function") or {}).get("arguments") or ""
+            extra = f" +{len(tcs)-1}" if len(tcs) > 1 else ""
+            s = f"assistant→{fn}{extra} {args}"
+        else:
+            s = f"assistant: {_message_text(m)}"
+    elif role == "tool":
+        s = f"tool: {_message_text(m)}"
+    else:
+        s = f"{role}: {_message_text(m)}"
+    s = s.replace("\n", " ")
+    return s if len(s) <= _PICKER_SUMMARY_CAP else s[:_PICKER_SUMMARY_CAP] + "…"
+
+
 def _message_text(m: dict) -> str:
     """Flatten ``message.content`` to a string. Tool / multimodal
     messages carry list-typed content; join the text parts."""
@@ -1317,12 +1355,16 @@ def _preview_cmd(request_id: str) -> None:
     click.echo()
     new_messages = messages[len(prev_messages):]
     n = len(new_messages)
-    suffix = (
-        f"{n} msg{'' if n == 1 else 's'} since previous call"
+    header_suffix = (
+        f"+{n} since previous call"
         if has_previous
-        else f"initial call: {n} msg{'' if n == 1 else 's'}"
+        else f"initial: {n} msg{'' if n == 1 else 's'}"
     )
-    click.echo(f"─── NEW INPUT ({suffix}) ──────────")
+    click.echo(f"─── MESSAGES ({header_suffix}) ──────────")
+    if has_previous:
+        # Signals that the prior history (which is in prev_messages) was
+        # elided; what follows is the diff, not the whole conversation.
+        click.echo("  ...")
     if not new_messages:
         click.echo("(no diff vs previous call)")
     for m in new_messages:
