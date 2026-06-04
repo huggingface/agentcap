@@ -1255,6 +1255,74 @@ def _flatten(s: str, cap: int) -> str:
     return s if len(s) <= cap else s[:cap] + "…"
 
 
+_PICKER_SUMMARY_CAP = 160
+_PREVIEW_MSG_CAP = 400
+
+
+def _tag(label: str) -> str:
+    """Reverse-video the ``[label]`` marker that introduces each
+    preview line so the role boundaries are visually scannable across
+    many similar-looking rows."""
+    return f"\033[7m[{label}]\033[0m"
+
+
+def _message_summary(m: dict) -> str:
+    """One-line role-aware summary of one ``messages[]`` entry. Used
+    in the picker's MESSAGES column where we have ~one row to convey
+    'what's new in this call'. Truncated so a large tool result can't
+    bloat the row."""
+    role = (m or {}).get("role", "?")
+    if role == "assistant":
+        tcs = m.get("tool_calls") or []
+        if tcs:
+            tc = tcs[0]
+            fn = (tc.get("function") or {}).get("name") or "?"
+            args = (tc.get("function") or {}).get("arguments") or ""
+            extra = f" +{len(tcs)-1}" if len(tcs) > 1 else ""
+            s = f"assistant→{fn}{extra} {args}"
+        else:
+            s = f"assistant: {_message_text(m)}"
+    elif role == "tool":
+        s = f"tool: {_message_text(m)}"
+    else:
+        s = f"{role}: {_message_text(m)}"
+    return _flatten(s, _PICKER_SUMMARY_CAP)
+
+
+def _render_preview_message(m: dict) -> None:
+    """Render one ``messages[]`` entry into the inspect preview pane.
+    Each message stays on one line (newlines collapsed) so the diff
+    suffix remains visible inside fzf's 60% pane. ``color=True`` on
+    every echo: this command's stdout is captured by fzf's preview
+    subprocess (not a TTY), and click strips ANSI by default in that
+    case, which would silently swallow the reverse-video markers."""
+    role = m.get("role", "?")
+    if role == "assistant":
+        for tc in m.get("tool_calls") or []:
+            fn = (tc.get("function") or {}).get("name") or "?"
+            args = (tc.get("function") or {}).get("arguments") or ""
+            click.echo(
+                f"  {_tag(f'assistant tool_call → {fn}')}  args={_flatten(args, 240)}",
+                color=True,
+            )
+        content = _message_text(m)
+        if content:
+            click.echo(
+                f"  {_tag('assistant content')} {_flatten(content, _PREVIEW_MSG_CAP)}",
+                color=True,
+            )
+        return
+    if role == "tool":
+        tcid = (m.get("tool_call_id") or "?")[:8]
+        click.echo(f"  {_tag(f'tool result, tool_call_id={tcid}')}", color=True)
+        click.echo(f"  {_flatten(_message_text(m), _PREVIEW_MSG_CAP)}", color=True)
+        return
+    click.echo(
+        f"  {_tag(role)} {_flatten(_message_text(m), _PREVIEW_MSG_CAP)}",
+        color=True,
+    )
+
+
 @cli.command("_preview", hidden=True)
 @click.argument("request_id")
 def _preview_cmd(request_id: str) -> None:
