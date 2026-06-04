@@ -115,9 +115,10 @@ class SynthesizedFollowUp(FollowUp):
             # Silence here used to mask 401s against authenticated upstreams,
             # making the whole sweep produce ``continue`` follow-ups while
             # ``run.json`` still claimed ``followup: synthesized``.
+            msg = " ".join(str(exc).splitlines())
             print(
                 f"[followups] synthesized turn={turn} fell back to "
-                f"{self.fallback!r}: {type(exc).__name__}: {exc}",
+                f"{self.fallback!r}: {type(exc).__name__}: {msg}",
                 file=sys.stderr,
                 flush=True,
             )
