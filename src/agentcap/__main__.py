@@ -887,6 +887,7 @@ def _enumerate_workspace_requests(scope: str | None) -> list[dict]:
             key=lambda r: (r[1].get("task_id") or "", r[1].get("captured_at", 0))
         )
         prev_msgs_by_task: dict = {}
+        prev_rid_by_task: dict = {}
         for rid, req in recs:
             resp_path = captures / f"{rid}.response.json"
             status = "?"
@@ -904,7 +905,9 @@ def _enumerate_workspace_requests(scope: str | None) -> list[dict]:
             else:
                 removed, new_msgs = _diff_messages(prev_msgs, messages)
                 label = f"({_delta_label(len(removed), len(new_msgs))})"
+            prev_rid = prev_rid_by_task.get(task_id)
             prev_msgs_by_task[task_id] = messages
+            prev_rid_by_task[task_id] = rid
             summary = _message_summary(new_msgs[-1]) if new_msgs else ""
             preview = f"{label} {summary}".replace("\n", " ").strip()
             rows.append({
@@ -914,6 +917,7 @@ def _enumerate_workspace_requests(scope: str | None) -> list[dict]:
                 "status": status,
                 "task_id": task_id,
                 "turn": req.get("turn"),
+                "prev_rid": prev_rid,
                 "preview": preview,
             })
     rows.sort(key=lambda r: (r["run_id"], r["captured_at"]))
@@ -922,11 +926,18 @@ def _enumerate_workspace_requests(scope: str | None) -> list[dict]:
 
 def _format_inspect_rows(
     rows: list[dict], *, include_run: bool
-) -> tuple[str, list[str]]:
+) -> tuple[str, list[str], list[str]]:
     """Flat table: every row is one captured call, every visible column
-    is something the user might fuzzy-filter on (LOC = ``task.tN``,
-    RID, optional RUN, PROMPT). Step / time / status / model / size
-    live in the fzf preview pane (see ``_preview_cmd``)."""
+    is something the user might fuzzy-filter on (LOC, RID, optional
+    RUN, MESSAGES). Step / time / status / model / size live in the
+    fzf preview pane (see ``_preview_cmd``).
+
+    Returns ``(header, display_lines, fzf_lines)``. ``display_lines``
+    are what the no-fzf table prints. ``fzf_lines`` are the same
+    visible content followed by a tab and two metadata fields —
+    the full rid and the previous capture's rid — so the fzf preview
+    command can pull both via ``{2}`` and ``{3}`` substitution without
+    rescanning the capture dir for every hover."""
 
     rid_w = 8
     loc_w = max(
@@ -951,19 +962,26 @@ def _format_inspect_rows(
 
     header = _row("LOC", "RID", "RUN", "MESSAGES")
 
-    body: list[str] = []
+    display: list[str] = []
+    fzf: list[str] = []
     for r in rows:
         loc = (
             f"{r.get('task_id') or '?'}.t{r.get('turn')}"
             if r.get("task_id") and r.get("turn") is not None
             else "-"
         )
-        body.append(_row(loc, r["rid"][:8], r["run_id"], r["preview"]))
-    return header, body
+        line = _row(loc, r["rid"][:8], r["run_id"], r["preview"])
+        display.append(line)
+        fzf.append(f"{line}\t{r['rid']}\t{r.get('prev_rid') or '-'}")
+    return header, display, fzf
 
 
 def _fzf_pick(
-    header: str, lines: list[str], preview_cmd: str
+    header: str,
+    lines: list[str],
+    preview_cmd: str,
+    *,
+    extra_args: list[str] = (),
 ) -> tuple[str | None, bool]:
     """Run fzf over ``lines`` with ``header`` pinned at the top. Returns
     ``(picked, available)``:
@@ -978,17 +996,19 @@ def _fzf_pick(
     # UX without uninstalling fzf — pretend it isn't there.
     if os.environ.get("AGENTCAP_NO_FZF") or not shutil.which("fzf"):
         return None, False
+    args = [
+        "fzf",
+        "--ansi",
+        "--layout=reverse",
+        "--header", header,
+        "--header-first",
+        "--preview", preview_cmd,
+        "--preview-window=right:60%:wrap",
+        "--no-sort",
+    ]
+    args.extend(extra_args)
     proc = subprocess.run(
-        [
-            "fzf",
-            "--ansi",
-            "--layout=reverse",
-            "--header", header,
-            "--header-first",
-            "--preview", preview_cmd,
-            "--preview-window=right:60%:wrap",
-            "--no-sort",
-        ],
+        args,
         input="\n".join(lines),
         capture_output=True,
         text=True,
@@ -1081,21 +1101,28 @@ def _pick_workspace_request(scope: str | None) -> str | None:
         raise click.UsageError(f"no captured requests in {where}")
 
     include_run = scope is None
-    header, lines = _format_inspect_rows(rows, include_run=include_run)
-    # RID is column 2 (after LOC). fzf substitutes ``{2}`` with that
-    # whitespace-separated field.
+    header, display, fzf_lines = _format_inspect_rows(rows, include_run=include_run)
+    # Tab-delim hidden columns: 2 = full rid, 3 = previous-capture rid
+    # (or "-" for the first capture of a task). Pre-computing the prev
+    # rid here lets the preview pane skip a full cap-dir rescan per
+    # fzf hover.
     preview = (
-        f"{sys.executable} -m agentcap _preview {{2}} 2>/dev/null | head -400"
+        f"{sys.executable} -m agentcap _preview {{2}} {{3}} 2>/dev/null | head -400"
     )
 
-    picked, fzf_available = _fzf_pick(header, lines, preview)
+    picked, fzf_available = _fzf_pick(
+        header, fzf_lines, preview,
+        extra_args=["--delimiter", "\t", "--with-nth", "1"],
+    )
     if not fzf_available:
         click.echo(header)
-        for line in lines:
+        for line in display:
             click.echo(line)
         return None
     if picked is None:
         return None  # cancelled
+    # picked is the visible (column-1) line; RID is the second
+    # whitespace-separated field on it.
     tokens = picked.split()
     short = tokens[1] if len(tokens) >= 2 else ""
     import re
@@ -1340,11 +1367,16 @@ def _render_preview_message(m: dict) -> None:
 
 @cli.command("_preview", hidden=True)
 @click.argument("request_id")
-def _preview_cmd(request_id: str) -> None:
+@click.argument("prev_request_id", required=False, default=None)
+def _preview_cmd(request_id: str, prev_request_id: str | None) -> None:
     """Internal: dual TASK + REQUEST view used by the fzf preview pane.
 
     Not part of the public CLI surface — hidden from ``--help``. The
     user-facing inspector is ``agentcap inspect <rid>``.
+
+    ``prev_request_id`` is pushed in by the picker so the preview can
+    load the diff base directly instead of scanning the capture dir on
+    every fzf hover. Accepts ``"-"`` (or absent) for "no previous".
     """
     import json as _json
     import re
@@ -1375,47 +1407,27 @@ def _preview_cmd(request_id: str) -> None:
         _time.strftime("%H:%M:%S", _time.gmtime(int(captured_at)))
         if captured_at else "?"
     )
-    # Step = this rid's position among peers with the same (task, turn)
-    # in its capture dir. ``prev_messages`` = the immediately preceding
-    # request in the same task (any turn), used below to compute the
-    # NEW INPUT diff. Both share the same capture-dir scan.
-    step = "?"
+    # Load the diff base directly from the prev-rid file in the same
+    # capture dir. No scan: the picker already knew the predecessor
+    # and pushed its rid in as ``prev_request_id``.
     prev_messages: list = []
     has_previous = False
-    if task_id and turn is not None:
+    if prev_request_id and prev_request_id != "-":
         from . import replay as _replay
         found = _replay.resolve_workspace_rid(_workspace_root(), full_rid)
         if found is not None:
             cap_dir, _ = found
-            peers: list[tuple[int, str]] = []
-            this_at = int(captured_at or 0)
-            prev_at = -1
-            for p in cap_dir.glob("*.request.json"):
+            prev_path = cap_dir / f"{prev_request_id}.request.json"
+            if prev_path.is_file():
                 try:
-                    rec = _json.loads(p.read_text())
-                except (OSError, _json.JSONDecodeError):
-                    continue
-                if rec.get("task_id") != task_id:
-                    continue
-                at = int(rec.get("captured_at", 0))
-                if rec.get("turn") == turn:
-                    peers.append((at, p.stem.split(".")[0]))
-                if at < this_at and at > prev_at:
-                    prev_at = at
-                    prev_messages = (rec.get("body") or {}).get("messages") or []
+                    prev_rec = _json.loads(prev_path.read_text())
+                    prev_messages = (prev_rec.get("body") or {}).get("messages") or []
                     has_previous = True
-            peers.sort()
-            n = len(peers)
-            idx = next(
-                (i for i, (_, rid_) in enumerate(peers, start=1)
-                 if rid_ == full_rid),
-                None,
-            )
-            if idx is not None:
-                step = f"{idx}/{n}"
+                except (OSError, _json.JSONDecodeError):
+                    pass
     click.echo(f"rid:    {full_rid}")
     if task_id is not None or turn is not None:
-        click.echo(f"task:   {task_id or '?'}  turn={turn if turn is not None else '?'}  step={step}")
+        click.echo(f"task:   {task_id or '?'}  turn={turn if turn is not None else '?'}")
     click.echo(f"time:   {ts}")
     click.echo(f"status: {status}")
     click.echo(f"model:  {body.get('model', '?')}")
