@@ -805,24 +805,27 @@ def ls_cmd(long_form: bool) -> None:
 
 def _resolve_request_id(
     rid: str, source: str | None
-) -> tuple[str, dict, dict | None, dict | None]:
+) -> tuple[str, dict, dict | None, dict | None, Path | None]:
     """Resolve ``rid`` (full or short prefix) to
-    ``(full_rid, body, response_record, request_record)``.
+    ``(full_rid, body, response_record, request_record, capture_dir)``.
 
     - If ``source`` is given, looks the rid up there via
       ``replay.load_request`` (any agentcap-supported source: dir,
       parquet, hf://) — exact match only. Response and request
-      records are unavailable in that path (just the body).
+      records and ``capture_dir`` are unavailable in that path
+      (just the body).
     - Otherwise scans the workspace, accepting a prefix (git-style)
-      and returning the body, the paired response, and the full
+      and returning the body, the paired response, the full
       request record (which carries ``task_id``, ``turn``,
-      ``captured_at``, ``upstream_url``).
+      ``captured_at``, ``upstream_url``), and the capture dir the
+      rid was found in — exposing the dir lets callers load
+      sibling captures without scanning again.
     """
     from . import replay
 
     if source is not None:
         try:
-            return rid, replay.load_request(source, rid), None, None
+            return rid, replay.load_request(source, rid), None, None, None
         except KeyError as exc:
             raise click.UsageError(str(exc))
         except (ValueError, FileNotFoundError) as exc:
@@ -851,7 +854,7 @@ def _resolve_request_id(
         raise click.UsageError(
             f"capture {capture_dir / f'{full_rid}.request.json'} has no body field"
         )
-    return full_rid, body, resp_rec, req_rec
+    return full_rid, body, resp_rec, req_rec, capture_dir
 
 
 def _enumerate_workspace_requests(scope: str | None) -> list[dict]:
@@ -1180,7 +1183,7 @@ def inspect_cmd(target: str | None, source: str | None, print_rid_only: bool) ->
 
     # rid (full or short prefix) → body dump (single request).
     if target and "-" not in target:
-        full_rid, body, resp_rec, _ = _resolve_request_id(target, source)
+        full_rid, body, resp_rec, _, _ = _resolve_request_id(target, source)
         if resp_rec is not None:
             click.echo(
                 f"  request_id={full_rid} "
@@ -1199,7 +1202,7 @@ def inspect_cmd(target: str | None, source: str | None, print_rid_only: bool) ->
     pick = _pick_workspace_request(target)
     if pick is None:
         return  # cancelled or no-fzf table-only path
-    full_rid, body, resp_rec, _ = _resolve_request_id(pick, None)
+    full_rid, body, resp_rec, _, _ = _resolve_request_id(pick, None)
     if print_rid_only:
         click.echo(full_rid)
         return
@@ -1401,7 +1404,7 @@ def _preview_cmd(request_id: str, prev_request_id: str | None) -> None:
         click.echo("(section header — navigate to a request id)")
         return
 
-    full_rid, body, resp_rec, req_rec = _resolve_request_id(request_id, None)
+    full_rid, body, resp_rec, req_rec, cap_dir = _resolve_request_id(request_id, None)
     messages = body.get("messages") or []
     initial_user = next(
         (m for m in messages if m.get("role") == "user"),
@@ -1423,29 +1426,27 @@ def _preview_cmd(request_id: str, prev_request_id: str | None) -> None:
         if captured_at else "?"
     )
     # Load the diff base directly from the prev-rid file in the same
-    # capture dir. No scan: the picker already knew the predecessor
-    # and pushed its rid in as ``prev_request_id``. Reject anything
-    # that isn't lowercase hex so a hand-crafted arg can't escape the
-    # capture dir via ``..`` or absolute paths.
+    # capture dir (already known from ``_resolve_request_id`` above —
+    # no second workspace scan). The picker pushes the predecessor's
+    # rid in as ``prev_request_id``. Reject anything that isn't
+    # lowercase hex so a hand-crafted arg can't escape the capture
+    # dir via ``..`` or absolute paths.
     prev_messages: list = []
     has_previous = False
     if (
-        prev_request_id
+        cap_dir is not None
+        and prev_request_id
         and prev_request_id != "-"
         and re.fullmatch(r"[0-9a-f]+", prev_request_id)
     ):
-        from . import replay as _replay
-        found = _replay.resolve_workspace_rid(_workspace_root(), full_rid)
-        if found is not None:
-            cap_dir, _ = found
-            prev_path = cap_dir / f"{prev_request_id}.request.json"
-            if prev_path.is_file():
-                try:
-                    prev_rec = _json.loads(prev_path.read_text())
-                    prev_messages = (prev_rec.get("body") or {}).get("messages") or []
-                    has_previous = True
-                except (OSError, _json.JSONDecodeError):
-                    pass
+        prev_path = cap_dir / f"{prev_request_id}.request.json"
+        if prev_path.is_file():
+            try:
+                prev_rec = _json.loads(prev_path.read_text())
+                prev_messages = (prev_rec.get("body") or {}).get("messages") or []
+                has_previous = True
+            except (OSError, _json.JSONDecodeError):
+                pass
     click.echo(f"rid:    {full_rid}")
     if task_id is not None or turn is not None:
         click.echo(f"task:   {task_id or '?'}  turn={turn if turn is not None else '?'}")
@@ -1605,7 +1606,7 @@ def replay_cmd(
         if picked is None:
             return  # cancelled or no-fzf table-only path (already printed)
         request_id = picked
-    full_rid, body, _, _ = _resolve_request_id(request_id, source)
+    full_rid, body, _, _, _ = _resolve_request_id(request_id, source)
     url = target.rstrip("/") + "/v1/chat/completions"
     is_stream = bool(body.get("stream"))
     # Rough input size — chars/4 is a coarse token estimate but it sets
