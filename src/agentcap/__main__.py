@@ -1104,11 +1104,11 @@ def _pick_workspace_request(scope: str | None) -> str | None:
     include_run = scope is None
     header, display, fzf_lines = _format_inspect_rows(rows, include_run=include_run)
     # Tab-delim hidden columns: 2 = full rid, 3 = previous-capture rid
-    # (or "-" for the first capture of a task). The preview command
-    # still uses ``{2}`` only — the upcoming preview rewrite will
-    # consume ``{3}`` so the diff base can be loaded without a scan.
+    # (or "-" for the first capture of a task). Pre-computing the prev
+    # rid here lets the preview pane skip a full cap-dir rescan per
+    # fzf hover.
     preview = (
-        f"{sys.executable} -m agentcap _preview {{2}} 2>/dev/null | head -400"
+        f"{sys.executable} -m agentcap _preview {{2}} {{3}} 2>/dev/null | head -400"
     )
 
     picked, fzf_available = _fzf_pick(
@@ -1364,11 +1364,17 @@ def _render_preview_message(m: dict) -> None:
 
 @cli.command("_preview", hidden=True)
 @click.argument("request_id")
-def _preview_cmd(request_id: str) -> None:
-    """Internal: dual TASK + REQUEST view used by the fzf preview pane.
+@click.argument("prev_request_id", required=False, default=None)
+def _preview_cmd(request_id: str, prev_request_id: str | None) -> None:
+    """Internal: header + initial PROMPT + MESSAGES diff for one
+    captured request — used by the fzf preview pane.
 
     Not part of the public CLI surface — hidden from ``--help``. The
     user-facing inspector is ``agentcap inspect <rid>``.
+
+    ``prev_request_id`` is pushed in by the picker so the preview can
+    load the diff base directly instead of scanning the capture dir on
+    every fzf hover. Accepts ``"-"`` (or absent) for "no previous".
     """
     import json as _json
     import re
@@ -1380,14 +1386,11 @@ def _preview_cmd(request_id: str) -> None:
 
     full_rid, body, resp_rec, req_rec = _resolve_request_id(request_id, None)
     messages = body.get("messages") or []
-    last_user = next(
-        (m.get("content") for m in reversed(messages) if m.get("role") == "user"),
-        "",
+    initial_user = next(
+        (m for m in messages if m.get("role") == "user"),
+        None,
     )
-    if isinstance(last_user, list):
-        last_user = " ".join(
-            p.get("text", "") for p in last_user if isinstance(p, dict)
-        )
+    initial_prompt = _message_text(initial_user or {})
     import time as _time
 
     status = (
@@ -1402,47 +1405,59 @@ def _preview_cmd(request_id: str) -> None:
         _time.strftime("%H:%M:%S", _time.gmtime(int(captured_at)))
         if captured_at else "?"
     )
-    # Step = this rid's position among peers with the same (task, turn)
-    # in its capture dir. Computed live since it's not stored per-call.
-    step = "?"
-    if task_id and turn is not None:
+    # Load the diff base directly from the prev-rid file in the same
+    # capture dir. No scan: the picker already knew the predecessor
+    # and pushed its rid in as ``prev_request_id``. Reject anything
+    # that isn't lowercase hex so a hand-crafted arg can't escape the
+    # capture dir via ``..`` or absolute paths.
+    prev_messages: list = []
+    has_previous = False
+    if (
+        prev_request_id
+        and prev_request_id != "-"
+        and re.fullmatch(r"[0-9a-f]+", prev_request_id)
+    ):
         from . import replay as _replay
         found = _replay.resolve_workspace_rid(_workspace_root(), full_rid)
         if found is not None:
             cap_dir, _ = found
-            peers: list[tuple[int, str]] = []
-            for p in cap_dir.glob("*.request.json"):
+            prev_path = cap_dir / f"{prev_request_id}.request.json"
+            if prev_path.is_file():
                 try:
-                    rec = _json.loads(p.read_text())
+                    prev_rec = _json.loads(prev_path.read_text())
+                    prev_messages = (prev_rec.get("body") or {}).get("messages") or []
+                    has_previous = True
                 except (OSError, _json.JSONDecodeError):
-                    continue
-                if rec.get("task_id") == task_id and rec.get("turn") == turn:
-                    peers.append((
-                        int(rec.get("captured_at", 0)),
-                        p.stem.split(".")[0],
-                    ))
-            peers.sort()
-            n = len(peers)
-            idx = next(
-                (i for i, (_, rid_) in enumerate(peers, start=1)
-                 if rid_ == full_rid),
-                None,
-            )
-            if idx is not None:
-                step = f"{idx}/{n}"
+                    pass
     click.echo(f"rid:    {full_rid}")
     if task_id is not None or turn is not None:
-        click.echo(f"task:   {task_id or '?'}  turn={turn if turn is not None else '?'}  step={step}")
+        click.echo(f"task:   {task_id or '?'}  turn={turn if turn is not None else '?'}")
     click.echo(f"time:   {ts}")
     click.echo(f"status: {status}")
     click.echo(f"model:  {body.get('model', '?')}")
     click.echo(f"size:   {size_b:,} bytes (~{size_b // 4:,} tokens)")
     click.echo()
     click.echo("─── PROMPT ──────────────────────────────────────────────")
-    click.echo(last_user or "(no user message)")
+    click.echo(initial_prompt or "(no user message)")
     click.echo()
-    click.echo("─── REQUEST ─────────────────────────────────────────────")
-    click.echo(_json.dumps(body, indent=2, ensure_ascii=False))
+    removed_messages, new_messages = _diff_messages(prev_messages, messages)
+    if has_previous:
+        header_suffix = (
+            f"{_delta_label(len(removed_messages), len(new_messages))} "
+            f"since previous call"
+        )
+    else:
+        n = len(new_messages)
+        header_suffix = f"initial: {n} msg{'' if n == 1 else 's'}"
+    click.echo(f"─── MESSAGES ({header_suffix}) ──────────")
+    if has_previous:
+        # Signals that the prior history (in prev_messages) was
+        # elided; what follows is the diff, not the whole conversation.
+        click.echo("  ...")
+    if not new_messages and not removed_messages:
+        click.echo("(no diff vs previous call)")
+    for m in new_messages:
+        _render_preview_message(m)
 
 
 def _render_sse_stream(chunks) -> int:
