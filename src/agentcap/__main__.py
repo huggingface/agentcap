@@ -888,6 +888,7 @@ def _enumerate_workspace_requests(scope: str | None) -> list[dict]:
         )
         prev_msgs_by_task: dict = {}
         prev_rid_by_task: dict = {}
+        idx_by_task: dict = {}
         for rid, req in recs:
             resp_path = captures / f"{rid}.response.json"
             status = "?"
@@ -908,6 +909,7 @@ def _enumerate_workspace_requests(scope: str | None) -> list[dict]:
             prev_rid = prev_rid_by_task.get(task_id)
             prev_msgs_by_task[task_id] = messages
             prev_rid_by_task[task_id] = rid
+            idx_by_task[task_id] = idx_by_task.get(task_id, 0) + 1
             summary = _message_summary(new_msgs[-1]) if new_msgs else ""
             preview = f"{label} {summary}".replace("\n", " ").strip()
             rows.append({
@@ -917,6 +919,7 @@ def _enumerate_workspace_requests(scope: str | None) -> list[dict]:
                 "status": status,
                 "task_id": task_id,
                 "turn": req.get("turn"),
+                "req_index": idx_by_task[task_id],
                 "prev_rid": prev_rid,
                 "preview": preview,
             })
@@ -943,8 +946,8 @@ def _format_inspect_rows(
     loc_w = max(
         len("LOC"),
         max((
-            len(f"{r.get('task_id') or '?'}.t{r.get('turn')}")
-            if r.get("task_id") and r.get("turn") is not None else 1
+            len(f"{r.get('task_id') or '?'}.{r.get('req_index')}")
+            if r.get("task_id") and r.get("req_index") is not None else 1
             for r in rows
         ), default=0),
     )
@@ -966,8 +969,8 @@ def _format_inspect_rows(
     fzf: list[str] = []
     for r in rows:
         loc = (
-            f"{r.get('task_id') or '?'}.t{r.get('turn')}"
-            if r.get("task_id") and r.get("turn") is not None
+            f"{r.get('task_id') or '?'}.{r.get('req_index')}"
+            if r.get("task_id") and r.get("req_index") is not None
             else "-"
         )
         line = _row(loc, r["rid"][:8], r["run_id"], r["preview"])
