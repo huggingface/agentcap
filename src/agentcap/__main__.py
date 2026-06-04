@@ -1285,27 +1285,38 @@ def _message_text(m: dict) -> str:
     return c or ""
 
 
+_PREVIEW_MSG_CAP = 400
+
+
+def _flatten(s: str, cap: int) -> str:
+    """Single-line, length-capped text for the preview pane. Without
+    this, content with embedded newlines (assistant prose, tool
+    outputs) blows up to many visible lines and pushes later messages
+    off fzf's preview window."""
+    s = " ".join(s.split())
+    return s if len(s) <= cap else s[:cap] + "…"
+
+
 def _render_preview_message(m: dict) -> None:
     """Render one ``messages[]`` entry into the inspect preview pane.
-    Role-aware: assistant tool_calls collapse to ``name+args``, tool
-    results show their ``tool_call_id``, content bodies are truncated
-    so the preview stays readable inside fzf's 60% pane."""
+    Each message stays on one line (newlines collapsed) so the diff
+    suffix remains visible inside fzf's 60% pane."""
     role = m.get("role", "?")
     if role == "assistant":
         for tc in m.get("tool_calls") or []:
             fn = (tc.get("function") or {}).get("name") or "?"
             args = (tc.get("function") or {}).get("arguments") or ""
-            click.echo(f"  [assistant tool_call → {fn}]  args={args[:240]}")
+            click.echo(f"  [assistant tool_call → {fn}]  args={_flatten(args, 240)}")
         content = _message_text(m)
         if content:
-            click.echo(f"  [assistant content] {content[:400]}")
+            click.echo(f"  [assistant content] {_flatten(content, _PREVIEW_MSG_CAP)}")
         return
     if role == "tool":
         tcid = (m.get("tool_call_id") or "?")[:8]
         click.echo(f"  [tool result, tool_call_id={tcid}]")
-        click.echo(f"  {_message_text(m)[:400]}")
+        click.echo(f"  {_flatten(_message_text(m), _PREVIEW_MSG_CAP)}")
         return
-    click.echo(f"  [{role}] {_message_text(m)[:400]}")
+    click.echo(f"  [{role}] {_flatten(_message_text(m), _PREVIEW_MSG_CAP)}")
 
 
 @cli.command("_preview", hidden=True)
