@@ -1148,7 +1148,13 @@ def _pick_workspace_request(scope: str | None) -> str | None:
 
     picked, fzf_available = _fzf_pick(
         header, fzf_lines, preview,
-        extra_args=["--delimiter", "\t", "--with-nth", "1"],
+        # --no-hscroll: anchor every row at column 0 so LOC + RID stay
+        # visible when a deep match would otherwise scroll the row left.
+        # The full content is available in the preview pane anyway.
+        extra_args=[
+            "--delimiter", "\t", "--with-nth", "1",
+            "--no-hscroll",
+        ],
     )
     if not fzf_available:
         click.echo(header)
