@@ -967,6 +967,7 @@ def _format_inspect_rows(
 
     display: list[str] = []
     fzf: list[str] = []
+    prev_task: str | None = None
     for r in rows:
         loc = (
             f"{r.get('task_id') or '?'}.{r.get('req_index')}"
@@ -976,6 +977,12 @@ def _format_inspect_rows(
         # Strip tabs from the visible content so they don't shift the
         # tab-delimited hidden columns appended below.
         line = _row(loc, r["rid"][:8], r["run_id"], r["preview"]).replace("\t", " ")
+        task_id = r.get("task_id")
+        if task_id and task_id != prev_task:
+            # Reverse video: inverts fg/bg so the row pops on any
+            # terminal palette regardless of theme.
+            line = f"\033[7m{line}\033[0m"
+        prev_task = task_id
         display.append(line)
         fzf.append(f"{line}\t{r['rid']}\t{r.get('prev_rid') or '-'}")
     return header, display, fzf
