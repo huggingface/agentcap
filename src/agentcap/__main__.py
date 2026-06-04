@@ -899,7 +899,11 @@ def _enumerate_workspace_requests(scope: str | None) -> list[dict]:
                     pass
             messages = (req.get("body") or {}).get("messages") or []
             task_id = req.get("task_id")
-            prev_msgs = prev_msgs_by_task.get(task_id)
+            # When task_id is missing, key the per-task caches on the
+            # rid so unrelated orphan captures don't accidentally chain
+            # together for the diff / prev_rid / req_index.
+            task_key = task_id if task_id is not None else rid
+            prev_msgs = prev_msgs_by_task.get(task_key)
             if prev_msgs is None:
                 new_msgs = messages
                 label = f"(init {len(new_msgs)})"
@@ -908,10 +912,10 @@ def _enumerate_workspace_requests(scope: str | None) -> list[dict]:
                 label = f"({_delta_label(len(removed), len(new_msgs))})"
             summary = _message_summary(new_msgs[-1]) if new_msgs else ""
             preview = f"{label} {summary}".replace("\n", " ").strip()
-            prev_rid = prev_rid_by_task.get(task_id)
-            prev_msgs_by_task[task_id] = messages
-            prev_rid_by_task[task_id] = rid
-            idx_by_task[task_id] = idx_by_task.get(task_id, 0) + 1
+            prev_rid = prev_rid_by_task.get(task_key)
+            prev_msgs_by_task[task_key] = messages
+            prev_rid_by_task[task_key] = rid
+            idx_by_task[task_key] = idx_by_task.get(task_key, 0) + 1
             rows.append({
                 "run_id": run_dir.name,
                 "rid": rid,
@@ -919,7 +923,7 @@ def _enumerate_workspace_requests(scope: str | None) -> list[dict]:
                 "status": status,
                 "task_id": task_id,
                 "turn": req.get("turn"),
-                "req_index": idx_by_task[task_id],
+                "req_index": idx_by_task[task_key],
                 "prev_rid": prev_rid,
                 "preview": preview,
             })
