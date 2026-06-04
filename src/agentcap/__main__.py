@@ -935,14 +935,16 @@ def _format_inspect_rows(
     rows: list[dict], *, include_run: bool
 ) -> tuple[str, list[str], list[str]]:
     """Flat table: every row is one captured call, every visible column
-    is something the user might fuzzy-filter on (LOC = ``task.tN``,
-    RID, optional RUN, PROMPT). Step / time / status / model / size
-    live in the fzf preview pane (see ``_preview_cmd``).
+    is something the user might fuzzy-filter on (LOC =
+    ``task_id.<req_index>``, RID, optional RUN, MESSAGES — the latter
+    a ``(+N)`` / ``(init N)`` / ``(-X +Y)`` delta plus a one-line
+    role-aware summary). Time / status / model / size live in the
+    fzf preview pane (see ``_preview_cmd``).
 
     Returns ``(header, display_lines, fzf_lines)``. ``display_lines``
     are what the no-fzf table prints. ``fzf_lines`` are the same
     visible content followed by a tab and two metadata fields —
-    the full rid and the previous capture's rid — so a future preview
+    the full rid and the previous capture's rid — so the fzf preview
     command can pull both via ``{2}`` and ``{3}`` substitution without
     rescanning the capture dir for every hover."""
 
