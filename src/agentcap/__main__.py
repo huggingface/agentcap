@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -804,24 +805,27 @@ def ls_cmd(long_form: bool) -> None:
 
 def _resolve_request_id(
     rid: str, source: str | None
-) -> tuple[str, dict, dict | None, dict | None]:
+) -> tuple[str, dict, dict | None, dict | None, Path | None]:
     """Resolve ``rid`` (full or short prefix) to
-    ``(full_rid, body, response_record, request_record)``.
+    ``(full_rid, body, response_record, request_record, capture_dir)``.
 
     - If ``source`` is given, looks the rid up there via
       ``replay.load_request`` (any agentcap-supported source: dir,
       parquet, hf://) — exact match only. Response and request
-      records are unavailable in that path (just the body).
+      records and ``capture_dir`` are unavailable in that path
+      (just the body).
     - Otherwise scans the workspace, accepting a prefix (git-style)
-      and returning the body, the paired response, and the full
+      and returning the body, the paired response, the full
       request record (which carries ``task_id``, ``turn``,
-      ``captured_at``, ``upstream_url``).
+      ``captured_at``, ``upstream_url``), and the capture dir the
+      rid was found in — exposing the dir lets callers load
+      sibling captures without scanning again.
     """
     from . import replay
 
     if source is not None:
         try:
-            return rid, replay.load_request(source, rid), None, None
+            return rid, replay.load_request(source, rid), None, None, None
         except KeyError as exc:
             raise click.UsageError(str(exc))
         except (ValueError, FileNotFoundError) as exc:
@@ -850,7 +854,7 @@ def _resolve_request_id(
         raise click.UsageError(
             f"capture {capture_dir / f'{full_rid}.request.json'} has no body field"
         )
-    return full_rid, body, resp_rec, req_rec
+    return full_rid, body, resp_rec, req_rec, capture_dir
 
 
 def _enumerate_workspace_requests(scope: str | None) -> list[dict]:
@@ -872,12 +876,23 @@ def _enumerate_workspace_requests(scope: str | None) -> list[dict]:
         captures = run_dir / "captures"
         if not captures.is_dir():
             continue
+        # Sort within (task, time) so per-task ``prev_rid`` is the
+        # immediately-preceding capture in chronological order.
+        recs: list[tuple[str, dict]] = []
         for req_path in captures.glob("*.request.json"):
             rid = req_path.stem.split(".")[0]
             try:
                 req = _json.loads(req_path.read_text())
             except (OSError, _json.JSONDecodeError):
                 continue
+            recs.append((rid, req))
+        recs.sort(
+            key=lambda r: (r[1].get("task_id") or "", r[1].get("captured_at", 0))
+        )
+        prev_rid_by_task: dict = {}
+        prev_msgs_by_task: dict = {}
+        idx_by_task: dict = {}
+        for rid, req in recs:
             resp_path = captures / f"{rid}.response.json"
             status = "?"
             if resp_path.is_file():
@@ -886,23 +901,33 @@ def _enumerate_workspace_requests(scope: str | None) -> list[dict]:
                 except (OSError, _json.JSONDecodeError):
                     pass
             messages = (req.get("body") or {}).get("messages") or []
-            last_user = next(
-                (m.get("content") for m in reversed(messages) if m.get("role") == "user"),
-                "",
-            )
-            if isinstance(last_user, list):
-                # Tool-result / multi-modal message content can be a list.
-                last_user = " ".join(
-                    p.get("text", "") for p in last_user if isinstance(p, dict)
-                )
-            preview = (last_user or "").replace("\n", " ").strip()
+            task_id = req.get("task_id")
+            # When task_id is missing, key the per-task caches on the
+            # rid so unrelated orphan captures don't accidentally chain
+            # together for the diff / prev_rid / req_index.
+            task_key = task_id if task_id is not None else rid
+            prev_msgs = prev_msgs_by_task.get(task_key)
+            if prev_msgs is None:
+                new_msgs = messages
+                label = f"(init {len(new_msgs)})"
+            else:
+                removed, new_msgs = _diff_messages(prev_msgs, messages)
+                label = f"({_delta_label(len(removed), len(new_msgs))})"
+            summary = _message_summary(new_msgs[-1]) if new_msgs else ""
+            preview = f"{label} {summary}".replace("\n", " ").strip()
+            prev_rid = prev_rid_by_task.get(task_key)
+            prev_msgs_by_task[task_key] = messages
+            prev_rid_by_task[task_key] = rid
+            idx_by_task[task_key] = idx_by_task.get(task_key, 0) + 1
             rows.append({
                 "run_id": run_dir.name,
                 "rid": rid,
                 "captured_at": int(req.get("captured_at", 0)),
                 "status": status,
-                "task_id": req.get("task_id"),
+                "task_id": task_id,
                 "turn": req.get("turn"),
+                "req_index": idx_by_task[task_key],
+                "prev_rid": prev_rid,
                 "preview": preview,
             })
     rows.sort(key=lambda r: (r["run_id"], r["captured_at"]))
@@ -911,18 +936,27 @@ def _enumerate_workspace_requests(scope: str | None) -> list[dict]:
 
 def _format_inspect_rows(
     rows: list[dict], *, include_run: bool
-) -> tuple[str, list[str]]:
+) -> tuple[str, list[str], list[str]]:
     """Flat table: every row is one captured call, every visible column
-    is something the user might fuzzy-filter on (LOC = ``task.tN``,
-    RID, optional RUN, PROMPT). Step / time / status / model / size
-    live in the fzf preview pane (see ``_preview_cmd``)."""
+    is something the user might fuzzy-filter on (LOC =
+    ``task_id.<req_index>``, RID, optional RUN, MESSAGES — the latter
+    a ``(+N)`` / ``(init N)`` / ``(-X +Y)`` delta plus a one-line
+    role-aware summary). Time / status / model / size live in the
+    fzf preview pane (see ``_preview_cmd``).
+
+    Returns ``(header, display_lines, fzf_lines)``. ``display_lines``
+    are what the no-fzf table prints. ``fzf_lines`` are the same
+    visible content followed by a tab and two metadata fields —
+    the full rid and the previous capture's rid — so the fzf preview
+    command can pull both via ``{2}`` and ``{3}`` substitution without
+    rescanning the capture dir for every hover."""
 
     rid_w = 8
     loc_w = max(
         len("LOC"),
         max((
-            len(f"{r.get('task_id') or '?'}.t{r.get('turn')}")
-            if r.get("task_id") and r.get("turn") is not None else 1
+            len(f"{r.get('task_id') or '?'}.{r.get('req_index')}")
+            if r.get("task_id") and r.get("req_index") is not None else 1
             for r in rows
         ), default=0),
     )
@@ -938,21 +972,37 @@ def _format_inspect_rows(
         cells.append(prompt)
         return "  ".join(cells)
 
-    header = _row("LOC", "RID", "RUN", "PROMPT")
+    header = _row("LOC", "RID", "RUN", "MESSAGES")
 
-    body: list[str] = []
+    display: list[str] = []
+    fzf: list[str] = []
+    prev_task: str | None = None
     for r in rows:
         loc = (
-            f"{r.get('task_id') or '?'}.t{r.get('turn')}"
-            if r.get("task_id") and r.get("turn") is not None
+            f"{r.get('task_id') or '?'}.{r.get('req_index')}"
+            if r.get("task_id") and r.get("req_index") is not None
             else "-"
         )
-        body.append(_row(loc, r["rid"][:8], r["run_id"], r["preview"]))
-    return header, body
+        # Strip tabs from the visible content so they don't shift the
+        # tab-delimited hidden columns appended below.
+        line = _row(loc, r["rid"][:8], r["run_id"], r["preview"]).replace("\t", " ")
+        task_id = r.get("task_id")
+        if task_id and task_id != prev_task:
+            # Reverse video: inverts fg/bg so the row pops on any
+            # terminal palette regardless of theme.
+            line = f"\033[7m{line}\033[0m"
+        prev_task = task_id
+        display.append(line)
+        fzf.append(f"{line}\t{r['rid']}\t{r.get('prev_rid') or '-'}")
+    return header, display, fzf
 
 
 def _fzf_pick(
-    header: str, lines: list[str], preview_cmd: str
+    header: str,
+    lines: list[str],
+    preview_cmd: str,
+    *,
+    extra_args: Sequence[str] = (),
 ) -> tuple[str | None, bool]:
     """Run fzf over ``lines`` with ``header`` pinned at the top. Returns
     ``(picked, available)``:
@@ -967,17 +1017,19 @@ def _fzf_pick(
     # UX without uninstalling fzf — pretend it isn't there.
     if os.environ.get("AGENTCAP_NO_FZF") or not shutil.which("fzf"):
         return None, False
+    args = [
+        "fzf",
+        "--ansi",
+        "--layout=reverse",
+        "--header", header,
+        "--header-first",
+        "--preview", preview_cmd,
+        "--preview-window=right:60%:wrap",
+        "--no-sort",
+    ]
+    args.extend(extra_args)
     proc = subprocess.run(
-        [
-            "fzf",
-            "--ansi",
-            "--layout=reverse",
-            "--header", header,
-            "--header-first",
-            "--preview", preview_cmd,
-            "--preview-window=right:60%:wrap",
-            "--no-sort",
-        ],
+        args,
         input="\n".join(lines),
         capture_output=True,
         text=True,
@@ -1070,21 +1122,28 @@ def _pick_workspace_request(scope: str | None) -> str | None:
         raise click.UsageError(f"no captured requests in {where}")
 
     include_run = scope is None
-    header, lines = _format_inspect_rows(rows, include_run=include_run)
-    # RID is column 2 (after LOC). fzf substitutes ``{2}`` with that
-    # whitespace-separated field.
+    header, display, fzf_lines = _format_inspect_rows(rows, include_run=include_run)
+    # Tab-delim hidden columns: 2 = full rid, 3 = previous-capture rid
+    # (or "-" for the first capture of a task). Pre-computing the prev
+    # rid here lets the preview pane skip a full cap-dir rescan per
+    # fzf hover.
     preview = (
-        f"{sys.executable} -m agentcap _preview {{2}} 2>/dev/null | head -400"
+        f"{sys.executable} -m agentcap _preview {{2}} {{3}} 2>/dev/null | head -400"
     )
 
-    picked, fzf_available = _fzf_pick(header, lines, preview)
+    picked, fzf_available = _fzf_pick(
+        header, fzf_lines, preview,
+        extra_args=["--delimiter", "\t", "--with-nth", "1"],
+    )
     if not fzf_available:
         click.echo(header)
-        for line in lines:
+        for line in display:
             click.echo(line)
         return None
     if picked is None:
         return None  # cancelled
+    # picked is the visible (column-1) line; RID is the second
+    # whitespace-separated field on it.
     tokens = picked.split()
     short = tokens[1] if len(tokens) >= 2 else ""
     import re
@@ -1124,7 +1183,7 @@ def inspect_cmd(target: str | None, source: str | None, print_rid_only: bool) ->
 
     # rid (full or short prefix) → body dump (single request).
     if target and "-" not in target:
-        full_rid, body, resp_rec, _ = _resolve_request_id(target, source)
+        full_rid, body, resp_rec, _, _ = _resolve_request_id(target, source)
         if resp_rec is not None:
             click.echo(
                 f"  request_id={full_rid} "
@@ -1143,7 +1202,7 @@ def inspect_cmd(target: str | None, source: str | None, print_rid_only: bool) ->
     pick = _pick_workspace_request(target)
     if pick is None:
         return  # cancelled or no-fzf table-only path
-    full_rid, body, resp_rec, _ = _resolve_request_id(pick, None)
+    full_rid, body, resp_rec, _, _ = _resolve_request_id(pick, None)
     if print_rid_only:
         click.echo(full_rid)
         return
@@ -1192,13 +1251,150 @@ def _run_preview_cmd(run_id: str) -> None:
         click.echo(f"  {t.get('task_id', '?')}: ({completed} turns) {prompt}")
 
 
+def _message_key(m: dict) -> tuple:
+    """Canonical key for a ``messages[]`` entry. Compares only the
+    load-bearing fields (role/content/tool_call_id/tool_calls); ignores
+    optional metadata like the tool ``name`` field that some agents
+    include on one turn but not the next (notably hermes when it
+    re-serialises its session DB across turn boundaries)."""
+    import json as _json
+    c = m.get("content")
+    if isinstance(c, list):
+        c = _json.dumps(c, sort_keys=True)
+    tc = m.get("tool_calls")
+    tc_key = _json.dumps(tc, sort_keys=True) if tc else None
+    return (m.get("role"), c, m.get("tool_call_id"), tc_key)
+
+
+def _diff_messages(prev: list, curr: list) -> tuple[list, list]:
+    """``(removed, added)`` — the suffixes of ``prev`` and ``curr`` that
+    diverge. Element-by-element so a length-equal turn boundary (where
+    an agent swaps a meta-prompt for the user's followup at the last
+    index) shows up as a real diff. Pure-append cases yield
+    ``removed=[]``; swaps yield non-empty removed AND added of equal
+    or unequal length depending on the truncation.
+    """
+    prev_keys = [_message_key(m) for m in prev]
+    curr_keys = [_message_key(m) for m in curr]
+    n = min(len(prev_keys), len(curr_keys))
+    i = n
+    for j in range(n):
+        if prev_keys[j] != curr_keys[j]:
+            i = j
+            break
+    return prev[i:], curr[i:]
+
+
+def _delta_label(removed: int, added: int) -> str:
+    """Compact ``messages[]`` delta marker. Hides the removed count
+    when zero (the common pure-append case) so mid-loop rows stay
+    visually quiet; surfaces it for swaps (e.g. ``-1 +1``)."""
+    if removed:
+        return f"-{removed} +{added}"
+    return f"+{added}"
+
+
+def _message_text(m: dict) -> str:
+    """Flatten ``message.content`` to a string. Tool / multimodal
+    messages carry list-typed content; join the text parts."""
+    c = m.get("content")
+    if isinstance(c, list):
+        return " ".join(
+            p.get("text", "") for p in c if isinstance(p, dict)
+        )
+    return c or ""
+
+
+def _flatten(s: str, cap: int) -> str:
+    """Single-line, length-capped text. Without this, content with
+    embedded newlines (assistant prose, tool outputs) would blow up to
+    many visible lines and push later messages off fzf's preview
+    window."""
+    s = " ".join(s.split())
+    return s if len(s) <= cap else s[:cap] + "…"
+
+
+_PICKER_SUMMARY_CAP = 160
+_PREVIEW_MSG_CAP = 400
+
+
+def _tag(label: str) -> str:
+    """Reverse-video the ``[label]`` marker that introduces each
+    preview line so the role boundaries are visually scannable across
+    many similar-looking rows."""
+    return f"\033[7m[{label}]\033[0m"
+
+
+def _message_summary(m: dict) -> str:
+    """One-line role-aware summary of one ``messages[]`` entry. Used
+    in the picker's MESSAGES column where we have ~one row to convey
+    'what's new in this call'. Truncated so a large tool result can't
+    bloat the row."""
+    role = (m or {}).get("role", "?")
+    if role == "assistant":
+        tcs = m.get("tool_calls") or []
+        if tcs:
+            tc = tcs[0]
+            fn = (tc.get("function") or {}).get("name") or "?"
+            args = (tc.get("function") or {}).get("arguments") or ""
+            extra = f" +{len(tcs)-1}" if len(tcs) > 1 else ""
+            s = f"assistant→{fn}{extra} {args}"
+        else:
+            s = f"assistant: {_message_text(m)}"
+    elif role == "tool":
+        s = f"tool: {_message_text(m)}"
+    else:
+        s = f"{role}: {_message_text(m)}"
+    return _flatten(s, _PICKER_SUMMARY_CAP)
+
+
+def _render_preview_message(m: dict) -> None:
+    """Render one ``messages[]`` entry into the inspect preview pane.
+    Each message stays on one line (newlines collapsed) so the diff
+    suffix remains visible inside fzf's 60% pane. ``color=True`` on
+    every echo: this command's stdout is captured by fzf's preview
+    subprocess (not a TTY), and click strips ANSI by default in that
+    case, which would silently swallow the reverse-video markers."""
+    role = m.get("role", "?")
+    if role == "assistant":
+        for tc in m.get("tool_calls") or []:
+            fn = (tc.get("function") or {}).get("name") or "?"
+            args = (tc.get("function") or {}).get("arguments") or ""
+            click.echo(
+                f"  {_tag(f'assistant tool_call → {fn}')}  args={_flatten(args, 240)}",
+                color=True,
+            )
+        content = _message_text(m)
+        if content:
+            click.echo(
+                f"  {_tag('assistant content')} {_flatten(content, _PREVIEW_MSG_CAP)}",
+                color=True,
+            )
+        return
+    if role == "tool":
+        tcid = (m.get("tool_call_id") or "?")[:8]
+        click.echo(f"  {_tag(f'tool result, tool_call_id={tcid}')}", color=True)
+        click.echo(f"  {_flatten(_message_text(m), _PREVIEW_MSG_CAP)}", color=True)
+        return
+    click.echo(
+        f"  {_tag(role)} {_flatten(_message_text(m), _PREVIEW_MSG_CAP)}",
+        color=True,
+    )
+
+
 @cli.command("_preview", hidden=True)
 @click.argument("request_id")
-def _preview_cmd(request_id: str) -> None:
-    """Internal: dual TASK + REQUEST view used by the fzf preview pane.
+@click.argument("prev_request_id", required=False, default=None)
+def _preview_cmd(request_id: str, prev_request_id: str | None) -> None:
+    """Internal: header + initial PROMPT + MESSAGES diff for one
+    captured request — used by the fzf preview pane.
 
     Not part of the public CLI surface — hidden from ``--help``. The
     user-facing inspector is ``agentcap inspect <rid>``.
+
+    ``prev_request_id`` is pushed in by the picker so the preview can
+    load the diff base directly instead of scanning the capture dir on
+    every fzf hover. Accepts ``"-"`` (or absent) for "no previous".
     """
     import json as _json
     import re
@@ -1208,16 +1404,13 @@ def _preview_cmd(request_id: str) -> None:
         click.echo("(section header — navigate to a request id)")
         return
 
-    full_rid, body, resp_rec, req_rec = _resolve_request_id(request_id, None)
+    full_rid, body, resp_rec, req_rec, cap_dir = _resolve_request_id(request_id, None)
     messages = body.get("messages") or []
-    last_user = next(
-        (m.get("content") for m in reversed(messages) if m.get("role") == "user"),
-        "",
+    initial_user = next(
+        (m for m in messages if m.get("role") == "user"),
+        None,
     )
-    if isinstance(last_user, list):
-        last_user = " ".join(
-            p.get("text", "") for p in last_user if isinstance(p, dict)
-        )
+    initial_prompt = _message_text(initial_user or {})
     import time as _time
 
     status = (
@@ -1232,47 +1425,57 @@ def _preview_cmd(request_id: str) -> None:
         _time.strftime("%H:%M:%S", _time.gmtime(int(captured_at)))
         if captured_at else "?"
     )
-    # Step = this rid's position among peers with the same (task, turn)
-    # in its capture dir. Computed live since it's not stored per-call.
-    step = "?"
-    if task_id and turn is not None:
-        from . import replay as _replay
-        found = _replay.resolve_workspace_rid(_workspace_root(), full_rid)
-        if found is not None:
-            cap_dir, _ = found
-            peers: list[tuple[int, str]] = []
-            for p in cap_dir.glob("*.request.json"):
-                try:
-                    rec = _json.loads(p.read_text())
-                except (OSError, _json.JSONDecodeError):
-                    continue
-                if rec.get("task_id") == task_id and rec.get("turn") == turn:
-                    peers.append((
-                        int(rec.get("captured_at", 0)),
-                        p.stem.split(".")[0],
-                    ))
-            peers.sort()
-            n = len(peers)
-            idx = next(
-                (i for i, (_, rid_) in enumerate(peers, start=1)
-                 if rid_ == full_rid),
-                None,
-            )
-            if idx is not None:
-                step = f"{idx}/{n}"
+    # Load the diff base directly from the prev-rid file in the same
+    # capture dir (already known from ``_resolve_request_id`` above —
+    # no second workspace scan). The picker pushes the predecessor's
+    # rid in as ``prev_request_id``. Reject anything that isn't
+    # lowercase hex so a hand-crafted arg can't escape the capture
+    # dir via ``..`` or absolute paths.
+    prev_messages: list = []
+    has_previous = False
+    if (
+        cap_dir is not None
+        and prev_request_id
+        and prev_request_id != "-"
+        and re.fullmatch(r"[0-9a-f]+", prev_request_id)
+    ):
+        prev_path = cap_dir / f"{prev_request_id}.request.json"
+        if prev_path.is_file():
+            try:
+                prev_rec = _json.loads(prev_path.read_text())
+                prev_messages = (prev_rec.get("body") or {}).get("messages") or []
+                has_previous = True
+            except (OSError, _json.JSONDecodeError):
+                pass
     click.echo(f"rid:    {full_rid}")
     if task_id is not None or turn is not None:
-        click.echo(f"task:   {task_id or '?'}  turn={turn if turn is not None else '?'}  step={step}")
+        click.echo(f"task:   {task_id or '?'}  turn={turn if turn is not None else '?'}")
     click.echo(f"time:   {ts}")
     click.echo(f"status: {status}")
     click.echo(f"model:  {body.get('model', '?')}")
     click.echo(f"size:   {size_b:,} bytes (~{size_b // 4:,} tokens)")
     click.echo()
     click.echo("─── PROMPT ──────────────────────────────────────────────")
-    click.echo(last_user or "(no user message)")
+    click.echo(initial_prompt or "(no user message)")
     click.echo()
-    click.echo("─── REQUEST ─────────────────────────────────────────────")
-    click.echo(_json.dumps(body, indent=2, ensure_ascii=False))
+    removed_messages, new_messages = _diff_messages(prev_messages, messages)
+    if has_previous:
+        header_suffix = (
+            f"{_delta_label(len(removed_messages), len(new_messages))} "
+            f"since previous call"
+        )
+    else:
+        n = len(new_messages)
+        header_suffix = f"initial: {n} msg{'' if n == 1 else 's'}"
+    click.echo(f"─── MESSAGES ({header_suffix}) ──────────")
+    if has_previous:
+        # Signals that the prior history (in prev_messages) was
+        # elided; what follows is the diff, not the whole conversation.
+        click.echo("  ...")
+    if not new_messages and not removed_messages:
+        click.echo("(no diff vs previous call)")
+    for m in new_messages:
+        _render_preview_message(m)
 
 
 def _render_sse_stream(chunks) -> int:
@@ -1403,7 +1606,7 @@ def replay_cmd(
         if picked is None:
             return  # cancelled or no-fzf table-only path (already printed)
         request_id = picked
-    full_rid, body, _, _ = _resolve_request_id(request_id, source)
+    full_rid, body, _, _, _ = _resolve_request_id(request_id, source)
     url = target.rstrip("/") + "/v1/chat/completions"
     is_stream = bool(body.get("stream"))
     # Rough input size — chars/4 is a coarse token estimate but it sets
