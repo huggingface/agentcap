@@ -1192,6 +1192,40 @@ def _run_preview_cmd(run_id: str) -> None:
         click.echo(f"  {t.get('task_id', '?')}: ({completed} turns) {prompt}")
 
 
+def _message_text(m: dict) -> str:
+    """Flatten ``message.content`` to a string. Tool / multimodal
+    messages carry list-typed content; join the text parts."""
+    c = m.get("content")
+    if isinstance(c, list):
+        return " ".join(
+            p.get("text", "") for p in c if isinstance(p, dict)
+        )
+    return c or ""
+
+
+def _render_preview_message(m: dict) -> None:
+    """Render one ``messages[]`` entry into the inspect preview pane.
+    Role-aware: assistant tool_calls collapse to ``name+args``, tool
+    results show their ``tool_call_id``, content bodies are truncated
+    so the preview stays readable inside fzf's 60% pane."""
+    role = m.get("role", "?")
+    if role == "assistant":
+        for tc in m.get("tool_calls") or []:
+            fn = (tc.get("function") or {}).get("name") or "?"
+            args = (tc.get("function") or {}).get("arguments") or ""
+            click.echo(f"  [assistant tool_call → {fn}]  args={args[:240]}")
+        content = _message_text(m)
+        if content:
+            click.echo(f"  [assistant content] {content[:400]}")
+        return
+    if role == "tool":
+        tcid = (m.get("tool_call_id") or "?")[:8]
+        click.echo(f"  [tool result, tool_call_id={tcid}]")
+        click.echo(f"  {_message_text(m)[:400]}")
+        return
+    click.echo(f"  [{role}] {_message_text(m)[:400]}")
+
+
 @cli.command("_preview", hidden=True)
 @click.argument("request_id")
 def _preview_cmd(request_id: str) -> None:
@@ -1233,24 +1267,34 @@ def _preview_cmd(request_id: str) -> None:
         if captured_at else "?"
     )
     # Step = this rid's position among peers with the same (task, turn)
-    # in its capture dir. Computed live since it's not stored per-call.
+    # in its capture dir. ``prev_messages`` = the immediately preceding
+    # request in the same task (any turn), used below to compute the
+    # NEW INPUT diff. Both share the same capture-dir scan.
     step = "?"
+    prev_messages: list = []
+    has_previous = False
     if task_id and turn is not None:
         from . import replay as _replay
         found = _replay.resolve_workspace_rid(_workspace_root(), full_rid)
         if found is not None:
             cap_dir, _ = found
             peers: list[tuple[int, str]] = []
+            this_at = int(captured_at or 0)
+            prev_at = -1
             for p in cap_dir.glob("*.request.json"):
                 try:
                     rec = _json.loads(p.read_text())
                 except (OSError, _json.JSONDecodeError):
                     continue
-                if rec.get("task_id") == task_id and rec.get("turn") == turn:
-                    peers.append((
-                        int(rec.get("captured_at", 0)),
-                        p.stem.split(".")[0],
-                    ))
+                if rec.get("task_id") != task_id:
+                    continue
+                at = int(rec.get("captured_at", 0))
+                if rec.get("turn") == turn:
+                    peers.append((at, p.stem.split(".")[0]))
+                if at < this_at and at > prev_at:
+                    prev_at = at
+                    prev_messages = (rec.get("body") or {}).get("messages") or []
+                    has_previous = True
             peers.sort()
             n = len(peers)
             idx = next(
@@ -1271,8 +1315,18 @@ def _preview_cmd(request_id: str) -> None:
     click.echo("─── PROMPT ──────────────────────────────────────────────")
     click.echo(last_user or "(no user message)")
     click.echo()
-    click.echo("─── REQUEST ─────────────────────────────────────────────")
-    click.echo(_json.dumps(body, indent=2, ensure_ascii=False))
+    new_messages = messages[len(prev_messages):]
+    n = len(new_messages)
+    suffix = (
+        f"{n} msg{'' if n == 1 else 's'} since previous call"
+        if has_previous
+        else f"initial call: {n} msg{'' if n == 1 else 's'}"
+    )
+    click.echo(f"─── NEW INPUT ({suffix}) ──────────")
+    if not new_messages:
+        click.echo("(no diff vs previous call)")
+    for m in new_messages:
+        _render_preview_message(m)
 
 
 def _render_sse_stream(chunks) -> int:
