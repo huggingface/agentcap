@@ -1141,9 +1141,14 @@ def _pick_workspace_request(scope: str | None) -> str | None:
     # Tab-delim hidden columns: 2 = full rid, 3 = previous-capture rid
     # (or "-" for the first capture of a task). Pre-computing the prev
     # rid here lets the preview pane skip a full cap-dir rescan per
-    # fzf hover.
+    # fzf hover. ``_highlight`` wraps each occurrence of fzf's current
+    # query (``{q}``) in red so the user can see where the match
+    # landed inside the preview. ``{q}`` is its own positional arg so
+    # fzf's automatic shell-escaping handles quoting end-to-end.
     preview = (
-        f"{sys.executable} -m agentcap _preview {{2}} {{3}} 2>/dev/null | head -400"
+        f"{sys.executable} -m agentcap _preview {{2}} {{3}} 2>/dev/null"
+        f" | head -400"
+        f" | {sys.executable} -m agentcap _highlight {{q}}"
     )
 
     picked, fzf_available = _fzf_pick(
@@ -1151,9 +1156,13 @@ def _pick_workspace_request(scope: str | None) -> str | None:
         # --no-hscroll: anchor every row at column 0 so LOC + RID stay
         # visible when a deep match would otherwise scroll the row left.
         # The full content is available in the preview pane anyway.
+        # --bind change:refresh-preview: re-render the preview on every
+        # query change so the highlight follows what the user is
+        # typing (default only re-renders on selection change).
         extra_args=[
             "--delimiter", "\t", "--with-nth", "1",
             "--no-hscroll",
+            "--bind", "change:refresh-preview",
         ],
     )
     if not fzf_available:
@@ -1497,6 +1506,61 @@ def _preview_cmd(request_id: str, prev_request_id: str | None) -> None:
         click.echo("(no diff vs previous call)")
     for m in new_messages:
         _render_preview_message(m)
+
+
+def _parse_fzf_terms(query: str) -> list[str]:
+    """Split fzf's query into the literal text of each non-negated
+    term. Each term has its operator prefix (``'``, ``^``) and
+    trailing anchor (``$``) stripped so the remainder is the substring
+    to highlight. Negated terms (``!word``) and bare ``|`` OR
+    separators are skipped — they aren't substrings to colour."""
+    terms: list[str] = []
+    for raw in query.split():
+        if raw in ("|", ""):
+            continue
+        if raw.startswith("!"):
+            continue
+        t = raw
+        if t and t[0] in ("'", "^"):
+            t = t[1:]
+        if t.endswith("$"):
+            t = t[:-1]
+        if t:
+            terms.append(t)
+    return terms
+
+
+@cli.command("_highlight", hidden=True)
+@click.argument("query")
+def _highlight_cmd(query: str) -> None:
+    """Read stdin, write stdout with each (case-insensitive) literal
+    occurrence of every fzf search term in ``query`` wrapped in bold
+    red. Used by the inspect picker's preview pipeline so the user's
+    typed query is visible in the preview pane.
+
+    Substring match per term — agrees with fzf's exact-match operator
+    (``'word``) and the default fuzzy mode when the fuzzy chars happen
+    to be contiguous. Operators ``'``, ``^``, ``$`` are stripped from
+    each term before matching; negated terms (``!word``) and ``|`` OR
+    separators are skipped (nothing to highlight). Special characters
+    in each term are escaped, so typing ``.``, ``[``, etc. is safe.
+    """
+    import re
+    import sys
+    terms = _parse_fzf_terms(query)
+    if not terms:
+        sys.stdout.write(sys.stdin.read())
+        return
+    # Longest terms first so a longer substring isn't shadowed by a
+    # shorter one that's a prefix of it.
+    terms.sort(key=len, reverse=True)
+    pat = re.compile(
+        "|".join(re.escape(t) for t in terms), re.IGNORECASE
+    )
+    for line in sys.stdin:
+        sys.stdout.write(
+            pat.sub(lambda m: f"\033[1;31m{m.group(0)}\033[0m", line)
+        )
 
 
 def _render_sse_stream(chunks) -> int:
