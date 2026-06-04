@@ -1424,10 +1424,16 @@ def _preview_cmd(request_id: str, prev_request_id: str | None) -> None:
     )
     # Load the diff base directly from the prev-rid file in the same
     # capture dir. No scan: the picker already knew the predecessor
-    # and pushed its rid in as ``prev_request_id``.
+    # and pushed its rid in as ``prev_request_id``. Reject anything
+    # that isn't lowercase hex so a hand-crafted arg can't escape the
+    # capture dir via ``..`` or absolute paths.
     prev_messages: list = []
     has_previous = False
-    if prev_request_id and prev_request_id != "-":
+    if (
+        prev_request_id
+        and prev_request_id != "-"
+        and re.fullmatch(r"[0-9a-f]+", prev_request_id)
+    ):
         from . import replay as _replay
         found = _replay.resolve_workspace_rid(_workspace_root(), full_rid)
         if found is not None:
