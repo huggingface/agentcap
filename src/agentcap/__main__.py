@@ -887,6 +887,7 @@ def _enumerate_workspace_requests(scope: str | None) -> list[dict]:
             key=lambda r: (r[1].get("task_id") or "", r[1].get("captured_at", 0))
         )
         prev_rid_by_task: dict = {}
+        prev_msgs_by_task: dict = {}
         for rid, req in recs:
             resp_path = captures / f"{rid}.response.json"
             status = "?"
@@ -896,18 +897,18 @@ def _enumerate_workspace_requests(scope: str | None) -> list[dict]:
                 except (OSError, _json.JSONDecodeError):
                     pass
             messages = (req.get("body") or {}).get("messages") or []
-            last_user = next(
-                (m.get("content") for m in reversed(messages) if m.get("role") == "user"),
-                "",
-            )
-            if isinstance(last_user, list):
-                # Tool-result / multi-modal message content can be a list.
-                last_user = " ".join(
-                    p.get("text", "") for p in last_user if isinstance(p, dict)
-                )
-            preview = (last_user or "").replace("\n", " ").strip()
             task_id = req.get("task_id")
+            prev_msgs = prev_msgs_by_task.get(task_id)
+            if prev_msgs is None:
+                new_msgs = messages
+                label = f"(init {len(new_msgs)})"
+            else:
+                removed, new_msgs = _diff_messages(prev_msgs, messages)
+                label = f"({_delta_label(len(removed), len(new_msgs))})"
+            summary = _message_summary(new_msgs[-1]) if new_msgs else ""
+            preview = f"{label} {summary}".replace("\n", " ").strip()
             prev_rid = prev_rid_by_task.get(task_id)
+            prev_msgs_by_task[task_id] = messages
             prev_rid_by_task[task_id] = rid
             rows.append({
                 "run_id": run_dir.name,
@@ -959,7 +960,7 @@ def _format_inspect_rows(
         cells.append(prompt)
         return "  ".join(cells)
 
-    header = _row("LOC", "RID", "RUN", "PROMPT")
+    header = _row("LOC", "RID", "RUN", "MESSAGES")
 
     display: list[str] = []
     fzf: list[str] = []
