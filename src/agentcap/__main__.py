@@ -1383,7 +1383,8 @@ def _render_preview_message(m: dict) -> None:
 @click.argument("request_id")
 @click.argument("prev_request_id", required=False, default=None)
 def _preview_cmd(request_id: str, prev_request_id: str | None) -> None:
-    """Internal: dual TASK + REQUEST view used by the fzf preview pane.
+    """Internal: header + initial PROMPT + MESSAGES diff for one
+    captured request — used by the fzf preview pane.
 
     Not part of the public CLI surface — hidden from ``--help``. The
     user-facing inspector is ``agentcap inspect <rid>``.
