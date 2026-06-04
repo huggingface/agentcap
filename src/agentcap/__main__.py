@@ -1224,23 +1224,33 @@ def inspect_cmd(target: str | None, source: str | None, print_rid_only: bool) ->
         click.echo(_json.dumps(body, indent=2, ensure_ascii=False))
         return
 
-    # No arg → pick a run first; then drill into its calls.
-    if target is None:
-        target = _pick_workspace_run()
-        if target is None:
-            return  # cancelled / no fzf table fallback already printed
-    pick = _pick_workspace_request(target)
-    if pick is None:
-        return  # cancelled or no-fzf table-only path
-    if print_rid_only:
-        full_rid, _, _, _, _ = _resolve_request_id(pick, None)
-        click.echo(full_rid)
-        return
-    # Drill into the selected request via a second fzf picker scoped
-    # to its flattened conversation (system → user → assistant → tool
-    # → … → decoded model response). Read-only browse; Esc / Enter
-    # both return without side effects.
-    _pick_request_message(pick)
+    # Esc walks back one level: message picker → request picker → run
+    # picker → exit. A run-id passed on the CLI pins the request loop
+    # to that run (Esc on the request picker exits instead of falling
+    # back to a run picker).
+    cli_target = target
+
+    while True:
+        scope = cli_target
+        if scope is None:
+            scope = _pick_workspace_run()
+            if scope is None:
+                return  # Esc on the run picker → exit
+        # Drill into the selected run: pick a request, then drill into
+        # its flattened conversation. Read-only browse; Esc on the
+        # message picker returns here so the user can pick a different
+        # request in the same run.
+        while True:
+            pick = _pick_workspace_request(scope)
+            if pick is None:
+                break  # Esc on the request picker → back one level
+            if print_rid_only:
+                full_rid, _, _, _, _ = _resolve_request_id(pick, None)
+                click.echo(full_rid)
+                return
+            _pick_request_message(pick)
+        if cli_target is not None:
+            return  # explicit run-id on CLI; Esc → exit
 
 
 @cli.command("_run_preview", hidden=True)
