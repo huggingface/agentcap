@@ -974,7 +974,10 @@ def _format_inspect_rows(
             if r.get("task_id") and r.get("req_index") is not None
             else "-"
         )
-        line = _row(loc, r["rid"][:8], r["run_id"], r["preview"])
+        # Tabs in tool args / message content would otherwise shift the
+        # tab-delimited hidden columns below and the preview would load
+        # the wrong rid.
+        line = _row(loc, r["rid"][:8], r["run_id"], r["preview"]).replace("\t", " ")
         task_id = r.get("task_id")
         if task_id and task_id != prev_task:
             # Reverse video: inverts fg/bg so the row pops on any
