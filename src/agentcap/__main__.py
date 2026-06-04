@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -872,12 +873,21 @@ def _enumerate_workspace_requests(scope: str | None) -> list[dict]:
         captures = run_dir / "captures"
         if not captures.is_dir():
             continue
+        # Sort within (task, time) so per-task ``prev_rid`` is the
+        # immediately-preceding capture in chronological order.
+        recs: list[tuple[str, dict]] = []
         for req_path in captures.glob("*.request.json"):
             rid = req_path.stem.split(".")[0]
             try:
                 req = _json.loads(req_path.read_text())
             except (OSError, _json.JSONDecodeError):
                 continue
+            recs.append((rid, req))
+        recs.sort(
+            key=lambda r: (r[1].get("task_id") or "", r[1].get("captured_at", 0))
+        )
+        prev_rid_by_task: dict = {}
+        for rid, req in recs:
             resp_path = captures / f"{rid}.response.json"
             status = "?"
             if resp_path.is_file():
@@ -896,13 +906,17 @@ def _enumerate_workspace_requests(scope: str | None) -> list[dict]:
                     p.get("text", "") for p in last_user if isinstance(p, dict)
                 )
             preview = (last_user or "").replace("\n", " ").strip()
+            task_id = req.get("task_id")
+            prev_rid = prev_rid_by_task.get(task_id)
+            prev_rid_by_task[task_id] = rid
             rows.append({
                 "run_id": run_dir.name,
                 "rid": rid,
                 "captured_at": int(req.get("captured_at", 0)),
                 "status": status,
-                "task_id": req.get("task_id"),
+                "task_id": task_id,
                 "turn": req.get("turn"),
+                "prev_rid": prev_rid,
                 "preview": preview,
             })
     rows.sort(key=lambda r: (r["run_id"], r["captured_at"]))
@@ -911,11 +925,18 @@ def _enumerate_workspace_requests(scope: str | None) -> list[dict]:
 
 def _format_inspect_rows(
     rows: list[dict], *, include_run: bool
-) -> tuple[str, list[str]]:
+) -> tuple[str, list[str], list[str]]:
     """Flat table: every row is one captured call, every visible column
     is something the user might fuzzy-filter on (LOC = ``task.tN``,
     RID, optional RUN, PROMPT). Step / time / status / model / size
-    live in the fzf preview pane (see ``_preview_cmd``)."""
+    live in the fzf preview pane (see ``_preview_cmd``).
+
+    Returns ``(header, display_lines, fzf_lines)``. ``display_lines``
+    are what the no-fzf table prints. ``fzf_lines`` are the same
+    visible content followed by a tab and two metadata fields —
+    the full rid and the previous capture's rid — so a future preview
+    command can pull both via ``{2}`` and ``{3}`` substitution without
+    rescanning the capture dir for every hover."""
 
     rid_w = 8
     loc_w = max(
@@ -940,19 +961,28 @@ def _format_inspect_rows(
 
     header = _row("LOC", "RID", "RUN", "PROMPT")
 
-    body: list[str] = []
+    display: list[str] = []
+    fzf: list[str] = []
     for r in rows:
         loc = (
             f"{r.get('task_id') or '?'}.t{r.get('turn')}"
             if r.get("task_id") and r.get("turn") is not None
             else "-"
         )
-        body.append(_row(loc, r["rid"][:8], r["run_id"], r["preview"]))
-    return header, body
+        # Strip tabs from the visible content so they don't shift the
+        # tab-delimited hidden columns appended below.
+        line = _row(loc, r["rid"][:8], r["run_id"], r["preview"]).replace("\t", " ")
+        display.append(line)
+        fzf.append(f"{line}\t{r['rid']}\t{r.get('prev_rid') or '-'}")
+    return header, display, fzf
 
 
 def _fzf_pick(
-    header: str, lines: list[str], preview_cmd: str
+    header: str,
+    lines: list[str],
+    preview_cmd: str,
+    *,
+    extra_args: Sequence[str] = (),
 ) -> tuple[str | None, bool]:
     """Run fzf over ``lines`` with ``header`` pinned at the top. Returns
     ``(picked, available)``:
@@ -967,17 +997,19 @@ def _fzf_pick(
     # UX without uninstalling fzf — pretend it isn't there.
     if os.environ.get("AGENTCAP_NO_FZF") or not shutil.which("fzf"):
         return None, False
+    args = [
+        "fzf",
+        "--ansi",
+        "--layout=reverse",
+        "--header", header,
+        "--header-first",
+        "--preview", preview_cmd,
+        "--preview-window=right:60%:wrap",
+        "--no-sort",
+    ]
+    args.extend(extra_args)
     proc = subprocess.run(
-        [
-            "fzf",
-            "--ansi",
-            "--layout=reverse",
-            "--header", header,
-            "--header-first",
-            "--preview", preview_cmd,
-            "--preview-window=right:60%:wrap",
-            "--no-sort",
-        ],
+        args,
         input="\n".join(lines),
         capture_output=True,
         text=True,
@@ -1070,21 +1102,28 @@ def _pick_workspace_request(scope: str | None) -> str | None:
         raise click.UsageError(f"no captured requests in {where}")
 
     include_run = scope is None
-    header, lines = _format_inspect_rows(rows, include_run=include_run)
-    # RID is column 2 (after LOC). fzf substitutes ``{2}`` with that
-    # whitespace-separated field.
+    header, display, fzf_lines = _format_inspect_rows(rows, include_run=include_run)
+    # Tab-delim hidden columns: 2 = full rid, 3 = previous-capture rid
+    # (or "-" for the first capture of a task). The preview command
+    # still uses ``{2}`` only — the upcoming preview rewrite will
+    # consume ``{3}`` so the diff base can be loaded without a scan.
     preview = (
         f"{sys.executable} -m agentcap _preview {{2}} 2>/dev/null | head -400"
     )
 
-    picked, fzf_available = _fzf_pick(header, lines, preview)
+    picked, fzf_available = _fzf_pick(
+        header, fzf_lines, preview,
+        extra_args=["--delimiter", "\t", "--with-nth", "1"],
+    )
     if not fzf_available:
         click.echo(header)
-        for line in lines:
+        for line in display:
             click.echo(line)
         return None
     if picked is None:
         return None  # cancelled
+    # picked is the visible (column-1) line; RID is the second
+    # whitespace-separated field on it.
     tokens = picked.split()
     short = tokens[1] if len(tokens) >= 2 else ""
     import re
