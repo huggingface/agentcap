@@ -408,11 +408,6 @@ def run_cmd(
             f"--model is required for --agent {agent}"
         )
 
-    if followup == "synthesized":
-        fu = get_followup("synthesized", upstream=upstream, model=model)
-    else:
-        fu = get_followup(followup)
-
     api_key, api_key_source = _resolve_api_key(
         upstream=upstream,
         explicit_api_key=api_key,
@@ -422,6 +417,13 @@ def run_cmd(
             f"  [auth] HF Router token source={api_key_source}",
             err=True,
         )
+
+    if followup == "synthesized":
+        fu = get_followup(
+            "synthesized", upstream=upstream, model=model, api_key=api_key
+        )
+    else:
+        fu = get_followup(followup)
 
     # --- sandbox setup: from here on, side effects.
 
