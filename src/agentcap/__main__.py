@@ -1282,14 +1282,11 @@ def _preview_cmd(request_id: str) -> None:
 
     full_rid, body, resp_rec, req_rec = _resolve_request_id(request_id, None)
     messages = body.get("messages") or []
-    last_user = next(
-        (m.get("content") for m in reversed(messages) if m.get("role") == "user"),
-        "",
+    initial_user = next(
+        (m for m in messages if m.get("role") == "user"),
+        None,
     )
-    if isinstance(last_user, list):
-        last_user = " ".join(
-            p.get("text", "") for p in last_user if isinstance(p, dict)
-        )
+    initial_prompt = _message_text(initial_user or {})
     import time as _time
 
     status = (
@@ -1351,7 +1348,7 @@ def _preview_cmd(request_id: str) -> None:
     click.echo(f"size:   {size_b:,} bytes (~{size_b // 4:,} tokens)")
     click.echo()
     click.echo("─── PROMPT ──────────────────────────────────────────────")
-    click.echo(last_user or "(no user message)")
+    click.echo(initial_prompt or "(no user message)")
     click.echo()
     new_messages = messages[len(prev_messages):]
     n = len(new_messages)
