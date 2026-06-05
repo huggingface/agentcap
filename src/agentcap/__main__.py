@@ -942,6 +942,90 @@ def _enumerate_workspace_requests(scope: str | None) -> list[dict]:
     return rows
 
 
+def _enumerate_parquet_requests(parquet_path: Path) -> list[dict]:
+    """Same row shape as ``_enumerate_workspace_requests`` but sourced
+    from a single ``-captures`` parquet (``agentcap export`` output).
+    Newer parquets carry ``task_id`` / ``turn`` so the diff / prev_rid
+    chain groups per (run, task); older ones without those columns
+    fall back to one linear chain per ``run_id`` and the LOC cell
+    just stays ``-``."""
+    import json as _json
+    import pyarrow.parquet as pq
+
+    table_meta = pq.ParquetFile(str(parquet_path)).schema_arrow
+    available = set(table_meta.names)
+    cols = ["request_id", "captured_at", "request", "response", "run_id"]
+    has_task = "task_id" in available
+    has_turn = "turn" in available
+    if has_task:
+        cols.append("task_id")
+    if has_turn:
+        cols.append("turn")
+    t = pq.read_table(str(parquet_path), columns=cols)
+    n = t.num_rows
+    if n == 0:
+        return []
+    rids = t.column("request_id").to_pylist()
+    times = t.column("captured_at").to_pylist()
+    reqs = t.column("request").to_pylist()
+    resps = t.column("response").to_pylist()
+    runs = t.column("run_id").to_pylist()
+    task_ids = t.column("task_id").to_pylist() if has_task else [None] * n
+    turns = t.column("turn").to_pylist() if has_turn else [None] * n
+
+    order = sorted(range(n), key=lambda i: (runs[i] or "", int(times[i] or 0)))
+    rows: list[dict] = []
+    prev_msgs: dict = {}
+    prev_rid: dict = {}
+    idx_by_key: dict = {}
+    for i in order:
+        rid = rids[i]
+        try:
+            body = _json.loads(reqs[i] or "{}")
+        except _json.JSONDecodeError:
+            body = {}
+        messages = body.get("messages") or []
+        run_id = runs[i] or "?"
+        task_id = task_ids[i]
+        # Mirror workspace semantics: group prev/diff by (run, task);
+        # fall back to (run, rid) when task_id is missing so unrelated
+        # rows don't chain into one synthetic task.
+        key = (run_id, task_id if task_id is not None else rid)
+        prior = prev_msgs.get(key)
+        if prior is None:
+            new_msgs = messages
+            label = f"(init {len(new_msgs)})"
+        else:
+            removed, new_msgs = _diff_messages(prior, messages)
+            label = f"({_delta_label(len(removed), len(new_msgs))})"
+        summary = _message_summary(new_msgs[-1]) if new_msgs else ""
+        preview = f"{label} {summary}".replace("\n", " ").strip()
+        searchable = " ".join(
+            _message_text(m) for m in new_msgs
+        ).replace("\n", " ").replace("\t", " ")
+        status = "?"
+        try:
+            status = str(_json.loads(resps[i] or "{}").get("status_code", "?"))
+        except _json.JSONDecodeError:
+            pass
+        idx_by_key[key] = idx_by_key.get(key, 0) + 1
+        rows.append({
+            "run_id": run_id,
+            "rid": rid,
+            "captured_at": int(times[i] or 0),
+            "status": status,
+            "task_id": task_id,
+            "turn": turns[i],
+            "req_index": idx_by_key[key],
+            "prev_rid": prev_rid.get(key),
+            "preview": preview,
+            "searchable": searchable,
+        })
+        prev_msgs[key] = messages
+        prev_rid[key] = rid
+    return rows
+
+
 def _format_inspect_rows(
     rows: list[dict], *, include_run: bool
 ) -> tuple[str, list[str]]:
@@ -1182,6 +1266,359 @@ def _pick_workspace_request(
     return short
 
 
+def _classify_source(source: str | None) -> tuple[str, str | None]:
+    """Map ``--source`` into ``(kind, normalised_payload)``:
+
+    - ``("workspace", None)`` — no source given.
+    - ``("parquet", abs_path)`` — local ``.parquet`` file.
+    - ``("hf", "<owner>/<name>")`` — ``hf://datasets/<owner>/<name>``
+      or the bare ``<owner>/<name>`` shorthand (matches the syntax
+      ``replay.load_request`` already accepts).
+
+    Anything else raises ``UsageError``."""
+    if source is None:
+        return "workspace", None
+    if source.endswith(".parquet"):
+        p = Path(source)
+        if not p.is_file():
+            raise click.UsageError(f"parquet not found: {source}")
+        return "parquet", str(p)
+    s = source
+    if s.startswith("hf://datasets/"):
+        s = s[len("hf://datasets/"):]
+    s = s.strip("/")
+    # ``owner/name`` shorthand — exactly one ``/``, both parts non-empty.
+    if s.count("/") == 1 and all(s.split("/")):
+        return "hf", s
+    raise click.UsageError(
+        f"source must be a .parquet file or an hf://datasets/<owner>/<name> "
+        f"URI (or the bare <owner>/<name> shorthand); got {source!r}"
+    )
+
+
+def _hf_meta_cache_path(repo_id: str, path: str) -> Path:
+    """Disk-cache location for one parquet's metadata. Filenames are
+    immutable (timestamp + hash in stem), so the cache never goes
+    stale — a re-export produces a new filename → fresh cache entry."""
+    safe_repo = repo_id.replace("/", "__")
+    safe_file = path.replace("/", "__")
+    d = Path.home() / ".cache" / "agentcap" / "hf-list" / safe_repo
+    d.mkdir(parents=True, exist_ok=True)
+    return d / (safe_file + ".json")
+
+
+def _fetch_hf_parquet_meta(repo_id: str, path: str) -> dict:
+    """Pull one parquet's preview-relevant metadata via HfFileSystem
+    (footer + small column reads, no full download). Returns
+    ``{model, num_rows, tasks: [{id, turns, prompt}]}``. ``tasks`` is
+    empty when the parquet predates the ``task_id`` schema."""
+    import json as _json
+    from huggingface_hub import HfFileSystem
+    import pyarrow.parquet as pq
+    fs = HfFileSystem()
+    full = f"datasets/{repo_id}/{path}"
+    out: dict = {"model": None, "num_rows": 0, "tasks": []}
+    with fs.open(full, "rb") as fh:
+        pf = pq.ParquetFile(fh)
+        out["num_rows"] = pf.metadata.num_rows
+        cols = pf.schema_arrow.names
+        if "model" in cols and pf.num_row_groups:
+            # First row-group + single column → tiny download.
+            rg = pf.read_row_group(0, columns=["model"])
+            if rg.num_rows:
+                out["model"] = rg.column("model")[0].as_py()
+        if "task_id" in cols:
+            read_cols = ["task_id"]
+            if "turn" in cols:
+                read_cols.append("turn")
+            if "request" in cols:
+                read_cols.append("request")
+            tbl = pf.read(columns=read_cols)
+            tids = tbl.column("task_id").to_pylist()
+            turns = (
+                tbl.column("turn").to_pylist()
+                if "turn" in read_cols else [None] * len(tids)
+            )
+            reqs = (
+                tbl.column("request").to_pylist()
+                if "request" in read_cols else [None] * len(tids)
+            )
+            per_task: dict[str, dict] = {}
+            for tid, t, raw in zip(tids, turns, reqs):
+                if not tid:
+                    continue
+                d = per_task.setdefault(tid, {"turns": 0, "prompt": None})
+                if t is not None and int(t) > d["turns"]:
+                    d["turns"] = int(t)
+                if d["prompt"] is None and raw:
+                    try:
+                        msgs = (_json.loads(raw) or {}).get("messages") or []
+                    except (_json.JSONDecodeError, ValueError, TypeError):
+                        msgs = []
+                    for m in msgs:
+                        if m.get("role") == "user":
+                            d["prompt"] = _message_text(m).replace("\n", " ")
+                            break
+            out["tasks"] = [
+                {"id": tid, "turns": per_task[tid]["turns"],
+                 "prompt": per_task[tid]["prompt"]}
+                for tid in sorted(per_task)
+            ]
+    return out
+
+
+def _hf_parquet_meta(
+    repo_id: str, path: str, expected_blob_id: str | None = None,
+) -> dict:
+    """Read-through disk cache around ``_fetch_hf_parquet_meta``.
+    First hit pays the network round-trip; subsequent hits (including
+    across sessions) come back instantly. Cache lives under
+    ``~/.cache/agentcap/hf-list/``.
+
+    ``expected_blob_id`` is the git SHA of the parquet returned by
+    ``HfApi().list_repo_tree``. When provided, cached entries with a
+    different ``blob_id`` are invalidated — covers the "someone
+    overwrote the file at the same path" case. Without it the cache
+    is trusted blindly (sufficient for the preview command, which is
+    only ever called for paths that were just listed)."""
+    import json as _json
+    cache_path = _hf_meta_cache_path(repo_id, path)
+    if cache_path.is_file():
+        try:
+            cached = _json.loads(cache_path.read_text())
+            cached_blob = cached.get("_blob_id")
+            if (
+                expected_blob_id is None
+                or (cached_blob and cached_blob == expected_blob_id)
+            ):
+                return cached
+        except (OSError, _json.JSONDecodeError):
+            pass
+    meta = _fetch_hf_parquet_meta(repo_id, path)
+    if expected_blob_id is not None:
+        meta["_blob_id"] = expected_blob_id
+    try:
+        cache_path.write_text(_json.dumps(meta, ensure_ascii=False))
+    except OSError:
+        pass
+    return meta
+
+
+def _hf_list_parquets(repo_id: str) -> list[dict]:
+    """Return one row per ``.parquet`` file in ``<owner>/<name>``.
+    Each row: ``{path, size, agent, ts, model, num_rows}``. ``model``
+    + ``num_rows`` are pulled via ``_hf_parquet_meta`` (read-through
+    disk cache) — first call hits the network once per parquet in
+    parallel; later calls and preview hovers come from disk."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from huggingface_hub import HfApi
+    api = HfApi()
+    tree = api.list_repo_tree(repo_id, repo_type="dataset", recursive=True)
+    base: list[dict] = []
+    for entry in tree:
+        path = getattr(entry, "path", None) or getattr(entry, "rfilename", None)
+        if not path or not path.endswith(".parquet"):
+            continue
+        size = getattr(entry, "size", None) or 0
+        # ``blob_id`` is the git SHA — changes whenever the file's
+        # content does, so it doubles as our cache validator.
+        blob_id = getattr(entry, "blob_id", None)
+        stem = Path(path).stem
+        agent = ts = None
+        parts = stem.split("-")
+        if len(parts) >= 4 and parts[0] == "train":
+            agent = parts[1]
+            ts = parts[-2]
+        base.append({
+            "path": path, "size": int(size), "agent": agent, "ts": ts,
+            "blob_id": blob_id,
+        })
+
+    # Hydrate model + num_rows. A cache file is "fresh" only when its
+    # stored ``_blob_id`` matches the current tree entry's blob_id;
+    # anything else is treated as a miss and refetched in parallel.
+    def _is_fresh(r: dict) -> bool:
+        import json as _json
+        cache_path = _hf_meta_cache_path(repo_id, r["path"])
+        if not cache_path.is_file():
+            return False
+        try:
+            cached = _json.loads(cache_path.read_text())
+        except (OSError, _json.JSONDecodeError):
+            return False
+        return cached.get("_blob_id") == r["blob_id"]
+
+    misses = [r for r in base if not _is_fresh(r)]
+    if misses:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futs = {
+                pool.submit(_hf_parquet_meta, repo_id, r["path"], r["blob_id"]): r
+                for r in misses
+            }
+            for fut in as_completed(futs):
+                try:
+                    fut.result()
+                except Exception:  # noqa: BLE001
+                    pass  # picker still works without per-row model
+    for r in base:
+        try:
+            m = _hf_parquet_meta(repo_id, r["path"], r["blob_id"])
+        except Exception:  # noqa: BLE001
+            m = {"model": None, "num_rows": 0}
+        r["model"] = m.get("model")
+        r["num_rows"] = m.get("num_rows") or 0
+    base.sort(key=lambda r: (r["agent"] or "", r["ts"] or "", r["path"]))
+    return base
+
+
+_HF_PREVIEW_TASK_LIMIT = 15
+
+
+@cli.command("_hf_parquet_preview", hidden=True)
+@click.argument("repo_id")
+@click.argument("path")
+def _hf_parquet_preview_cmd(repo_id: str, path: str) -> None:
+    """Internal: preview pane for the HF dataset parquet picker.
+    Reads from the on-disk cache populated by ``_hf_parquet_meta``;
+    fzf re-spawns this command on every hover so making it I/O-free
+    is what keeps row-to-row navigation snappy. The task list is
+    truncated to ``_HF_PREVIEW_TASK_LIMIT`` rows since the preview
+    pane can't show more than a screenful anyway."""
+    try:
+        meta = _hf_parquet_meta(repo_id, path)
+    except Exception as exc:  # noqa: BLE001
+        click.echo(f"(preview failed: {type(exc).__name__}: {exc})")
+        return
+    click.echo(f"path:   {path}")
+    click.echo(f"rows:   {meta.get('num_rows', 0):,}")
+    click.echo(f"model:  {meta.get('model') or '?'}")
+    tasks = meta.get("tasks") or []
+    click.echo(f"tasks:  {len(tasks)}")
+    if not tasks:
+        click.echo()
+        click.echo("(no task_id column — pre-schema-upgrade parquet)")
+        return
+    click.echo()
+    click.echo("─── TASKS ───")
+    shown = tasks[:_HF_PREVIEW_TASK_LIMIT]
+    for t in shown:
+        prompt = _flatten(t.get("prompt") or "(no user message)", 120)
+        click.echo(f"  {t['id']}: ({t.get('turns', 0)} turns) {prompt}")
+    hidden = len(tasks) - len(shown)
+    if hidden > 0:
+        click.echo(f"  … and {hidden} more")
+
+
+def _pick_hf_dataset_parquet(repo_id: str) -> Path | None:
+    """Level-1 picker over the ``.parquet`` files in an HF dataset.
+    Returns the local cached path of the picked parquet, or ``None``
+    if cancelled. The download happens here (after pick) so hovering
+    in the picker stays cheap — only the file the user actually
+    selected gets materialised."""
+    import shlex
+    import sys
+    from huggingface_hub import hf_hub_download
+
+    rows = _hf_list_parquets(repo_id)
+    if not rows:
+        raise click.UsageError(f"no .parquet files in {repo_id}")
+    # Display columns: AGENT  MODEL  ROWS  SIZE  PATH. Model + row
+    # count are hydrated from the parquet footer cache populated in
+    # ``_hf_list_parquets`` — no per-row network on picker open after
+    # the first time.
+    def _short_model(m: str | None) -> str:
+        if not m:
+            return "?"
+        # ``org/Model-Name`` → ``Model-Name``: the org repeats across
+        # rows and bloats the column for no extra signal.
+        return m.rsplit("/", 1)[-1]
+
+    agent_w = max(len("AGENT"), max(len(r["agent"] or "?") for r in rows))
+    model_w = max(len("MODEL"), max(len(_short_model(r["model"])) for r in rows))
+
+    def _fmt(agent, model, rows_n, size, path) -> str:
+        return (
+            f"{agent:<{agent_w}}  {model:<{model_w}}  "
+            f"{rows_n:>5}  {size:>7}  {path}"
+        )
+
+    def _size_label(n: int) -> str:
+        for unit in ("B", "K", "M", "G"):
+            if n < 1024 or unit == "G":
+                return f"{n:.0f}{unit}" if unit == "B" else f"{n:.1f}{unit}"
+            n /= 1024
+        return f"{n}"
+
+    header = _fmt("AGENT", "MODEL", "ROWS", "SIZE", "PATH")
+    lines = [
+        # Hidden col 2 carries the path so the preview can use ``{2}``
+        # without a brittle awk over the visible columns.
+        _fmt(
+            r["agent"] or "?", _short_model(r["model"]),
+            str(r.get("num_rows") or 0), _size_label(r["size"]), r["path"],
+        ) + f"\t{r['path']}"
+        for r in rows
+    ]
+    preview = (
+        f"{sys.executable} -m agentcap _hf_parquet_preview"
+        f" {shlex.quote(repo_id)} {{2}} 2>/dev/null"
+    )
+    picked = _fzf_pick(
+        header, lines, preview,
+        extra_args=[
+            "--delimiter", "\t", "--with-nth", "1",
+            "--no-hscroll",
+        ],
+    )
+    if picked is None:
+        return None
+    rel = picked.rsplit("\t", 1)[-1].strip()
+    # ``hf_hub_download`` is a no-op when the file is already cached
+    # under ~/.cache/huggingface — no extra plumbing needed for the
+    # "cache between picker invocations" requirement.
+    return Path(hf_hub_download(
+        repo_id=repo_id, repo_type="dataset", filename=rel,
+    ))
+
+
+def _pick_parquet_request(parquet_path: Path) -> str | None:
+    """fzf picker over the rows of a captures parquet. Same shape as
+    ``_pick_workspace_request`` but the preview pipeline shells out to
+    ``_preview_parquet`` (which reads from the parquet) instead of
+    ``_preview`` (which scans the workspace). Returns the picked
+    short rid or ``None`` if cancelled. Picker returns FULL rids from
+    the parquet, but we truncate to the 8-char prefix the rest of the
+    code expects."""
+    import shlex
+    import sys
+
+    rows = _enumerate_parquet_requests(parquet_path)
+    if not rows:
+        raise click.UsageError(f"no rows in {parquet_path}")
+    header, fzf_lines = _format_inspect_rows(rows, include_run=True)
+    pq_quoted = shlex.quote(str(parquet_path))
+    preview = (
+        f"{sys.executable} -m agentcap _preview_parquet {pq_quoted}"
+        f" {{2}} {{3}} 2>/dev/null"
+        f" | head -400"
+        f" | {sys.executable} -m agentcap _highlight {{q}}"
+    )
+    extra = [
+        "--delimiter", "\t", "--with-nth", "1",
+        "--no-hscroll",
+        "--bind", "change:refresh-preview",
+    ]
+    picked = _fzf_pick(header, fzf_lines, preview, extra_args=extra)
+    if picked is None:
+        return None
+    tokens = picked.split()
+    short = tokens[1] if len(tokens) >= 2 else ""
+    import re
+    if not re.fullmatch(r"[0-9a-f]{8}", short):
+        return None
+    return short
+
+
 @cli.command("inspect")
 @click.argument("target", required=False, shell_complete=_complete_request_ids)
 @click.option(
@@ -1224,6 +1661,35 @@ def inspect_cmd(target: str | None, source: str | None, print_rid_only: bool) ->
             )
         click.echo(_json.dumps(body, indent=2, ensure_ascii=False))
         return
+
+    # ``--source`` (no target): drive a parquet- or hf-dataset-rooted
+    # picker chain instead of the workspace. Esc walks back one level
+    # at a time, same as the workspace flow:
+    #   hf-dataset:  message → request → parquet → exit
+    #   parquet:     message → request → exit
+    kind, payload = _classify_source(source) if target is None else ("workspace", None)
+    if kind in ("parquet", "hf"):
+        while True:
+            if kind == "hf":
+                pq_path = _pick_hf_dataset_parquet(payload)  # type: ignore[arg-type]
+                if pq_path is None:
+                    return  # Esc on the parquet picker → exit
+            else:
+                pq_path = Path(payload)  # type: ignore[arg-type]
+            pq_source = str(pq_path)
+            last_pick: str | None = None
+            while True:
+                pick = _pick_parquet_request(pq_path)
+                if pick is None:
+                    break  # Esc on the request picker → back one level
+                last_pick = pick
+                if print_rid_only:
+                    full_rid, _, _, _, _ = _resolve_request_id(pick, pq_source)
+                    click.echo(full_rid)
+                    return
+                _pick_request_message(pick, source=pq_source)
+            if kind == "parquet":
+                return  # explicit parquet on CLI; Esc → exit
 
     # Esc walks back one level: message picker → request picker → run
     # picker → exit. There's no single-key skip; pressing Esc three
@@ -1521,6 +1987,107 @@ def _preview_cmd(request_id: str, prev_request_id: str | None) -> None:
         _render_preview_message(m)
 
 
+def _load_parquet_body(parquet_path: Path, rid: str) -> tuple[dict, dict, int | None, str | None]:
+    """Pull one request out of a captures parquet. Returns
+    ``(body, resp, captured_at, run_id)``. Body / resp default to
+    ``{}`` if the row is missing or unparseable so the preview can
+    still render a placeholder."""
+    import json as _json
+    import pyarrow.parquet as pq
+
+    t = pq.read_table(
+        str(parquet_path),
+        columns=["request_id", "captured_at", "request", "response", "run_id"],
+        filters=[("request_id", "=", rid)],
+    )
+    if t.num_rows == 0:
+        return {}, {}, None, None
+    try:
+        body = _json.loads(t.column("request")[0].as_py() or "{}")
+    except _json.JSONDecodeError:
+        body = {}
+    try:
+        resp = _json.loads(t.column("response")[0].as_py() or "{}")
+    except _json.JSONDecodeError:
+        resp = {}
+    ts = t.column("captured_at")[0].as_py()
+    run_id = t.column("run_id")[0].as_py()
+    return body, resp, (int(ts) if ts is not None else None), run_id
+
+
+@cli.command("_preview_parquet", hidden=True)
+@click.argument("parquet_path")
+@click.argument("request_id")
+@click.argument("prev_request_id", required=False, default=None)
+def _preview_parquet_cmd(
+    parquet_path: str, request_id: str, prev_request_id: str | None,
+) -> None:
+    """Internal: same preview as ``_preview`` but sourced from a
+    parquet file. The picker passes the parquet path as a leading arg
+    so this hidden command stays stateless."""
+    import json as _json
+    import re
+    import time as _time
+
+    if not re.fullmatch(r"[0-9a-f]+", request_id):
+        click.echo("(section header — navigate to a request id)")
+        return
+    pq_path = Path(parquet_path)
+    body, resp, captured_at, run_id = _load_parquet_body(pq_path, request_id)
+    messages = body.get("messages") or []
+    initial_user = next(
+        (m for m in messages if m.get("role") == "user"),
+        None,
+    )
+    initial_prompt = _message_text(initial_user or {})
+    status = resp.get("status_code", "?") if resp else "?"
+    serialized = _json.dumps(body, ensure_ascii=False)
+    size_b = len(serialized.encode("utf-8"))
+    ts = (
+        _time.strftime("%H:%M:%S", _time.gmtime(captured_at))
+        if captured_at else "?"
+    )
+
+    prev_messages: list = []
+    has_previous = False
+    if (
+        prev_request_id
+        and prev_request_id != "-"
+        and re.fullmatch(r"[0-9a-f]+", prev_request_id)
+    ):
+        prev_body, _, _, _ = _load_parquet_body(pq_path, prev_request_id)
+        prev_messages = prev_body.get("messages") or []
+        has_previous = bool(prev_messages)
+
+    click.echo(f"rid:    {request_id}")
+    if run_id is not None:
+        click.echo(f"run:    {run_id}")
+    click.echo(f"time:   {ts}")
+    click.echo(f"status: {status}")
+    click.echo(f"model:  {body.get('model', '?')}")
+    click.echo(f"size:   {size_b:,} bytes (~{size_b // 4:,} tokens)")
+    click.echo()
+    click.echo("─── PROMPT ──────────────────────────────────────────────")
+    click.echo(initial_prompt or "(no user message)")
+    click.echo()
+    removed_messages, new_messages = _diff_messages(prev_messages, messages)
+    if has_previous:
+        header_suffix = (
+            f"{_delta_label(len(removed_messages), len(new_messages))} "
+            f"since previous call"
+        )
+    else:
+        n = len(new_messages)
+        header_suffix = f"initial: {n} msg{'' if n == 1 else 's'}"
+    click.echo(f"─── MESSAGES ({header_suffix}) ──────────")
+    if has_previous:
+        click.echo("  ...")
+    if not new_messages and not removed_messages:
+        click.echo("(no diff vs previous call)")
+    for m in new_messages:
+        _render_preview_message(m)
+
+
 def _decode_sse_response(raw: str) -> dict:
     """Decode an OpenAI-compatible SSE response stream into a single
     synthesized assistant message: ``{content, tool_calls,
@@ -1663,19 +2230,9 @@ def _request_messages_for_view(
     return records
 
 
-@cli.command("_msg_preview", hidden=True)
-@click.argument("request_id")
-@click.argument("row", type=int)
-def _msg_preview_cmd(request_id: str, row: int) -> None:
-    """Internal: render one message (1-indexed ``row``) from the
-    request's flattened message list. Used by the message sub-picker
-    that ``inspect_cmd`` launches after a row is selected."""
-    import re
-    if not re.fullmatch(r"[0-9a-f]+", request_id):
-        click.echo("(invalid request id)")
-        return
-    full_rid, body, resp_rec, _, _ = _resolve_request_id(request_id, None)
-    records = _request_messages_for_view(body, resp_rec)
+def _render_msg_preview(records: list[dict], row: int) -> None:
+    """Echo one entry from a message list — shared between the
+    workspace- and parquet-sourced ``_msg_preview*`` commands."""
     if row < 1 or row > len(records):
         click.echo(f"(row {row} out of range; have {len(records)})")
         return
@@ -1693,12 +2250,52 @@ def _msg_preview_cmd(request_id: str, row: int) -> None:
     click.echo(rec.get("content") or "(no content)")
 
 
-def _pick_request_message(rid: str) -> None:
+@cli.command("_msg_preview", hidden=True)
+@click.argument("request_id")
+@click.argument("row", type=int)
+def _msg_preview_cmd(request_id: str, row: int) -> None:
+    """Internal: render one message (1-indexed ``row``) from the
+    request's flattened message list. Used by the workspace-sourced
+    message sub-picker."""
+    import re
+    if not re.fullmatch(r"[0-9a-f]+", request_id):
+        click.echo("(invalid request id)")
+        return
+    _, body, resp_rec, _, _ = _resolve_request_id(request_id, None)
+    _render_msg_preview(_request_messages_for_view(body, resp_rec), row)
+
+
+@cli.command("_msg_preview_parquet", hidden=True)
+@click.argument("parquet_path")
+@click.argument("request_id")
+@click.argument("row", type=int)
+def _msg_preview_parquet_cmd(
+    parquet_path: str, request_id: str, row: int,
+) -> None:
+    """Internal: same as ``_msg_preview`` but sourced from a parquet.
+    Parquet ``response`` column is a JSON blob (no streaming wrapper),
+    so we pass it through unchanged — ``_decode_response`` handles
+    both the non-stream and the SSE-wrapped shapes."""
+    import re
+    if not re.fullmatch(r"[0-9a-f]+", request_id):
+        click.echo("(invalid request id)")
+        return
+    body, resp, _, _ = _load_parquet_body(Path(parquet_path), request_id)
+    _render_msg_preview(_request_messages_for_view(body, resp or None), row)
+
+
+def _pick_request_message(rid: str, *, source: str | None = None) -> None:
     """Second-level fzf picker over the messages of the request the
-    user selected in ``_pick_workspace_request``. Read-only browse:
-    Esc / Enter both return to the caller without side effects."""
+    user selected in the request picker. Read-only browse: Esc / Enter
+    both return to the caller without side effects.
+
+    ``source`` is ``None`` for workspace-sourced rids (current
+    behaviour) and a local parquet path for parquet-sourced rids — the
+    preview pipeline shells out to a different hidden command in each
+    case so the picker doesn't need to know how the body was loaded."""
+    import shlex
     import sys
-    full_rid, body, resp_rec, _, _ = _resolve_request_id(rid, None)
+    full_rid, body, resp_rec, _, _ = _resolve_request_id(rid, source)
     records = _request_messages_for_view(body, resp_rec)
     if not records:
         click.echo("(no messages in this request)")
@@ -1714,11 +2311,18 @@ def _pick_request_message(rid: str) -> None:
         # runs previews via ``$SHELL -c``, so fish would break.
         lines.append(f"{display}\t{i}")
     header = f"messages for {full_rid[:8]} ({len(records)} entries)"
-    preview = (
-        f"{sys.executable} -m agentcap _msg_preview"
-        f" {full_rid} {{2}} 2>/dev/null"
-        f" | {sys.executable} -m agentcap _highlight {{q}}"
-    )
+    if source and source.endswith(".parquet"):
+        preview = (
+            f"{sys.executable} -m agentcap _msg_preview_parquet"
+            f" {shlex.quote(source)} {full_rid} {{2}} 2>/dev/null"
+            f" | {sys.executable} -m agentcap _highlight {{q}}"
+        )
+    else:
+        preview = (
+            f"{sys.executable} -m agentcap _msg_preview"
+            f" {full_rid} {{2}} 2>/dev/null"
+            f" | {sys.executable} -m agentcap _highlight {{q}}"
+        )
     _fzf_pick(
         header, lines, preview,
         extra_args=[
