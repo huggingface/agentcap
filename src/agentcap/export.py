@@ -182,6 +182,22 @@ def export_local(
                 for k, v in provider_columns.items():
                     r.setdefault(k, v)
         table = pa.Table.from_pylist(rows)
+        # ``task_id`` / ``turn`` are optional orchestrator metadata.
+        # If the first batch's values are all ``None``, Arrow infers
+        # ``null`` for the column type and the writer's schema locks
+        # that in — every later batch with non-null values then fails
+        # ``table.cast(schema)``. Force the canonical dtypes up front
+        # so the first-batch dtype matches what later batches will
+        # carry.
+        for col, dtype in (("task_id", pa.string()), ("turn", pa.int64())):
+            if col not in table.schema.names:
+                continue
+            field = table.schema.field(col)
+            if pa.types.is_null(field.type):
+                idx = table.schema.get_field_index(col)
+                table = table.set_column(
+                    idx, col, pa.array([None] * table.num_rows, type=dtype),
+                )
         if writer is None:
             schema = table.schema
             writer = pq.ParquetWriter(str(output), schema)
