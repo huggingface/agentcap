@@ -159,10 +159,13 @@ def test_run_force_removes_container_even_if_subprocess_raises(monkeypatch):
     """When ``subprocess.run`` raises (e.g. ``TimeoutExpired``), the
     container can still be alive — the cleanup ``podman rm -f`` must
     fire from the ``finally`` so the orchestrator never leaks a
-    container even on timeout / SIGINT."""
+    container even on timeout / SIGINT. The cleanup must also target
+    the SAME name that ``podman run`` was given; removing the wrong
+    container would silently nuke something else."""
     import subprocess
     from agentcap.sandbox import podman as pmod
 
+    run_calls: list[list[str]] = []
     rm_calls: list[list[str]] = []
 
     def fake_run(argv, **kw):
@@ -173,6 +176,7 @@ def test_run_force_removes_container_even_if_subprocess_raises(monkeypatch):
                 stdout = ""
                 stderr = ""
             return _R()
+        run_calls.append(list(argv))
         raise subprocess.TimeoutExpired(cmd=argv, timeout=kw.get("timeout"))
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -184,6 +188,42 @@ def test_run_force_removes_container_even_if_subprocess_raises(monkeypatch):
     else:
         raise AssertionError("expected TimeoutExpired to propagate")
 
+    # Extract the name passed to ``podman run`` via ``--name <X>``.
+    assert len(run_calls) == 1, run_calls
+    run_argv = run_calls[0]
+    assert "--name" in run_argv
+    run_name = run_argv[run_argv.index("--name") + 1]
+    assert run_name.startswith("agentcap-")
+
+    # Cleanup must have targeted that exact name — not some other
+    # container, and not no container.
     assert len(rm_calls) == 1, rm_calls
-    assert rm_calls[0][:3] == ["podman", "rm", "-f"]
-    assert rm_calls[0][3].startswith("agentcap-")
+    assert rm_calls[0] == ["podman", "rm", "-f", run_name]
+
+
+def test_run_propagates_main_failure_when_cleanup_also_fails(monkeypatch):
+    """If both the main ``podman run`` and the cleanup ``podman rm -f``
+    raise, callers must see the ORIGINAL exception — not the cleanup's.
+    Otherwise a transient ``rm`` failure would mask the real reason the
+    container run failed (timeout, exit code, etc.)."""
+    import subprocess
+    from agentcap.sandbox import podman as pmod
+
+    def fake_run(argv, **kw):
+        if argv[:3] == ["podman", "rm", "-f"]:
+            raise RuntimeError("cleanup boom")
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=kw.get("timeout"))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    sb = pmod.PodmanSandbox(image="img:latest")
+    try:
+        sb.run(["sleep", "60"], timeout=0.01)
+    except subprocess.TimeoutExpired:
+        pass  # original exception preserved
+    except RuntimeError as exc:
+        raise AssertionError(
+            f"cleanup exception ({exc}) leaked past the finally — "
+            f"primary TimeoutExpired was masked"
+        )
+    else:
+        raise AssertionError("expected TimeoutExpired to propagate")

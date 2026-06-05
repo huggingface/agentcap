@@ -152,12 +152,20 @@ class PodmanSandbox:
                 timeout=timeout, check=check,
             )
         finally:
-            subprocess.run(
-                [_PODMAN, "rm", "-f", name],
-                stdin=subprocess.DEVNULL,
-                capture_output=True, text=True,
-                timeout=30,
-            )
+            # Cleanup is best-effort: if it raises (timeout, podman
+            # missing, etc.) we must NOT shadow the primary outcome of
+            # ``run()`` — turning a successful container exit into a
+            # cleanup failure (or hiding the real subprocess error
+            # behind a generic rm failure) would surprise every caller.
+            try:
+                subprocess.run(
+                    [_PODMAN, "rm", "-f", name],
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True, text=True,
+                    timeout=30,
+                )
+            except Exception:  # noqa: BLE001
+                pass
 
     @staticmethod
     def _runs_dir() -> Path:
