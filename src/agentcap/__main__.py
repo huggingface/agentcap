@@ -1123,12 +1123,19 @@ def _pick_workspace_run() -> str | None:
     return tokens[0] if tokens else None
 
 
-def _pick_workspace_request(scope: str | None) -> str | None:
+def _pick_workspace_request(
+    scope: str | None, *, initial_short_rid: str | None = None,
+) -> str | None:
     """Interactive picker (fzf when available, plain table otherwise) for
     a workspace request. Returns the picked short rid, or ``None`` if
     cancelled / fzf unavailable. In the fzf-missing case the table is
     printed to stdout and ``None`` returned — callers should treat that
-    as "user must re-invoke with an explicit rid"."""
+    as "user must re-invoke with an explicit rid".
+
+    ``initial_short_rid`` (if given) positions the cursor on the row
+    whose rid starts with that prefix when the picker opens — used
+    when re-entering the picker from the message sub-picker so the
+    user lands back where they were."""
     import sys
 
     rows = _enumerate_workspace_requests(scope)
@@ -1151,19 +1158,25 @@ def _pick_workspace_request(scope: str | None) -> str | None:
         f" | {sys.executable} -m agentcap _highlight {{q}}"
     )
 
+    extra = [
+        "--delimiter", "\t", "--with-nth", "1",
+        "--no-hscroll",
+        "--bind", "change:refresh-preview",
+    ]
+    if initial_short_rid:
+        for i, line in enumerate(fzf_lines, start=1):
+            parts = line.split("\t")
+            # Hidden column 2 carries the full rid; match by prefix.
+            if len(parts) >= 2 and parts[1].startswith(initial_short_rid):
+                # ``load`` fires after fzf finishes reading stdin so
+                # the items exist when ``pos(N)`` runs (``start`` is
+                # too early — fires before items are loaded).
+                extra.extend(["--bind", f"load:pos({i})"])
+                break
+
     picked, fzf_available = _fzf_pick(
         header, fzf_lines, preview,
-        # --no-hscroll: anchor every row at column 0 so LOC + RID stay
-        # visible when a deep match would otherwise scroll the row left.
-        # The full content is available in the preview pane anyway.
-        # --bind change:refresh-preview: re-render the preview on every
-        # query change so the highlight follows what the user is
-        # typing (default only re-renders on selection change).
-        extra_args=[
-            "--delimiter", "\t", "--with-nth", "1",
-            "--no-hscroll",
-            "--bind", "change:refresh-preview",
-        ],
+        extra_args=extra,
     )
     if not fzf_available:
         click.echo(header)
@@ -1225,9 +1238,10 @@ def inspect_cmd(target: str | None, source: str | None, print_rid_only: bool) ->
         return
 
     # Esc walks back one level: message picker → request picker → run
-    # picker → exit. A run-id passed on the CLI pins the request loop
-    # to that run (Esc on the request picker exits instead of falling
-    # back to a run picker).
+    # picker → exit. There's no single-key skip; pressing Esc three
+    # times from the deepest level exits. A run-id passed on the CLI
+    # pins the request loop to that run (Esc on the request picker
+    # exits instead of falling back to a run picker).
     cli_target = target
 
     while True:
@@ -1237,13 +1251,17 @@ def inspect_cmd(target: str | None, source: str | None, print_rid_only: bool) ->
             if scope is None:
                 return  # Esc on the run picker → exit
         # Drill into the selected run: pick a request, then drill into
-        # its flattened conversation. Read-only browse; Esc on the
-        # message picker returns here so the user can pick a different
-        # request in the same run.
+        # its flattened conversation. Esc on the message sub-picker
+        # returns here; the request picker re-opens with the cursor on
+        # the same row the user just visited.
+        last_pick: str | None = None
         while True:
-            pick = _pick_workspace_request(scope)
+            pick = _pick_workspace_request(
+                scope, initial_short_rid=last_pick,
+            )
             if pick is None:
                 break  # Esc on the request picker → back one level
+            last_pick = pick
             if print_rid_only:
                 full_rid, _, _, _, _ = _resolve_request_id(pick, None)
                 click.echo(full_rid)
@@ -1690,8 +1708,7 @@ def _msg_preview_cmd(request_id: str, row: int) -> None:
 def _pick_request_message(rid: str) -> None:
     """Second-level fzf picker over the messages of the request the
     user selected in ``_pick_workspace_request``. Read-only browse:
-    Esc returns to the caller; Enter exits the sub-picker without
-    side effects."""
+    Esc / Enter both return to the caller without side effects."""
     import sys
     full_rid, body, resp_rec, _, _ = _resolve_request_id(rid, None)
     records = _request_messages_for_view(body, resp_rec)
