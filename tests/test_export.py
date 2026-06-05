@@ -488,7 +488,8 @@ def test_export_local_round_trip(tmp_path: Path):
     table = pq.read_table(out)
     assert table.num_rows == 2
     assert set(table.column_names) == {
-        "request_id", "model", "captured_at", "request", "response",
+        "request_id", "model", "captured_at", "task_id", "turn",
+        "request", "response",
         "served_by", "served_build_info", "served_model",
         "provider", "upstream_url", "run_id",
     }

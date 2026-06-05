@@ -69,14 +69,21 @@ def _bare_model_id(model: str) -> str:
 
 def _iter_pairs(
     capture_dir: Path,
-) -> Iterator[tuple[str, dict, dict | None, int, dict]]:
+) -> Iterator[tuple[str, dict, dict | None, int, dict, str | None, int | None]]:
     """Yield (request_id, request_body, response_body, captured_at,
-    upstream_fingerprint) per captured request, in filename order."""
+    upstream_fingerprint, task_id, turn) per captured request, in
+    filename order. ``task_id`` / ``turn`` come from the wrapping
+    ``.request.json`` record (orchestrator-side metadata that isn't
+    inside the OpenAI body) — preserving them in the parquet lets
+    downstream picker UIs group + index rows without having to fall
+    back to ``-``."""
     for req_path in sorted(capture_dir.glob("*.request.json")):
         rec = json.loads(req_path.read_text())
         rid = rec.get("request_id") or req_path.stem.split(".")[0]
         captured_at = int(rec.get("captured_at", 0))
         body = rec.get("body") or {}
+        task_id = rec.get("task_id")
+        turn = rec.get("turn")
         resp_path = capture_dir / f"{rid}.response.json"
         resp_body: dict | None = None
         upstream_fp: dict = {}
@@ -87,7 +94,7 @@ def _iter_pairs(
                 resp_body = {"stream": True, "raw": resp_rec.get("raw", "")}
             else:
                 resp_body = resp_rec.get("body") or {}
-        yield rid, body, resp_body, captured_at, upstream_fp
+        yield rid, body, resp_body, captured_at, upstream_fp, task_id, turn
 
 
 def _fingerprint_columns(fp: dict | None) -> dict:
@@ -105,6 +112,8 @@ def _row(
     response_body: dict | None,
     captured_at: int,
     upstream_fp: dict | None,
+    task_id: str | None = None,
+    turn: int | None = None,
 ) -> dict:
     # request / response stringified so Arrow doesn't infer a schema over
     # heterogeneous tool-schema fields. Consumers json.loads them.
@@ -113,6 +122,8 @@ def _row(
         "request_id": request_id,
         "model": model,
         "captured_at": captured_at,
+        "task_id": task_id,
+        "turn": turn,
         "request": json.dumps(request_body, ensure_ascii=False),
         "response": json.dumps(response_body or {}, ensure_ascii=False),
         **_fingerprint_columns(upstream_fp),
@@ -171,6 +182,22 @@ def export_local(
                 for k, v in provider_columns.items():
                     r.setdefault(k, v)
         table = pa.Table.from_pylist(rows)
+        # ``task_id`` / ``turn`` are optional orchestrator metadata.
+        # If the first batch's values are all ``None``, Arrow infers
+        # ``null`` for the column type and the writer's schema locks
+        # that in — every later batch with non-null values then fails
+        # ``table.cast(schema)``. Force the canonical dtypes up front
+        # so the first-batch dtype matches what later batches will
+        # carry.
+        for col, dtype in (("task_id", pa.string()), ("turn", pa.int64())):
+            if col not in table.schema.names:
+                continue
+            field = table.schema.field(col)
+            if pa.types.is_null(field.type):
+                idx = table.schema.get_field_index(col)
+                table = table.set_column(
+                    idx, col, pa.array([None] * table.num_rows, type=dtype),
+                )
         if writer is None:
             schema = table.schema
             writer = pq.ParquetWriter(str(output), schema)
@@ -180,8 +207,10 @@ def export_local(
         n_written += len(rows)
 
     try:
-        for rid, body, resp, captured_at, upstream_fp in pairs_iter:
-            batch.append(_row(rid, body, resp, captured_at, upstream_fp))
+        for rid, body, resp, captured_at, upstream_fp, task_id, turn in pairs_iter:
+            batch.append(
+                _row(rid, body, resp, captured_at, upstream_fp, task_id, turn)
+            )
             if len(batch) >= batch_size:
                 _flush(batch)
                 batch = []
