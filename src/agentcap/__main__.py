@@ -1719,18 +1719,22 @@ def _pick_request_message(rid: str) -> None:
     lines: list[str] = []
     for i, rec in enumerate(records, start=1):
         summary = _flatten(rec.get("summary") or "", 200)
-        lines.append(f"[{i:>3}]  {rec['role']:<{role_w}s}  {summary}")
+        display = f"[{i:>3}]  {rec['role']:<{role_w}s}  {summary}"
+        # Hidden tab-delimited column 2 carries the 1-indexed row.
+        # The preview reads it as ``{2}`` instead of computing
+        # ``$(({n} + 1))`` — the latter is POSIX-arithmetic and fzf
+        # runs previews via ``$SHELL -c``, so fish would break.
+        lines.append(f"{display}\t{i}")
     header = f"messages for {full_rid[:8]} ({len(records)} entries)"
-    # ``{n}`` is fzf's zero-based item index; ``_msg_preview`` is
-    # 1-indexed, so add 1 at the shell level via POSIX arithmetic.
     preview = (
         f"{sys.executable} -m agentcap _msg_preview"
-        f" {full_rid} $(({{n}} + 1)) 2>/dev/null"
+        f" {full_rid} {{2}} 2>/dev/null"
         f" | {sys.executable} -m agentcap _highlight {{q}}"
     )
     _fzf_pick(
         header, lines, preview,
         extra_args=[
+            "--delimiter", "\t", "--with-nth", "1",
             "--no-hscroll",
             "--bind", "change:refresh-preview",
         ],
