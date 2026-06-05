@@ -1586,9 +1586,10 @@ def _pick_parquet_request(parquet_path: Path) -> str | None:
     ``_pick_workspace_request`` but the preview pipeline shells out to
     ``_preview_parquet`` (which reads from the parquet) instead of
     ``_preview`` (which scans the workspace). Returns the picked
-    short rid or ``None`` if cancelled. Picker returns FULL rids from
-    the parquet, but we truncate to the 8-char prefix the rest of the
-    code expects."""
+    FULL rid or ``None`` if cancelled. Unlike the workspace flow
+    (which accepts an 8-char prefix because ``resolve_workspace_rid``
+    expands it), the parquet-source path through ``_resolve_request_id``
+    does an exact-match lookup, so we must return the full rid."""
     import shlex
     import sys
 
@@ -1611,12 +1612,15 @@ def _pick_parquet_request(parquet_path: Path) -> str | None:
     picked = _fzf_pick(header, fzf_lines, preview, extra_args=extra)
     if picked is None:
         return None
-    tokens = picked.split()
-    short = tokens[1] if len(tokens) >= 2 else ""
+    # Hidden tab-delim column 2 carries the full 32-char rid
+    # (set by ``_format_inspect_rows``). Avoid the visible 8-char
+    # prefix — the parquet's request_id column stores full rids.
+    fields = picked.split("\t")
     import re
-    if not re.fullmatch(r"[0-9a-f]{8}", short):
+    full_rid = fields[1] if len(fields) >= 2 else ""
+    if not re.fullmatch(r"[0-9a-f]{32}", full_rid):
         return None
-    return short
+    return full_rid
 
 
 @cli.command("inspect")
