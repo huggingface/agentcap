@@ -344,8 +344,8 @@ def test_inspect_unknown_rid_errors(tmp_path: Path, monkeypatch):
 
 def test_inspect_run_id_errors_without_fzf(tmp_path: Path, monkeypatch):
     """``inspect <run-id>`` needs the request picker; without fzf on PATH
-    the command errors out with a clear ``requires fzf`` message
-    instead of dumping a half-usable table."""
+    the command errors out with a clear message instead of dumping a
+    half-usable table."""
     monkeypatch.setenv("AGENTCAP_WORKSPACE", str(tmp_path))
     monkeypatch.setenv("PATH", "")
     _seed_workspace_run(
@@ -355,7 +355,7 @@ def test_inspect_run_id_errors_without_fzf(tmp_path: Path, monkeypatch):
 
     result = CliRunner().invoke(cli, ["inspect", "hermes-local-20260101-000000"])
     assert result.exit_code != 0
-    assert "requires fzf" in result.output
+    assert "fzf is required" in result.output
 
 
 def test_inspect_no_arg_errors_without_fzf(tmp_path: Path, monkeypatch):
@@ -369,7 +369,24 @@ def test_inspect_no_arg_errors_without_fzf(tmp_path: Path, monkeypatch):
 
     result = CliRunner().invoke(cli, ["inspect"])
     assert result.exit_code != 0
-    assert "requires fzf" in result.output
+    assert "fzf is required" in result.output
+
+
+def test_replay_no_request_id_errors_without_fzf(tmp_path: Path, monkeypatch):
+    """``replay`` without a request-id opens the same picker chain as
+    ``inspect``. Without fzf on PATH it must surface a UsageError
+    instead of crashing with ``FileNotFoundError`` from
+    ``subprocess.run('fzf', ...)``."""
+    monkeypatch.setenv("AGENTCAP_WORKSPACE", str(tmp_path))
+    monkeypatch.setenv("PATH", "")
+    _seed_workspace_run_with_meta(
+        tmp_path, "hermes-local-20260101-000000",
+        agent="hermes", model="m",
+    )
+
+    result = CliRunner().invoke(cli, ["replay", "--target", "http://unused"])
+    assert result.exit_code != 0
+    assert "fzf is required" in result.output
 
 
 def test_inspect_no_arg_empty_workspace_errors(tmp_path: Path, monkeypatch):

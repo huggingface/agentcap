@@ -1017,9 +1017,17 @@ def _fzf_pick(
 ) -> str | None:
     """Run fzf over ``lines`` with ``header`` pinned at the top.
     Returns the selected line, or ``None`` if the user cancelled
-    (Esc / Ctrl-C). Callers must ensure fzf is on PATH; ``inspect_cmd``
-    gates on it once at the top of the command."""
+    (Esc / Ctrl-C). Raises ``click.UsageError`` if fzf is not on PATH
+    — the gate lives here so every caller (``inspect``, ``replay``
+    without a request-id, future ones) is protected automatically."""
+    import shutil
     import subprocess
+
+    if not shutil.which("fzf"):
+        raise click.UsageError(
+            "fzf is required for interactive pickers "
+            "(install via 'brew install fzf' or your distro's package manager)."
+        )
 
     args = [
         "fzf",
@@ -1199,10 +1207,10 @@ def inspect_cmd(target: str | None, source: str | None, print_rid_only: bool) ->
     - ``agentcap inspect <rid>``        print the captured body for that request
 
     A rid is 32 hex chars (proxy-minted UUID); a run-id contains a dash.
-    The interactive pickers require fzf on PATH.
+    The interactive pickers require fzf on PATH (``_fzf_pick`` errors
+    out with a clear message if it isn't).
     """
     import json as _json
-    import shutil
 
     # rid (full or short prefix) → body dump (single request).
     if target and "-" not in target:
@@ -1216,15 +1224,6 @@ def inspect_cmd(target: str | None, source: str | None, print_rid_only: bool) ->
             )
         click.echo(_json.dumps(body, indent=2, ensure_ascii=False))
         return
-
-    # Past this point every branch goes through an fzf picker. Gate
-    # once here so the failure mode is a clear UsageError instead of
-    # silent return-without-picker deep inside ``_pick_*``.
-    if not shutil.which("fzf"):
-        raise click.UsageError(
-            "agentcap inspect requires fzf on PATH "
-            "(install via 'brew install fzf' or your distro's package manager)."
-        )
 
     # Esc walks back one level: message picker → request picker → run
     # picker → exit. There's no single-key skip; pressing Esc three
@@ -1911,7 +1910,7 @@ def replay_cmd(
             return
         picked = _pick_workspace_request(run)
         if picked is None:
-            return  # cancelled or no-fzf table-only path (already printed)
+            return  # cancelled
         request_id = picked
     full_rid, body, _, _, _ = _resolve_request_id(request_id, source)
     url = target.rstrip("/") + "/v1/chat/completions"
