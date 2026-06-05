@@ -944,7 +944,7 @@ def _enumerate_workspace_requests(scope: str | None) -> list[dict]:
 
 def _format_inspect_rows(
     rows: list[dict], *, include_run: bool
-) -> tuple[str, list[str], list[str]]:
+) -> tuple[str, list[str]]:
     """Flat table: every row is one captured call, every visible column
     is something the user might fuzzy-filter on (LOC =
     ``task_id.<req_index>``, RID, optional RUN, MESSAGES — the latter
@@ -952,12 +952,10 @@ def _format_inspect_rows(
     role-aware summary). Time / status / model / size live in the
     fzf preview pane (see ``_preview_cmd``).
 
-    Returns ``(header, display_lines, fzf_lines)``. ``display_lines``
-    are what the no-fzf table prints. ``fzf_lines`` are the same
-    visible content followed by a tab and two metadata fields —
-    the full rid and the previous capture's rid — so the fzf preview
-    command can pull both via ``{2}`` and ``{3}`` substitution without
-    rescanning the capture dir for every hover."""
+    Returns ``(header, fzf_lines)``. Each fzf line is the visible
+    content followed by tab-delimited hidden columns the preview
+    command pulls via ``{2}`` / ``{3}`` (full rid, previous rid) plus
+    a searchable blob fzf matches against (column 4)."""
 
     rid_w = 8
     loc_w = max(
@@ -982,7 +980,6 @@ def _format_inspect_rows(
 
     header = _row("LOC", "RID", "RUN", "MESSAGES")
 
-    display: list[str] = []
     fzf: list[str] = []
     prev_task: str | None = None
     for r in rows:
@@ -1000,7 +997,6 @@ def _format_inspect_rows(
             # terminal palette regardless of theme.
             line = f"\033[7m{line}\033[0m"
         prev_task = task_id
-        display.append(line)
         # Hidden tab columns (fzf searches all of them by default):
         #   2 = full rid, 3 = prev rid, 4 = concatenated new-message
         # bodies so a query like ``hf-cli`` matches rows whose deeper
@@ -1009,7 +1005,7 @@ def _format_inspect_rows(
             f"{line}\t{r['rid']}\t{r.get('prev_rid') or '-'}"
             f"\t{r.get('searchable') or ''}"
         )
-    return header, display, fzf
+    return header, fzf
 
 
 def _fzf_pick(
@@ -1018,20 +1014,13 @@ def _fzf_pick(
     preview_cmd: str,
     *,
     extra_args: Sequence[str] = (),
-) -> tuple[str | None, bool]:
-    """Run fzf over ``lines`` with ``header`` pinned at the top. Returns
-    ``(picked, available)``:
-      - ``(line, True)``  picked from fzf
-      - ``(None, True)``  fzf ran, user cancelled (Esc / Ctrl-C)
-      - ``(None, False)`` fzf not on PATH
-    """
-    import shutil
+) -> str | None:
+    """Run fzf over ``lines`` with ``header`` pinned at the top.
+    Returns the selected line, or ``None`` if the user cancelled
+    (Esc / Ctrl-C). Callers must ensure fzf is on PATH; ``inspect_cmd``
+    gates on it once at the top of the command."""
     import subprocess
 
-    # ``AGENTCAP_NO_FZF=1`` lets users compare the fzf and plain-table
-    # UX without uninstalling fzf — pretend it isn't there.
-    if os.environ.get("AGENTCAP_NO_FZF") or not shutil.which("fzf"):
-        return None, False
     args = [
         "fzf",
         "--ansi",
@@ -1049,14 +1038,16 @@ def _fzf_pick(
         capture_output=True,
         text=True,
     )
-    picked = proc.stdout.rstrip("\n") if proc.returncode == 0 else ""
-    return (picked or None, True)
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.rstrip("\n") or None
 
 
 def _pick_workspace_run() -> str | None:
     """Open an fzf picker over the runs in the workspace, returning the
-    selected run-id. Without fzf: prints the table and returns None
-    (caller treats as cancellation)."""
+    selected run-id, or ``None`` if cancelled. fzf is a hard
+    requirement of ``inspect``; the gate lives at the top of
+    ``inspect_cmd``."""
     import json as _json
     import sys
 
@@ -1111,12 +1102,7 @@ def _pick_workspace_run() -> str | None:
         f"{sys.executable} -m agentcap _run_preview {{1}} 2>/dev/null | head -200"
     )
 
-    picked, fzf_available = _fzf_pick(header, lines, preview)
-    if not fzf_available:
-        click.echo(header)
-        for line in lines:
-            click.echo(line)
-        return None
+    picked = _fzf_pick(header, lines, preview)
     if picked is None:
         return None
     tokens = picked.split()
@@ -1126,11 +1112,9 @@ def _pick_workspace_run() -> str | None:
 def _pick_workspace_request(
     scope: str | None, *, initial_short_rid: str | None = None,
 ) -> str | None:
-    """Interactive picker (fzf when available, plain table otherwise) for
-    a workspace request. Returns the picked short rid, or ``None`` if
-    cancelled / fzf unavailable. In the fzf-missing case the table is
-    printed to stdout and ``None`` returned — callers should treat that
-    as "user must re-invoke with an explicit rid".
+    """fzf picker for a workspace request. Returns the picked short
+    rid, or ``None`` if cancelled. fzf is a hard requirement of
+    ``inspect``; the gate lives at the top of ``inspect_cmd``.
 
     ``initial_short_rid`` (if given) positions the cursor on the row
     whose rid starts with that prefix when the picker opens — used
@@ -1144,7 +1128,7 @@ def _pick_workspace_request(
         raise click.UsageError(f"no captured requests in {where}")
 
     include_run = scope is None
-    header, display, fzf_lines = _format_inspect_rows(rows, include_run=include_run)
+    header, fzf_lines = _format_inspect_rows(rows, include_run=include_run)
     # Tab-delim hidden columns: 2 = full rid, 3 = previous-capture rid
     # (or "-" for the first capture of a task). Pre-computing the prev
     # rid here lets the preview pane skip a full cap-dir rescan per
@@ -1174,15 +1158,10 @@ def _pick_workspace_request(
                 extra.extend(["--bind", f"load:pos({i})"])
                 break
 
-    picked, fzf_available = _fzf_pick(
+    picked = _fzf_pick(
         header, fzf_lines, preview,
         extra_args=extra,
     )
-    if not fzf_available:
-        click.echo(header)
-        for line in display:
-            click.echo(line)
-        return None
     if picked is None:
         return None  # cancelled
     # picked is the visible (column-1) line; RID is the second
@@ -1220,9 +1199,10 @@ def inspect_cmd(target: str | None, source: str | None, print_rid_only: bool) ->
     - ``agentcap inspect <rid>``        print the captured body for that request
 
     A rid is 32 hex chars (proxy-minted UUID); a run-id contains a dash.
-    Falls back to a plain table when fzf is not on PATH.
+    The interactive pickers require fzf on PATH.
     """
     import json as _json
+    import shutil
 
     # rid (full or short prefix) → body dump (single request).
     if target and "-" not in target:
@@ -1236,6 +1216,15 @@ def inspect_cmd(target: str | None, source: str | None, print_rid_only: bool) ->
             )
         click.echo(_json.dumps(body, indent=2, ensure_ascii=False))
         return
+
+    # Past this point every branch goes through an fzf picker. Gate
+    # once here so the failure mode is a clear UsageError instead of
+    # silent return-without-picker deep inside ``_pick_*``.
+    if not shutil.which("fzf"):
+        raise click.UsageError(
+            "agentcap inspect requires fzf on PATH "
+            "(install via 'brew install fzf' or your distro's package manager)."
+        )
 
     # Esc walks back one level: message picker → request picker → run
     # picker → exit. There's no single-key skip; pressing Esc three

@@ -342,10 +342,10 @@ def test_inspect_unknown_rid_errors(tmp_path: Path, monkeypatch):
     assert "ghost" in result.output
 
 
-def test_inspect_run_id_falls_back_to_table_without_fzf(
-    tmp_path: Path, monkeypatch
-):
-    """Without fzf on PATH the picker prints a plain table."""
+def test_inspect_run_id_errors_without_fzf(tmp_path: Path, monkeypatch):
+    """``inspect <run-id>`` needs the request picker; without fzf on PATH
+    the command errors out with a clear ``requires fzf`` message
+    instead of dumping a half-usable table."""
     monkeypatch.setenv("AGENTCAP_WORKSPACE", str(tmp_path))
     monkeypatch.setenv("PATH", "")
     _seed_workspace_run(
@@ -354,27 +354,22 @@ def test_inspect_run_id_falls_back_to_table_without_fzf(
     )
 
     result = CliRunner().invoke(cli, ["inspect", "hermes-local-20260101-000000"])
-    assert result.exit_code == 0, result.output
-    assert "aaa" in result.output and "bbb" in result.output
-    assert "first prompt" in result.output
+    assert result.exit_code != 0
+    assert "requires fzf" in result.output
 
 
-def test_inspect_no_arg_opens_run_picker(tmp_path: Path, monkeypatch):
-    """With no arg, inspect now opens the run picker first. Without fzf
-    the run table is printed and inspect exits (user must re-invoke
-    with an explicit run-id)."""
+def test_inspect_no_arg_errors_without_fzf(tmp_path: Path, monkeypatch):
+    """``inspect`` with no arg also needs the run picker; same error."""
     monkeypatch.setenv("AGENTCAP_WORKSPACE", str(tmp_path))
     monkeypatch.setenv("PATH", "")
-    # Seed a run with run.json so the run picker finds it.
     _seed_workspace_run_with_meta(
         tmp_path, "hermes-local-20260101-000000",
         agent="hermes", model="m",
     )
 
     result = CliRunner().invoke(cli, ["inspect"])
-    assert result.exit_code == 0, result.output
-    # The run table includes the run-id.
-    assert "hermes-local-20260101-000000" in result.output
+    assert result.exit_code != 0
+    assert "requires fzf" in result.output
 
 
 def test_inspect_no_arg_empty_workspace_errors(tmp_path: Path, monkeypatch):
