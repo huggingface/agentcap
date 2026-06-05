@@ -134,12 +134,30 @@ class PodmanSandbox:
             env=env,
             cwd=cwd,
         )
-        return subprocess.run(
-            wrapped,
-            stdin=subprocess.DEVNULL,
-            capture_output=True, text=True,
-            timeout=timeout, check=check,
-        )
+        # ``--rm`` only fires on a clean container exit; if the orchestrator
+        # is killed, times out, or the parent process dies before the
+        # container does, the container is orphaned and its overlay layer
+        # accumulates in the podman VM. Tag every invocation with a unique
+        # ``--name`` so a ``finally`` can force-remove it no matter how
+        # ``subprocess.run`` returned.
+        import uuid
+        name = f"agentcap-{uuid.uuid4().hex[:12]}"
+        wrapped.insert(2, "--name")
+        wrapped.insert(3, name)
+        try:
+            return subprocess.run(
+                wrapped,
+                stdin=subprocess.DEVNULL,
+                capture_output=True, text=True,
+                timeout=timeout, check=check,
+            )
+        finally:
+            subprocess.run(
+                [_PODMAN, "rm", "-f", name],
+                stdin=subprocess.DEVNULL,
+                capture_output=True, text=True,
+                timeout=30,
+            )
 
     @staticmethod
     def _runs_dir() -> Path:

@@ -117,3 +117,73 @@ def test_close_is_noop():
 def test_context_manager_closes():
     with PodmanSandbox(image="img:latest") as sb:
         assert sb.image == "img:latest"
+
+
+def test_run_names_container_and_force_removes_it(monkeypatch):
+    """Every ``run()`` must inject ``--name agentcap-<hex>`` and, in a
+    ``finally`` block, fire ``podman rm -f <same-name>`` even when the
+    main subprocess succeeded — ``--rm`` only fires on a clean container
+    exit, so this is the guarantee against orphaned containers when
+    timeouts/kills/dead parents prevent that."""
+    import subprocess
+    from agentcap.sandbox import podman as pmod
+
+    calls: list[list[str]] = []
+
+    class _Completed:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(argv, **_kw):
+        calls.append(list(argv))
+        return _Completed()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    sb = pmod.PodmanSandbox(image="img:latest")
+    sb.run(["echo", "hi"])
+
+    assert len(calls) == 2, f"expected run + rm; got {calls!r}"
+    run_cmd, rm_cmd = calls
+    # ``--name <agentcap-...>`` was inserted right after ``podman run``.
+    assert "--name" in run_cmd
+    name_idx = run_cmd.index("--name")
+    name = run_cmd[name_idx + 1]
+    assert name.startswith("agentcap-")
+    # The cleanup targets the same name.
+    assert rm_cmd[:3] == ["podman", "rm", "-f"]
+    assert rm_cmd[3] == name
+
+
+def test_run_force_removes_container_even_if_subprocess_raises(monkeypatch):
+    """When ``subprocess.run`` raises (e.g. ``TimeoutExpired``), the
+    container can still be alive — the cleanup ``podman rm -f`` must
+    fire from the ``finally`` so the orchestrator never leaks a
+    container even on timeout / SIGINT."""
+    import subprocess
+    from agentcap.sandbox import podman as pmod
+
+    rm_calls: list[list[str]] = []
+
+    def fake_run(argv, **kw):
+        if argv[:3] == ["podman", "rm", "-f"]:
+            rm_calls.append(list(argv))
+            class _R:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+            return _R()
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=kw.get("timeout"))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    sb = pmod.PodmanSandbox(image="img:latest")
+    try:
+        sb.run(["sleep", "60"], timeout=0.01)
+    except subprocess.TimeoutExpired:
+        pass
+    else:
+        raise AssertionError("expected TimeoutExpired to propagate")
+
+    assert len(rm_calls) == 1, rm_calls
+    assert rm_calls[0][:3] == ["podman", "rm", "-f"]
+    assert rm_calls[0][3].startswith("agentcap-")
