@@ -978,8 +978,18 @@ def _enumerate_parquet_requests(parquet_path: Path) -> list[dict]:
     prev_msgs: dict = {}
     prev_rid: dict = {}
     idx_by_key: dict = {}
+    # Drop rows whose request_id isn't the proxy's 32-hex format.
+    # The picker would reject them anyway (``_pick_parquet_request``
+    # validates via the same regex) and they get interpolated into
+    # the fzf preview shell command via ``{2}`` / ``{3}`` — keeping
+    # them out at enumeration time also closes the door on any
+    # injection vector from a malformed parquet.
+    import re
+    _hex_rid = re.compile(r"[0-9a-f]{32}")
     for i in order:
         rid = rids[i]
+        if not rid or not _hex_rid.fullmatch(rid):
+            continue
         try:
             body = _json.loads(reqs[i] or "{}")
         except _json.JSONDecodeError:
@@ -1328,29 +1338,43 @@ def _fetch_hf_parquet_meta(repo_id: str, path: str) -> dict:
             if rg.num_rows:
                 out["model"] = rg.column("model")[0].as_py()
         if "task_id" in cols:
+            # ``task_id`` + ``turn`` are tiny columns — read across all
+            # row groups so the task list / turn-count cover the whole
+            # parquet. Avoid pulling ``request`` across the full table:
+            # it's the giant per-row OpenAI body JSON; downloading it
+            # over HfFileSystem just to extract one prompt per task
+            # would make ``inspect`` open multi-MB of data per parquet.
             read_cols = ["task_id"]
             if "turn" in cols:
                 read_cols.append("turn")
-            if "request" in cols:
-                read_cols.append("request")
             tbl = pf.read(columns=read_cols)
             tids = tbl.column("task_id").to_pylist()
             turns = (
                 tbl.column("turn").to_pylist()
                 if "turn" in read_cols else [None] * len(tids)
             )
-            reqs = (
-                tbl.column("request").to_pylist()
-                if "request" in read_cols else [None] * len(tids)
-            )
             per_task: dict[str, dict] = {}
-            for tid, t, raw in zip(tids, turns, reqs):
+            for tid, t in zip(tids, turns):
                 if not tid:
                     continue
                 d = per_task.setdefault(tid, {"turns": 0, "prompt": None})
                 if t is not None and int(t) > d["turns"]:
                     d["turns"] = int(t)
-                if d["prompt"] is None and raw:
+            # Sample prompts from row group 0 ONLY. ``request`` is
+            # huge per row, so even one row-group is a meaningful
+            # download; tasks whose first turn lives in a later
+            # row-group simply show ``None`` for the prompt.
+            if "request" in cols and pf.num_row_groups:
+                rg = pf.read_row_group(0, columns=["task_id", "request"])
+                for tid, raw in zip(
+                    rg.column("task_id").to_pylist(),
+                    rg.column("request").to_pylist(),
+                ):
+                    if not tid or not raw:
+                        continue
+                    d = per_task.get(tid)
+                    if d is None or d["prompt"] is not None:
+                        continue
                     try:
                         msgs = (_json.loads(raw) or {}).get("messages") or []
                     except (_json.JSONDecodeError, ValueError, TypeError):
@@ -1681,12 +1705,10 @@ def inspect_cmd(target: str | None, source: str | None, print_rid_only: bool) ->
             else:
                 pq_path = Path(payload)  # type: ignore[arg-type]
             pq_source = str(pq_path)
-            last_pick: str | None = None
             while True:
                 pick = _pick_parquet_request(pq_path)
                 if pick is None:
                     break  # Esc on the request picker → back one level
-                last_pick = pick
                 if print_rid_only:
                     full_rid, _, _, _, _ = _resolve_request_id(pick, pq_source)
                     click.echo(full_rid)
@@ -1993,9 +2015,19 @@ def _preview_cmd(request_id: str, prev_request_id: str | None) -> None:
 
 def _load_parquet_body(parquet_path: Path, rid: str) -> tuple[dict, dict, int | None, str | None]:
     """Pull one request out of a captures parquet. Returns
-    ``(body, resp, captured_at, run_id)``. Body / resp default to
-    ``{}`` if the row is missing or unparseable so the preview can
-    still render a placeholder."""
+    ``(body, resp_rec, captured_at, run_id)``.
+
+    The parquet's ``response`` column has two shapes depending on
+    whether the upstream streamed:
+
+      - stream:    ``{"stream": True, "raw": "<SSE bytes>"}``
+      - non-stream: the bare OpenAI body dict (no wrapper)
+
+    Workspace ``*.response.json`` records always have a ``body`` key,
+    and ``_decode_response`` follows that convention. Normalise the
+    non-stream parquet shape into ``{"stream": False, "body": ...}``
+    here so callers (notably ``_decode_response`` /
+    ``_request_messages_for_view``) get the model reply rendered."""
     import json as _json
     import pyarrow.parquet as pq
 
@@ -2011,9 +2043,13 @@ def _load_parquet_body(parquet_path: Path, rid: str) -> tuple[dict, dict, int | 
     except _json.JSONDecodeError:
         body = {}
     try:
-        resp = _json.loads(t.column("response")[0].as_py() or "{}")
+        raw_resp = _json.loads(t.column("response")[0].as_py() or "{}")
     except _json.JSONDecodeError:
-        resp = {}
+        raw_resp = {}
+    if raw_resp.get("stream"):
+        resp = raw_resp
+    else:
+        resp = {"stream": False, "body": raw_resp}
     ts = t.column("captured_at")[0].as_py()
     run_id = t.column("run_id")[0].as_py()
     return body, resp, (int(ts) if ts is not None else None), run_id
@@ -2299,7 +2335,16 @@ def _pick_request_message(rid: str, *, source: str | None = None) -> None:
     case so the picker doesn't need to know how the body was loaded."""
     import shlex
     import sys
-    full_rid, body, resp_rec, _, _ = _resolve_request_id(rid, source)
+    # ``_resolve_request_id`` returns ``resp_rec=None`` for any
+    # ``source`` (it calls ``replay.load_request`` which only loads the
+    # request body). For parquet sources, read the response back via
+    # ``_load_parquet_body`` so the message picker can show the model
+    # reply rows synthesised by ``_request_messages_for_view``.
+    if source and source.endswith(".parquet"):
+        body, resp_rec, _, _ = _load_parquet_body(Path(source), rid)
+        full_rid = rid
+    else:
+        full_rid, body, resp_rec, _, _ = _resolve_request_id(rid, source)
     records = _request_messages_for_view(body, resp_rec)
     if not records:
         click.echo("(no messages in this request)")
