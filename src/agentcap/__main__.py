@@ -915,6 +915,13 @@ def _enumerate_workspace_requests(scope: str | None) -> list[dict]:
                 label = f"({_delta_label(len(removed), len(new_msgs))})"
             summary = _message_summary(new_msgs[-1]) if new_msgs else ""
             preview = f"{label} {summary}".replace("\n", " ").strip()
+            # Concatenate every new message's content into a single
+            # searchable blob so fzf can match against deeper content
+            # (e.g. ``hf-cli`` referenced 4 messages back in the diff)
+            # without bloating the visible row.
+            searchable = " ".join(
+                _message_text(m) for m in new_msgs
+            ).replace("\n", " ").replace("\t", " ")
             prev_rid = prev_rid_by_task.get(task_key)
             prev_msgs_by_task[task_key] = messages
             prev_rid_by_task[task_key] = rid
@@ -929,6 +936,7 @@ def _enumerate_workspace_requests(scope: str | None) -> list[dict]:
                 "req_index": idx_by_task[task_key],
                 "prev_rid": prev_rid,
                 "preview": preview,
+                "searchable": searchable,
             })
     rows.sort(key=lambda r: (r["run_id"], r["captured_at"]))
     return rows
@@ -993,7 +1001,14 @@ def _format_inspect_rows(
             line = f"\033[7m{line}\033[0m"
         prev_task = task_id
         display.append(line)
-        fzf.append(f"{line}\t{r['rid']}\t{r.get('prev_rid') or '-'}")
+        # Hidden tab columns (fzf searches all of them by default):
+        #   2 = full rid, 3 = prev rid, 4 = concatenated new-message
+        # bodies so a query like ``hf-cli`` matches rows whose deeper
+        # content references it.
+        fzf.append(
+            f"{line}\t{r['rid']}\t{r.get('prev_rid') or '-'}"
+            f"\t{r.get('searchable') or ''}"
+        )
     return header, display, fzf
 
 
@@ -1108,12 +1123,19 @@ def _pick_workspace_run() -> str | None:
     return tokens[0] if tokens else None
 
 
-def _pick_workspace_request(scope: str | None) -> str | None:
+def _pick_workspace_request(
+    scope: str | None, *, initial_short_rid: str | None = None,
+) -> str | None:
     """Interactive picker (fzf when available, plain table otherwise) for
     a workspace request. Returns the picked short rid, or ``None`` if
     cancelled / fzf unavailable. In the fzf-missing case the table is
     printed to stdout and ``None`` returned — callers should treat that
-    as "user must re-invoke with an explicit rid"."""
+    as "user must re-invoke with an explicit rid".
+
+    ``initial_short_rid`` (if given) positions the cursor on the row
+    whose rid starts with that prefix when the picker opens — used
+    when re-entering the picker from the message sub-picker so the
+    user lands back where they were."""
     import sys
 
     rows = _enumerate_workspace_requests(scope)
@@ -1126,14 +1148,35 @@ def _pick_workspace_request(scope: str | None) -> str | None:
     # Tab-delim hidden columns: 2 = full rid, 3 = previous-capture rid
     # (or "-" for the first capture of a task). Pre-computing the prev
     # rid here lets the preview pane skip a full cap-dir rescan per
-    # fzf hover.
+    # fzf hover. ``_highlight`` wraps each occurrence of fzf's current
+    # query (``{q}``) in red so the user can see where the match
+    # landed inside the preview. ``{q}`` is its own positional arg so
+    # fzf's automatic shell-escaping handles quoting end-to-end.
     preview = (
-        f"{sys.executable} -m agentcap _preview {{2}} {{3}} 2>/dev/null | head -400"
+        f"{sys.executable} -m agentcap _preview {{2}} {{3}} 2>/dev/null"
+        f" | head -400"
+        f" | {sys.executable} -m agentcap _highlight {{q}}"
     )
+
+    extra = [
+        "--delimiter", "\t", "--with-nth", "1",
+        "--no-hscroll",
+        "--bind", "change:refresh-preview",
+    ]
+    if initial_short_rid:
+        for i, line in enumerate(fzf_lines, start=1):
+            parts = line.split("\t")
+            # Hidden column 2 carries the full rid; match by prefix.
+            if len(parts) >= 2 and parts[1].startswith(initial_short_rid):
+                # ``load`` fires after fzf finishes reading stdin so
+                # the items exist when ``pos(N)`` runs (``start`` is
+                # too early — fires before items are loaded).
+                extra.extend(["--bind", f"load:pos({i})"])
+                break
 
     picked, fzf_available = _fzf_pick(
         header, fzf_lines, preview,
-        extra_args=["--delimiter", "\t", "--with-nth", "1"],
+        extra_args=extra,
     )
     if not fzf_available:
         click.echo(header)
@@ -1194,26 +1237,38 @@ def inspect_cmd(target: str | None, source: str | None, print_rid_only: bool) ->
         click.echo(_json.dumps(body, indent=2, ensure_ascii=False))
         return
 
-    # No arg → pick a run first; then drill into its calls.
-    if target is None:
-        target = _pick_workspace_run()
-        if target is None:
-            return  # cancelled / no fzf table fallback already printed
-    pick = _pick_workspace_request(target)
-    if pick is None:
-        return  # cancelled or no-fzf table-only path
-    full_rid, body, resp_rec, _, _ = _resolve_request_id(pick, None)
-    if print_rid_only:
-        click.echo(full_rid)
-        return
-    if resp_rec is not None:
-        click.echo(
-            f"  request_id={full_rid} "
-            f"captured_at={resp_rec.get('captured_at_resp', '?')} "
-            f"status={resp_rec.get('status_code', '?')}",
-            err=True,
-        )
-    click.echo(_json.dumps(body, indent=2, ensure_ascii=False))
+    # Esc walks back one level: message picker → request picker → run
+    # picker → exit. There's no single-key skip; pressing Esc three
+    # times from the deepest level exits. A run-id passed on the CLI
+    # pins the request loop to that run (Esc on the request picker
+    # exits instead of falling back to a run picker).
+    cli_target = target
+
+    while True:
+        scope = cli_target
+        if scope is None:
+            scope = _pick_workspace_run()
+            if scope is None:
+                return  # Esc on the run picker → exit
+        # Drill into the selected run: pick a request, then drill into
+        # its flattened conversation. Esc on the message sub-picker
+        # returns here; the request picker re-opens with the cursor on
+        # the same row the user just visited.
+        last_pick: str | None = None
+        while True:
+            pick = _pick_workspace_request(
+                scope, initial_short_rid=last_pick,
+            )
+            if pick is None:
+                break  # Esc on the request picker → back one level
+            last_pick = pick
+            if print_rid_only:
+                full_rid, _, _, _, _ = _resolve_request_id(pick, None)
+                click.echo(full_rid)
+                return
+            _pick_request_message(pick)
+        if cli_target is not None:
+            return  # explicit run-id on CLI; Esc → exit
 
 
 @cli.command("_run_preview", hidden=True)
@@ -1476,6 +1531,269 @@ def _preview_cmd(request_id: str, prev_request_id: str | None) -> None:
         click.echo("(no diff vs previous call)")
     for m in new_messages:
         _render_preview_message(m)
+
+
+def _decode_sse_response(raw: str) -> dict:
+    """Decode an OpenAI-compatible SSE response stream into a single
+    synthesized assistant message: ``{content, tool_calls,
+    finish_reason}``. Concatenates ``delta.content`` chunks; merges
+    ``delta.tool_calls`` chunks by their ``index`` field (the first
+    chunk for an index carries id + function.name; later chunks
+    accumulate ``function.arguments`` string fragments)."""
+    import json as _json
+    content_parts: list[str] = []
+    tool_calls_by_idx: dict[int, dict] = {}
+    finish_reason: str | None = None
+    for line in raw.splitlines():
+        if not line.startswith("data:"):
+            continue
+        payload = line[len("data:"):].strip()
+        if not payload or payload == "[DONE]":
+            continue
+        try:
+            obj = _json.loads(payload)
+        except (_json.JSONDecodeError, ValueError):
+            continue
+        for ch in obj.get("choices") or []:
+            delta = ch.get("delta") or {}
+            if delta.get("content"):
+                content_parts.append(delta["content"])
+            for tc_delta in delta.get("tool_calls") or []:
+                idx = tc_delta.get("index", 0)
+                slot = tool_calls_by_idx.setdefault(idx, {
+                    "id": "", "type": "function",
+                    "function": {"name": "", "arguments": ""},
+                })
+                if tc_delta.get("id"):
+                    slot["id"] = tc_delta["id"]
+                if tc_delta.get("type"):
+                    slot["type"] = tc_delta["type"]
+                fn = tc_delta.get("function") or {}
+                if fn.get("name"):
+                    slot["function"]["name"] = fn["name"]
+                if fn.get("arguments"):
+                    slot["function"]["arguments"] += fn["arguments"]
+            if ch.get("finish_reason"):
+                finish_reason = ch["finish_reason"]
+    return {
+        "content": "".join(content_parts),
+        "tool_calls": [tool_calls_by_idx[k] for k in sorted(tool_calls_by_idx)],
+        "finish_reason": finish_reason,
+    }
+
+
+def _decode_response(resp_rec: dict) -> dict:
+    """Synthesize an assistant message from a response record. Handles
+    both non-stream (``body.choices[0].message``) and stream (raw SSE
+    bytes in ``raw``)."""
+    if resp_rec.get("stream"):
+        return _decode_sse_response(resp_rec.get("raw") or "")
+    body = resp_rec.get("body") or {}
+    ch = (body.get("choices") or [{}])[0]
+    msg = ch.get("message") or {}
+    return {
+        "content": msg.get("content") or "",
+        "tool_calls": msg.get("tool_calls") or [],
+        "finish_reason": ch.get("finish_reason"),
+    }
+
+
+def _request_messages_for_view(
+    body: dict, resp_rec: dict | None
+) -> list[dict]:
+    """Flatten ``messages[]`` + decoded response into one record per
+    picker row. Each assistant ``tool_calls`` produces its own row
+    followed (if present) by a row for the assistant's content; the
+    decoded model response is appended at the end as the final
+    assistant turn so the viewer shows the model's reply inline.
+
+    Each record: ``{msg_idx, role, summary, content, ...}``. ``msg_idx``
+    is the index into the original ``messages[]`` (or ``None`` for the
+    synthesized response rows)."""
+    records: list[dict] = []
+    msgs = body.get("messages") or []
+    for i, m in enumerate(msgs):
+        role = m.get("role", "?")
+        if role == "assistant":
+            for tc in m.get("tool_calls") or []:
+                fn = (tc.get("function") or {}).get("name") or "?"
+                args = (tc.get("function") or {}).get("arguments") or ""
+                records.append({
+                    "msg_idx": i,
+                    "role": f"assistant→{fn}",
+                    "summary": args,
+                    "content": args,
+                    "tool_call_id": tc.get("id"),
+                })
+            content = _message_text(m)
+            if content:
+                records.append({
+                    "msg_idx": i,
+                    "role": "assistant",
+                    "summary": content,
+                    "content": content,
+                })
+            continue
+        if role == "tool":
+            content = _message_text(m)
+            records.append({
+                "msg_idx": i,
+                "role": "tool",
+                "summary": content,
+                "content": content,
+                "tool_call_id": m.get("tool_call_id"),
+            })
+            continue
+        content = _message_text(m)
+        records.append({
+            "msg_idx": i,
+            "role": role,
+            "summary": content,
+            "content": content,
+        })
+    if resp_rec is not None:
+        decoded = _decode_response(resp_rec)
+        for tc in decoded.get("tool_calls") or []:
+            fn = (tc.get("function") or {}).get("name") or "?"
+            args = (tc.get("function") or {}).get("arguments") or ""
+            records.append({
+                "msg_idx": None,
+                "role": f"response→{fn}",
+                "summary": args,
+                "content": args,
+                "tool_call_id": tc.get("id"),
+            })
+        content = decoded.get("content") or ""
+        if content:
+            records.append({
+                "msg_idx": None,
+                "role": "response",
+                "summary": content,
+                "content": content,
+                "finish_reason": decoded.get("finish_reason"),
+            })
+    return records
+
+
+@cli.command("_msg_preview", hidden=True)
+@click.argument("request_id")
+@click.argument("row", type=int)
+def _msg_preview_cmd(request_id: str, row: int) -> None:
+    """Internal: render one message (1-indexed ``row``) from the
+    request's flattened message list. Used by the message sub-picker
+    that ``inspect_cmd`` launches after a row is selected."""
+    import re
+    if not re.fullmatch(r"[0-9a-f]+", request_id):
+        click.echo("(invalid request id)")
+        return
+    full_rid, body, resp_rec, _, _ = _resolve_request_id(request_id, None)
+    records = _request_messages_for_view(body, resp_rec)
+    if row < 1 or row > len(records):
+        click.echo(f"(row {row} out of range; have {len(records)})")
+        return
+    rec = records[row - 1]
+    click.echo(f"role:         {rec['role']}")
+    if rec.get("msg_idx") is not None:
+        click.echo(f"msg_idx:      {rec['msg_idx']}")
+    else:
+        click.echo("msg_idx:      (response)")
+    if rec.get("tool_call_id"):
+        click.echo(f"tool_call_id: {rec['tool_call_id']}")
+    if rec.get("finish_reason"):
+        click.echo(f"finish_reason: {rec['finish_reason']}")
+    click.echo()
+    click.echo(rec.get("content") or "(no content)")
+
+
+def _pick_request_message(rid: str) -> None:
+    """Second-level fzf picker over the messages of the request the
+    user selected in ``_pick_workspace_request``. Read-only browse:
+    Esc / Enter both return to the caller without side effects."""
+    import sys
+    full_rid, body, resp_rec, _, _ = _resolve_request_id(rid, None)
+    records = _request_messages_for_view(body, resp_rec)
+    if not records:
+        click.echo("(no messages in this request)")
+        return
+    role_w = max(len(r["role"]) for r in records)
+    lines: list[str] = []
+    for i, rec in enumerate(records, start=1):
+        summary = _flatten(rec.get("summary") or "", 200)
+        display = f"[{i:>3}]  {rec['role']:<{role_w}s}  {summary}"
+        # Hidden tab-delimited column 2 carries the 1-indexed row.
+        # The preview reads it as ``{2}`` instead of computing
+        # ``$(({n} + 1))`` — the latter is POSIX-arithmetic and fzf
+        # runs previews via ``$SHELL -c``, so fish would break.
+        lines.append(f"{display}\t{i}")
+    header = f"messages for {full_rid[:8]} ({len(records)} entries)"
+    preview = (
+        f"{sys.executable} -m agentcap _msg_preview"
+        f" {full_rid} {{2}} 2>/dev/null"
+        f" | {sys.executable} -m agentcap _highlight {{q}}"
+    )
+    _fzf_pick(
+        header, lines, preview,
+        extra_args=[
+            "--delimiter", "\t", "--with-nth", "1",
+            "--no-hscroll",
+            "--bind", "change:refresh-preview",
+        ],
+    )
+
+
+def _parse_fzf_terms(query: str) -> list[str]:
+    """Split fzf's query into the literal text of each non-negated
+    term. Each term has its operator prefix (``'``, ``^``) and
+    trailing anchor (``$``) stripped so the remainder is the substring
+    to highlight. Negated terms (``!word``) and bare ``|`` OR
+    separators are skipped — they aren't substrings to colour."""
+    terms: list[str] = []
+    for raw in query.split():
+        if raw in ("|", ""):
+            continue
+        if raw.startswith("!"):
+            continue
+        t = raw
+        if t and t[0] in ("'", "^"):
+            t = t[1:]
+        if t.endswith("$"):
+            t = t[:-1]
+        if t:
+            terms.append(t)
+    return terms
+
+
+@cli.command("_highlight", hidden=True)
+@click.argument("query")
+def _highlight_cmd(query: str) -> None:
+    """Read stdin, write stdout with each (case-insensitive) literal
+    occurrence of every fzf search term in ``query`` wrapped in bold
+    red. Used by the inspect picker's preview pipeline so the user's
+    typed query is visible in the preview pane.
+
+    Substring match per term — agrees with fzf's exact-match operator
+    (``'word``) and the default fuzzy mode when the fuzzy chars happen
+    to be contiguous. Operators ``'``, ``^``, ``$`` are stripped from
+    each term before matching; negated terms (``!word``) and ``|`` OR
+    separators are skipped (nothing to highlight). Special characters
+    in each term are escaped, so typing ``.``, ``[``, etc. is safe.
+    """
+    import re
+    import sys
+    terms = _parse_fzf_terms(query)
+    if not terms:
+        sys.stdout.write(sys.stdin.read())
+        return
+    # Longest terms first so a longer substring isn't shadowed by a
+    # shorter one that's a prefix of it.
+    terms.sort(key=len, reverse=True)
+    pat = re.compile(
+        "|".join(re.escape(t) for t in terms), re.IGNORECASE
+    )
+    for line in sys.stdin:
+        sys.stdout.write(
+            pat.sub(lambda m: f"\033[1;31m{m.group(0)}\033[0m", line)
+        )
 
 
 def _render_sse_stream(chunks) -> int:
