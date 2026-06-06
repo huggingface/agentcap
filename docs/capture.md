@@ -5,9 +5,10 @@
 podman sandbox. Every `/v1/chat/completions` request the agent makes
 is recorded by the in-process capture proxy.
 
-> **Demo** — _GIF placeholder. Record with `vhs docs/demo/capture.tape > docs/img/capture.gif` and embed below._
->
-> `![capture](img/capture.gif)`
+![capture demo](img/capture.gif)
+
+_Regenerate from the repo root with `vhs docs/demo/capture.tape` —
+the tape's ``Output`` directive writes ``docs/img/capture.gif``._
 
 ## Minimum command
 

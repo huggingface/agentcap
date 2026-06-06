@@ -9,7 +9,9 @@ a live preview pane. The same picker chain runs over three sources:
 | one local parquet file                  | `agentcap inspect --source path/to/file.parquet`  |
 | HF dataset of captures                  | `agentcap inspect --source hf://datasets/<owner>/<name>` |
 
-> **Demo** — _GIF placeholder. Record with `vhs docs/demo/inspect.tape > docs/img/inspect.gif` and embed below._
+> **Demo** — _GIF placeholder. Regenerate from the repo root with
+> `vhs docs/demo/inspect.tape` (the tape's ``Output`` directive
+> writes ``docs/img/inspect.gif``)._
 >
 > `![inspect](img/inspect.gif)`
 

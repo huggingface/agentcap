@@ -6,7 +6,9 @@ pushes everything as a [HF Collection][coll].
 
 [coll]: https://huggingface.co/docs/hub/collections
 
-> **Demo** — _GIF placeholder. Record with `vhs docs/demo/export.tape > docs/img/export.gif` and embed below._
+> **Demo** — _GIF placeholder. Regenerate from the repo root with
+> `vhs docs/demo/export.tape` (the tape's ``Output`` directive
+> writes ``docs/img/export.gif``)._
 >
 > `![export](img/export.gif)`
 
