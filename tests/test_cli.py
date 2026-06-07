@@ -418,10 +418,11 @@ def test_replay_posts_body_to_target(tmp_path: Path, monkeypatch):
         def json(self) -> dict:
             return {"choices": [{"message": {"content": "hello world"}}]}
 
-    def _fake_post(url, json=None, timeout=None):  # noqa: A002
+    def _fake_post(url, json=None, timeout=None, headers=None):  # noqa: A002
         seen["url"] = url
         seen["json"] = json
         seen["timeout"] = timeout
+        seen["headers"] = headers
         return _FakeResponse()
 
     import httpx
@@ -433,6 +434,8 @@ def test_replay_posts_body_to_target(tmp_path: Path, monkeypatch):
     assert result.exit_code == 0, result.stderr
     assert seen["url"] == "http://server:9/v1/chat/completions"
     assert seen["json"] == body
+    # Plain HTTP target + no env: no auth header forwarded.
+    assert seen["headers"] is None
     # Default rendering: just the assistant's content text.
     assert "hello world" in result.stdout
 
@@ -442,3 +445,84 @@ def test_replay_posts_body_to_target(tmp_path: Path, monkeypatch):
     )
     assert result.exit_code == 0, result.stderr
     assert '"choices"' in result.stdout
+
+
+def test_replay_forwards_hf_token_to_router_target(tmp_path: Path, monkeypatch):
+    """Replaying against the HF Router must auto-pick HF_TOKEN and
+    forward it as ``Authorization: Bearer …``. Before this wiring,
+    every router replay came back 401 because no auth was attached."""
+    import json as _json
+
+    monkeypatch.setenv("AGENTCAP_WORKSPACE", str(tmp_path))
+    monkeypatch.setenv("HF_TOKEN", "hf_xyz")
+    cap = tmp_path / ".agentcap" / "pi-hf-router-20260101-000000" / "captures"
+    cap.mkdir(parents=True)
+    body = {"model": "zai-org/GLM-4.6",
+            "messages": [{"role": "user", "content": "hi"}]}
+    (cap / "rid.request.json").write_text(_json.dumps({
+        "request_id": "rid", "captured_at": 1,
+        "upstream_url": "https://router.huggingface.co", "body": body,
+    }))
+
+    seen: dict = {}
+
+    class _FakeResponse:
+        status_code = 200
+        content = b'{"choices":[{"message":{"content":"hi back"}}]}'
+        def json(self) -> dict:
+            return {"choices": [{"message": {"content": "hi back"}}]}
+
+    def _fake_post(url, json=None, timeout=None, headers=None):  # noqa: A002
+        seen["headers"] = headers
+        return _FakeResponse()
+
+    import httpx
+    monkeypatch.setattr(httpx, "post", _fake_post)
+
+    result = CliRunner().invoke(
+        cli, ["replay", "rid", "--target", "https://router.huggingface.co"],
+    )
+    assert result.exit_code == 0, result.stderr
+    assert seen["headers"] == {"Authorization": "Bearer hf_xyz"}
+
+
+def test_replay_explicit_api_key_overrides_env(tmp_path: Path, monkeypatch):
+    """``--api-key`` (or ``AGENTCAP_API_KEY``) wins over the
+    HF_TOKEN auto-resolve, same precedence as ``agentcap run``."""
+    import json as _json
+
+    monkeypatch.setenv("AGENTCAP_WORKSPACE", str(tmp_path))
+    monkeypatch.setenv("HF_TOKEN", "hf_should_be_ignored")
+    cap = tmp_path / ".agentcap" / "hermes-local-20260101-000000" / "captures"
+    cap.mkdir(parents=True)
+    body = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
+    (cap / "rid.request.json").write_text(_json.dumps({
+        "request_id": "rid", "captured_at": 1,
+        "upstream_url": "http://x", "body": body,
+    }))
+
+    seen: dict = {}
+
+    class _FakeResponse:
+        status_code = 200
+        content = b'{"choices":[{"message":{"content":"ok"}}]}'
+        def json(self) -> dict:
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+    def _fake_post(url, json=None, timeout=None, headers=None):  # noqa: A002
+        seen["headers"] = headers
+        return _FakeResponse()
+
+    import httpx
+    monkeypatch.setattr(httpx, "post", _fake_post)
+
+    # Explicit --api-key against a non-router target — must be sent
+    # regardless of HF_TOKEN, regardless of upstream looking like
+    # the router.
+    result = CliRunner().invoke(
+        cli,
+        ["replay", "rid", "--target", "http://server:9",
+         "--api-key", "explicit_key"],
+    )
+    assert result.exit_code == 0, result.stderr
+    assert seen["headers"] == {"Authorization": "Bearer explicit_key"}
