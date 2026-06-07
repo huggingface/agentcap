@@ -116,6 +116,18 @@ Re-issue a single captured request to an OpenAI-compatible target.
 agentcap replay <request-id> --target http://127.0.0.1:8000
 ```
 
+## Usage
+
+The four sub-commands have a dedicated walkthrough each — flags,
+flows, and a recorded demo:
+
+| command           | docs page                                  |
+|-------------------|--------------------------------------------|
+| `agentcap run`    | [docs/capture.md](docs/capture.md) — sandboxes, multi-turn, follow-ups, backends |
+| `agentcap inspect`| [docs/inspect.md](docs/inspect.md) — workspace / parquet / HF dataset pickers   |
+| `agentcap replay` | [docs/replay.md](docs/replay.md) — re-issue any captured request elsewhere     |
+| `agentcap export` | [docs/export.md](docs/export.md) — push captures + traces as a HF Collection  |
+
 See [docs/tested-models-and-agents.md](docs/tested-models-and-agents.md)
 for which model + agent combinations have been validated end-to-end.
 
