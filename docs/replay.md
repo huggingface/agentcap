@@ -6,11 +6,10 @@ messages, same tools, same temperature — so any difference in output
 comes from the **target** model, not from agentcap normalising the
 payload.
 
-> **Demo** — _GIF placeholder. Regenerate from the repo root with
-> `vhs docs/demo/replay.tape` (the tape's ``Output`` directive
-> writes ``docs/img/replay.gif``)._
->
-> `![replay](img/replay.gif)`
+![replay demo](img/replay.gif)
+
+_Regenerate from the repo root with `vhs docs/demo/replay.tape` —
+the tape's ``Output`` directive writes ``docs/img/replay.gif``._
 
 ## Minimum command
 

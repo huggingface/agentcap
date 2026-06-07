@@ -9,11 +9,10 @@ a live preview pane. The same picker chain runs over three sources:
 | one local parquet file                  | `agentcap inspect --source path/to/file.parquet`  |
 | HF dataset of captures                  | `agentcap inspect --source hf://datasets/<owner>/<name>` |
 
-> **Demo** — _GIF placeholder. Regenerate from the repo root with
-> `vhs docs/demo/inspect.tape` (the tape's ``Output`` directive
-> writes ``docs/img/inspect.gif``)._
->
-> `![inspect](img/inspect.gif)`
+![inspect demo](img/inspect.gif)
+
+_Regenerate from the repo root with `vhs docs/demo/inspect.tape` —
+the tape's ``Output`` directive writes ``docs/img/inspect.gif``._
 
 fzf is a hard requirement — install via `brew install fzf` or your
 package manager. Without it, `inspect` errors out with a clear message
