@@ -2533,9 +2533,19 @@ def _render_buffered_completion(obj: dict) -> None:
     "buffered) instead of rendering just the generated text. Use "
     "when debugging the wire shape.",
 )
+@click.option(
+    "--api-key",
+    "api_key",
+    envvar="AGENTCAP_API_KEY",
+    default=None,
+    help="Bearer token forwarded to ``--target``. Required for "
+    "authenticated upstreams like the HF Router; when ``--target`` "
+    "points at the router we also auto-try ``HF_TOKEN`` and "
+    "``~/.cache/huggingface/token`` (mirrors ``agentcap run``).",
+)
 def replay_cmd(
     request_id: str | None, target: str, source: str | None,
-    timeout: float, raw_output: bool,
+    timeout: float, raw_output: bool, api_key: str | None,
 ) -> None:
     """Re-issue one captured request to an OpenAI-compatible endpoint.
 
@@ -2568,6 +2578,20 @@ def replay_cmd(
     full_rid, body, _, _, _ = _resolve_request_id(request_id, source)
     url = target.rstrip("/") + "/v1/chat/completions"
     is_stream = bool(body.get("stream"))
+    # Resolve auth the same way ``agentcap run`` does: explicit
+    # ``--api-key`` / ``AGENTCAP_API_KEY`` wins, otherwise auto-pick
+    # up ``HF_TOKEN`` / ~/.cache/huggingface/token when ``--target``
+    # looks like the HF Router. Without this, replaying a captured
+    # request against the router returned 401 every time.
+    api_key, api_key_source = _resolve_api_key(
+        upstream=target, explicit_api_key=api_key,
+    )
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
+    if api_key_source:
+        click.echo(
+            f"  [auth] token source={api_key_source}",
+            err=True,
+        )
     # Rough input size — chars/4 is a coarse token estimate but it sets
     # expectations: 15k tokens means "wait a minute," not "something's wrong".
     msgs_chars = sum(
@@ -2589,7 +2613,9 @@ def replay_cmd(
         if is_stream:
             # Stream chunks to stdout as they arrive so a long generation
             # gives immediate feedback instead of a wall of silence.
-            with httpx.stream("POST", url, json=body, timeout=timeout) as resp:
+            with httpx.stream(
+                "POST", url, json=body, timeout=timeout, headers=headers,
+            ) as resp:
                 status = resp.status_code
                 click.echo(
                     f"  ← headers status={status} content-type="
@@ -2606,7 +2632,7 @@ def replay_cmd(
                 else:
                     n_bytes = _render_sse_stream(resp.iter_raw())
         else:
-            resp = httpx.post(url, json=body, timeout=timeout)
+            resp = httpx.post(url, json=body, timeout=timeout, headers=headers)
             status = resp.status_code
             n_bytes = len(resp.content)
             if raw_output or status != 200:
