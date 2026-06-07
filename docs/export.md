@@ -6,10 +6,10 @@ pushes everything as a [HF Collection][coll].
 
 [coll]: https://huggingface.co/docs/hub/collections
 
-> _Demo recording is pending a follow-up PR — the export tape needs
-> the destination dataset pre-wiped to stay deterministic across
-> re-renders. The capture / inspect / replay GIFs in their pages
-> already show the rest of the loop end-to-end._
+![export demo](img/export.gif)
+
+_Regenerate from the repo root with `vhs docs/demo/export.tape` —
+the tape's ``Output`` directive writes ``docs/img/export.gif``._
 
 ## Minimum command
 
