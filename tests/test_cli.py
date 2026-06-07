@@ -401,6 +401,12 @@ def test_replay_posts_body_to_target(tmp_path: Path, monkeypatch):
     """Replay POSTs the captured body verbatim and surfaces the response."""
     import json as _json
 
+    # ``replay`` now resolves auth via ``_resolve_api_key``; any
+    # ambient ``AGENTCAP_API_KEY`` / ``HF_TOKEN`` in the dev/CI env
+    # would otherwise leak through and break the no-auth-header
+    # assertion below.
+    monkeypatch.delenv("AGENTCAP_API_KEY", raising=False)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.setenv("AGENTCAP_WORKSPACE", str(tmp_path))
     cap = tmp_path / ".agentcap" / "hermes-local-20260101-000000" / "captures"
     cap.mkdir(parents=True)
@@ -453,6 +459,10 @@ def test_replay_forwards_hf_token_to_router_target(tmp_path: Path, monkeypatch):
     every router replay came back 401 because no auth was attached."""
     import json as _json
 
+    # Explicit ``--api-key`` / ``AGENTCAP_API_KEY`` wins over
+    # ``HF_TOKEN`` (mirrors ``agentcap run``). Clear it so we're
+    # actually exercising the HF_TOKEN auto-resolve.
+    monkeypatch.delenv("AGENTCAP_API_KEY", raising=False)
     monkeypatch.setenv("AGENTCAP_WORKSPACE", str(tmp_path))
     monkeypatch.setenv("HF_TOKEN", "hf_xyz")
     cap = tmp_path / ".agentcap" / "pi-hf-router-20260101-000000" / "captures"
@@ -526,3 +536,58 @@ def test_replay_explicit_api_key_overrides_env(tmp_path: Path, monkeypatch):
     )
     assert result.exit_code == 0, result.stderr
     assert seen["headers"] == {"Authorization": "Bearer explicit_key"}
+
+
+def test_replay_forwards_headers_on_streaming_path(tmp_path: Path, monkeypatch):
+    """Captured bodies with ``stream: true`` go through
+    ``httpx.stream`` instead of ``httpx.post`` — auth must be
+    forwarded on that branch too. Exercised with ``--raw`` so the
+    test doesn't need to ship a fully valid SSE parser fixture."""
+    import json as _json
+
+    monkeypatch.delenv("AGENTCAP_API_KEY", raising=False)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.setenv("AGENTCAP_WORKSPACE", str(tmp_path))
+    cap = tmp_path / ".agentcap" / "hermes-local-20260101-000000" / "captures"
+    cap.mkdir(parents=True)
+    body = {
+        "model": "m", "stream": True,
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+    (cap / "rid.request.json").write_text(_json.dumps({
+        "request_id": "rid", "captured_at": 1,
+        "upstream_url": "http://x", "body": body,
+    }))
+
+    seen: dict = {}
+
+    class _FakeStreamResponse:
+        status_code = 200
+        headers = {"content-type": "text/event-stream"}
+        def iter_raw(self):
+            yield b"data: [DONE]\n"
+
+    class _StreamCM:
+        def __enter__(self):
+            return _FakeStreamResponse()
+        def __exit__(self, *_exc):
+            return False
+
+    def _fake_stream(method, url, json=None, timeout=None, headers=None):  # noqa: A002
+        seen["method"] = method
+        seen["url"] = url
+        seen["headers"] = headers
+        return _StreamCM()
+
+    import httpx
+    monkeypatch.setattr(httpx, "stream", _fake_stream)
+
+    result = CliRunner().invoke(
+        cli,
+        ["replay", "rid", "--target", "http://server:9",
+         "--api-key", "stream_key", "--raw"],
+    )
+    assert result.exit_code == 0, result.stderr
+    assert seen["method"] == "POST"
+    assert seen["url"] == "http://server:9/v1/chat/completions"
+    assert seen["headers"] == {"Authorization": "Bearer stream_key"}
