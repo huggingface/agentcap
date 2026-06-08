@@ -69,13 +69,29 @@ old via `huggingface_hub.HfApi().delete_file(...)` after the push.
 
 ## Parquet schema
 
-One row per captured chat-completion request. See the
-[README's "Parquet schema" section][schema] for the full column list;
-the orchestrator-side `task_id` + `turn` columns (added 2026-06-05)
-let downstream picker UIs group rows by task without parsing the
-message history.
+One row per captured chat-completion request. Columns:
 
-[schema]: ../README.md#parquet-schema
+| column              | source                                  |
+|---|---|
+| `request_id`        | proxy-minted UUID                       |
+| `model`             | `request.body.model`                    |
+| `captured_at`       | request capture epoch                   |
+| `task_id`           | orchestrator-side metadata — which corpus task this call belongs to |
+| `turn`              | orchestrator-side metadata — which turn of the task |
+| `request`           | JSON-stringified raw OpenAI request     |
+| `response`          | JSON-stringified raw response (or `{stream: true, raw: "<SSE bytes>"}` for streamed) |
+| `served_by`         | per-response `X-Served-By` header (HF Router sub-provider routing) |
+| `served_build_info` | per-response `X-Build-Info` header      |
+| `served_model`      | per-response body-echoed `model`        |
+| `provider`          | derived from `upstream_url` hostname (constant per file) |
+| `upstream_url`      | proxy upstream at capture time (constant per file) |
+
+The `request` and `response` columns are JSON strings (not nested
+structs) so Arrow doesn't infer a schema over heterogeneous tool-call
+fields. Consumers `json.loads` them. `task_id` / `turn` let
+downstream picker UIs group rows by task without parsing the
+message history; older parquets without those columns keep working
+(consumers treat missing values as unknown).
 
 ## Traces layout
 
