@@ -743,7 +743,10 @@ def ls_cmd(workspace: str | None, long_form: bool) -> None:
     if workspace is None:
         root = Path.cwd() / _WORKSPACE_DIR
     else:
-        p = Path(workspace)
+        # Normalize before checking .name so paths like ``.``,
+        # ``.agentcap/.`` or ``foo/`` classify correctly (``Path('.').name``
+        # is ``''``, not ``'.agentcap'``).
+        p = Path(os.path.normpath(workspace)).absolute()
         root = p if p.name == _WORKSPACE_DIR else p / _WORKSPACE_DIR
     if not root.is_dir():
         click.echo(
