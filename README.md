@@ -18,30 +18,6 @@ The pipeline:
 Repeat for each `(agent, model)` you want compared — the corpus
 stays the same.
 
-## What this repo provides
-
-- **Run agents through a corpus** — `agentcap run` drives one of the
-  registered coding-agent CLIs (`hermes`, `opencode`, `goose`, `pi`)
-  through a `tasks.txt`, inside a per-agent podman container.
-  Multi-turn follow-ups, optional skill injection.
-- **Capture every wire interaction** — an in-process OpenAI-compat
-  proxy sits between the agent and any backend that speaks
-  `/v1/chat/completions` (llama.app, Inference Providers, vLLM).
-  Request bodies are persisted as parsed JSON (the
-  object, not the original byte sequence); streamed responses keep
-  the raw SSE bytes. No tokenisation, no rendering — just persist
-  what crossed the wire.
-- **Keep the agent's own session log** — alongside captures, agentcap
-  collects each agent's native trace (opencode's SQLite store, pi's
-  JSONL stream, …) so consumers see both the agent's view and the
-  wire view of the same run.
-- **Publish to the Hub** — `agentcap export` bundles captures into
-  parquet, ships the native traces alongside, and groups both as a
-  Collection. Secret-scanned before push.
-- **Inspect and replay** — `agentcap inspect` is an fzf-driven picker
-  over runs and captures with a body preview; `agentcap replay <rid>`
-  re-issues any captured request against any OpenAI-compatible target.
-
 ![inspect demo](docs/img/inspect.gif)
 
 _Three-level picker chain over an HF dataset of captures
