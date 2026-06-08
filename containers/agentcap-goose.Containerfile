@@ -17,11 +17,13 @@ RUN apt-get update \
 
 # Goose's install script lands the binary in ``$HOME/.local/bin/goose``.
 # Run as root, then copy into /usr/local/bin so the agent is on PATH
-# regardless of which $HOME the runtime mounts. ``GOOSE_VERSION`` is
-# pinned explicitly (the ``stable`` URL otherwise tracks whatever
-# block tags as ``stable``, drifting the image hash).
+# regardless of which $HOME the runtime mounts. ``GOOSE_VERSION``
+# pins the *binary* (without it the install script would download
+# whatever upstream tags as ``stable``, drifting the goose version
+# baked into the image); the install script itself is still fetched
+# from the ``stable`` release tag and may change build-to-build.
 ARG GOOSE_VERSION=v1.36.0
-RUN curl -fsSL https://github.com/block/goose/releases/download/stable/download_cli.sh \
+RUN curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh \
         | GOOSE_VERSION="${GOOSE_VERSION}" CONFIGURE=false bash \
  && install -m 0755 /root/.local/bin/goose /usr/local/bin/goose \
  && command -v goose
