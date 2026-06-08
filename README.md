@@ -9,59 +9,49 @@ streamed responses as raw SSE bytes), and pushes the result to the
 Hub — so consumers can replay, render, or analyse what the agent
 actually sent and got back, without reconstructing it from a log.
 
-The loop:
+The pipeline:
 
 ```
   corpus  ──►  sandboxed agent run  ──►  capture  ──►  export  ──►  publish  ──►  inspect / replay
-   ▲                                                                                         │
-   └──────────────────── reuse for the next (agent, model) ──────────────────────────────────┘
 ```
 
-## What this repo provides
+Repeat for each `(agent, model)` you want compared — the corpus
+stays the same.
 
-- **Run agents through a corpus** — `agentcap run` drives one of the
-  registered coding-agent CLIs (`hermes`, `opencode`, `goose`, `pi`)
-  through a `tasks.txt`, inside a per-agent podman container.
-  Multi-turn follow-ups, optional skill injection.
-- **Capture every wire interaction** — an in-process OpenAI-compat
-  proxy sits between the agent and any backend that speaks
-  `/v1/chat/completions` (llama.app, Inference Providers, vLLM).
-  Request bodies are persisted as parsed JSON (the
-  object, not the original byte sequence); streamed responses keep
-  the raw SSE bytes. No tokenisation, no rendering — just persist
-  what crossed the wire.
-- **Keep the agent's own session log** — alongside captures, agentcap
-  collects each agent's native trace (opencode's SQLite store, pi's
-  JSONL stream, …) so consumers see both the agent's view and the
-  wire view of the same run.
-- **Publish to the Hub** — `agentcap export` bundles captures into
-  parquet, ships the native traces alongside, and groups both as a
-  Collection. Secret-scanned before push.
-- **Inspect and replay** — `agentcap inspect` is an fzf-driven picker
-  over runs and captures with a body preview; `agentcap replay <rid>`
-  re-issues any captured request against any OpenAI-compatible target.
+![inspect demo](docs/img/inspect.gif)
+
+_Three-level picker chain over an HF dataset of captures
+(`hf://datasets/<owner>/<name>`): parquet → request → message,
+with live preview and Esc walk-back. See
+[docs/inspect.md](docs/inspect.md) for the rest._
 
 ## Quick start
 
-Install the sandbox prereq (one-time) and agentcap itself.
+Install the prereqs (one-time) and agentcap itself. `podman` runs
+the per-agent sandbox, `fzf` drives the inspect / replay pickers
+(hard requirement; `agentcap inspect` errors out without it), and
+`trufflehog` runs the pre-push secret scan (`agentcap export`
+aborts on any verified hit; pass `--no-scan` to skip).
 
 ```bash
 # macOS
-brew install podman
+brew install podman fzf trufflehog
 podman machine init --memory 8192    # one-time; needs ≥4 GB for the test GGUF
 podman machine start
 
 # Linux
-sudo apt install -y podman
+sudo apt install -y podman fzf
+curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh \
+    | sh -s -- -b ~/.local/bin
 
 # Both
 pip install -e .
 ```
 
-Pick a server. The two common ones (see [Server backends](#server-backends) for the full list):
-
-(a) Inference Providers `--upstream https://router.huggingface.co`
-(b) Local inference server (like llama.app) `--upstream http://127.0.0.1:8000`
+Pick a server — typically (a) Inference Providers
+`--upstream https://router.huggingface.co` or (b) a local OpenAI-compat
+server like `llama.app` on `http://127.0.0.1:8000`. See
+[docs/capture.md](docs/capture.md) for the trade-offs.
 
 Example with a local `llama.app` server
 
@@ -79,8 +69,6 @@ agentcap run \
     --tasks examples/transformers-coding-session/tasks.txt \
     --turns 4 --followup synthesized
 ```
-
-Note: For `agentcap run`, `--model` is required for all agents.
 
 Browse what's captured. ``--long`` adds upstream + per-run counts.
 
@@ -184,100 +172,6 @@ consumer-side — the `request` body is preserved as parsed JSON with
 no agentcap-side normalisation of keys or values, so re-rendering
 through the model's chat template is a few lines via
 `transformers.AutoTokenizer.apply_chat_template`.
-
-## Pushing to a Dataset repo
-
-`agentcap export --push <owner>/<base>` walks one or more runs and
-uploads, in a single commit each:
-
-- `<owner>/<base>-captures` — one parquet per run, one row per
-  chat-completion request. Filenames embed `(agent, model, provider)`
-  so a single repo holds many tuples without aliasing. Consumers
-  read the union via `load_dataset("<owner>/<base>-captures")`.
-- `<owner>/<base>-<agent>-traces` — one repo **per agent**, holding
-  that agent's native session-log files (opencode SQLite, pi JSONL,
-  hermes SQLite, …). Only created for agents that produced any
-  traces in the exported runs.
-
-Both repos are added to a Collection titled `<base>` under `<owner>`
-so they surface together on the Hub. On the first push to an empty
-captures repo, agentcap also seeds a dataset card; subsequent pushes
-leave any existing card untouched.
-
-```bash
-# Push every run in the workspace.
-agentcap export --all --push my-org/my-captures
-
-# Or push selected runs (run-ids from `agentcap ls`).
-agentcap export hermes-local-20260512-162345 goose-local-20260512-170000 \
-    --push my-org/my-captures
-
-# Or point at an arbitrary workdir / capture dir directly.
-agentcap export ./some/workdir --push my-org/my-captures
-```
-
-Before pushing, `agentcap export` runs `trufflehog` against each run
-directory and aborts on any **verified** secret hit (pattern-only hits
-are surfaced but don't block). Pass `--no-scan` to skip this gate.
-
-## What lands on disk
-
-Each `agentcap run` invocation creates one directory at
-`$AGENTCAP_WORKSPACE/.agentcap/<agent>-<provider>-<utc>/` (or
-`./.agentcap/...` when `AGENTCAP_WORKSPACE` is unset). Inside it:
-
-- `run.json` — run-level metadata (agent, model, provider, upstream,
-  task list, per-task durations). Updated at end-of-run; a stub
-  version is written at start so `agentcap ls / inspect` can see
-  in-flight runs.
-- `captures/` — one `<rid>.request.json` + `<rid>.response.json`
-  pair per chat-completion call. Request bodies are stored as parsed
-  JSON (the object, not the original byte sequence); streamed
-  responses keep the raw SSE bytes verbatim.
-- `traces/` — the agent's own native session log (opencode and hermes
-  drop a SQLite dump per session; pi streams JSONL; goose writes its
-  built-in log file). Format is per-agent; agentcap is just a courier.
-- `sessions/` — the orchestrator's per-turn `stdout` / `stderr` from
-  the agent CLI, one file pair per `<task_id>_turn_<NN>`.
-- `sandbox/` — the agent's cwd inside the sandbox (bind-mounted from
-  here so anything the agent writes survives the run).
-
-Captures are dumb: no tokenisation, no rendering, no derived metadata
-— just the bytes that crossed the proxy.
-
-## Parquet schema
-
-`agentcap export` emits one row per captured request. Columns:
-
-| column              | source                                  |
-|---|---|
-| `request_id`        | proxy-minted UUID                       |
-| `model`             | `request.body.model`                    |
-| `captured_at`       | request capture epoch                   |
-| `request`           | JSON-stringified raw OpenAI request     |
-| `response`          | JSON-stringified raw response (or `{stream: true, raw: "<SSE bytes>"}` for streamed) |
-| `served_by`         | per-response `X-Served-By` header (HF Router sub-provider routing) |
-| `served_build_info` | per-response `X-Build-Info` header      |
-| `served_model`      | per-response body-echoed `model`        |
-| `provider`          | derived from `upstream_url` hostname (constant per file) |
-| `upstream_url`      | proxy upstream at capture time (constant per file) |
-
-The `request` and `response` columns are JSON strings (not nested
-structs) so Arrow doesn't infer a schema over heterogeneous tool-call
-fields. Consumers `json.loads` them.
-
-## Server backends
-
-The proxy is backend-agnostic. Pick whichever fits the use case:
-
-| backend | when to use |
-|---|---|
-| **Inference Providers** (`router.huggingface.co`) | demos, casual capture; zero infra; curated model catalogue; pay per token |
-| **Local `llama.app` server** (`llama serve`) | full control over quant / chat template / sampler; required for research that depends on model-implementation detail (e.g. kv-cache-reuse splice work) |
-| `transformers serve` | works for small models, awkward for big ones at long context |
-
-For which (backend, model, agent) combinations have been validated
-end-to-end, see [docs/tested-models-and-agents.md](docs/tested-models-and-agents.md).
 
 ## Running tests
 
