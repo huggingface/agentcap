@@ -9,13 +9,14 @@ streamed responses as raw SSE bytes), and pushes the result to the
 Hub — so consumers can replay, render, or analyse what the agent
 actually sent and got back, without reconstructing it from a log.
 
-The loop:
+The pipeline:
 
 ```
   corpus  ──►  sandboxed agent run  ──►  capture  ──►  export  ──►  publish  ──►  inspect / replay
-   ▲                                                                                         │
-   └──────────────────── reuse for the next (agent, model) ──────────────────────────────────┘
 ```
+
+Repeat for each `(agent, model)` you want compared — the corpus
+stays the same.
 
 ## What this repo provides
 
@@ -40,6 +41,13 @@ The loop:
 - **Inspect and replay** — `agentcap inspect` is an fzf-driven picker
   over runs and captures with a body preview; `agentcap replay <rid>`
   re-issues any captured request against any OpenAI-compatible target.
+
+![inspect demo](docs/img/inspect.gif)
+
+_Three-level picker chain over an HF dataset of captures
+(`hf://datasets/<owner>/<name>`): parquet → request → message,
+with live preview and Esc walk-back. See
+[docs/inspect.md](docs/inspect.md) for the rest._
 
 ## Quick start
 
