@@ -117,7 +117,7 @@ traces in the exported runs.
 The exported parquet is fully browsable via `agentcap inspect`:
 
 ```bash
-agentcap inspect --source hf://datasets/my-org/my-captures-captures
+agentcap inspect hf://datasets/my-org/my-captures-captures
 ```
 
 See [docs/inspect.md](inspect.md) for the picker UX.

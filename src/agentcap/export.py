@@ -180,6 +180,38 @@ def export_local(
     schema: pa.Schema | None = None
     batch: list[dict] = []
     n_written = 0
+    # ``tasks_buf`` accumulates {task_id → (max-turn, first-user-prompt)}
+    # across all batches so the parquet's schema KV ends up with an
+    # accurate, complete task list. We post-process the parquet at the
+    # end to stamp it (the streaming writer's schema is fixed at open).
+    tasks_buf: dict[str, dict] = {}
+
+    def _absorb_tasks(rows: list[dict]) -> None:
+        for r in rows:
+            tid = r.get("task_id")
+            if not tid:
+                continue
+            d = tasks_buf.setdefault(tid, {"turns": 0, "prompt": None})
+            turn = r.get("turn")
+            if turn is not None and int(turn) > d["turns"]:
+                d["turns"] = int(turn)
+            if d["prompt"] is None:
+                try:
+                    body = json.loads(r.get("request") or "{}")
+                except (json.JSONDecodeError, ValueError, TypeError):
+                    body = {}
+                for m in body.get("messages") or []:
+                    if m.get("role") == "user":
+                        content = m.get("content") or ""
+                        if isinstance(content, list):
+                            content = " ".join(
+                                c.get("text", "") for c in content
+                                if isinstance(c, dict)
+                            )
+                        d["prompt"] = (
+                            (content or "").replace("\n", " ").strip()[:200]
+                        )
+                        break
 
     def _flush(rows: list[dict]) -> None:
         nonlocal writer, schema, n_written
@@ -189,6 +221,7 @@ def export_local(
             for r in rows:
                 for k, v in provider_columns.items():
                     r.setdefault(k, v)
+        _absorb_tasks(rows)
         table = pa.Table.from_pylist(rows)
         # ``task_id`` / ``turn`` are optional orchestrator metadata.
         # If the first batch's values are all ``None``, Arrow infers
@@ -207,10 +240,6 @@ def export_local(
                     idx, col, pa.array([None] * table.num_rows, type=dtype),
                 )
         if writer is None:
-            # Attach ``agent`` / ``model`` to the schema-level KV
-            # metadata so ``inspect`` can label each parquet without
-            # parsing the filename. ``None`` values are skipped so
-            # we don't write an empty marker.
             kv = {
                 k.encode(): v.encode()
                 for k, v in (("agent", agent), ("model", model))
@@ -235,6 +264,24 @@ def export_local(
     finally:
         if writer is not None:
             writer.close()
+
+    # Post-process: stamp the accumulated task list into the parquet's
+    # schema KV metadata. The streaming writer's schema is frozen at
+    # open time, so we read the table back, attach ``tasks``, and
+    # rewrite. ``agentcap inspect`` reads this slice from the footer
+    # so the picker can show TASKS + per-task prompts without ever
+    # reading row-group bodies. Skip the rewrite if no rows had a
+    # ``task_id`` (old capture format → empty buffer; existing
+    # ``agent`` / ``model`` KV stays untouched).
+    if tasks_buf:
+        tasks_list = [
+            {"id": tid, "turns": d["turns"], "prompt": d["prompt"]}
+            for tid, d in sorted(tasks_buf.items())
+        ]
+        table = pq.read_table(str(output))
+        kv = dict(table.schema.metadata or {})
+        kv[b"tasks"] = json.dumps(tasks_list, ensure_ascii=False).encode()
+        pq.write_table(table.replace_schema_metadata(kv), str(output))
 
     return n_written
 
