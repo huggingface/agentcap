@@ -70,8 +70,6 @@ agentcap run \
     --turns 4 --followup synthesized
 ```
 
-Note: For `agentcap run`, `--model` is required for all agents.
-
 Browse what's captured. ``--long`` adds upstream + per-run counts.
 
 ```bash

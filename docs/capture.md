@@ -78,11 +78,6 @@ unset):
 └── sandbox/                              # agent's cwd inside the container
 ```
 
-See [the README's "What lands on disk" section][onkeys] for the full
-layout.
-
-[onkeys]: ../README.md#what-lands-on-disk
-
 ## Sandbox prereqs
 
 `agentcap run` always runs the agent inside podman. Once-per-machine
