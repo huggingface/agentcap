@@ -280,6 +280,65 @@ def test_export_all_walks_workspace_in_one_commit(
     assert len(fake_hf_api.commits[0]["operations"]) == 2
 
 
+def test_ls_defaults_to_cwd(tmp_path: Path, monkeypatch):
+    """Without WORKSPACE, ``ls`` looks at ``./.agentcap/``."""
+    monkeypatch.chdir(tmp_path)
+    _seed_workspace_run_with_meta(tmp_path, "hermes-local-20260512-160000")
+    result = CliRunner().invoke(cli, ["ls"])
+    assert result.exit_code == 0, result.output
+    assert "hermes-local-20260512-160000" in result.output
+
+
+def test_ls_ignores_env_var(tmp_path: Path, monkeypatch):
+    """``ls`` MUST NOT consult ``$AGENTCAP_WORKSPACE`` — it's the only
+    way to keep the command's output a function of its arguments."""
+    other = tmp_path / "other"
+    other.mkdir()
+    _seed_workspace_run_with_meta(other, "hermes-local-20260512-160000")
+    monkeypatch.setenv("AGENTCAP_WORKSPACE", str(other))
+    monkeypatch.chdir(tmp_path)  # cwd has no .agentcap/
+    result = CliRunner().invoke(cli, ["ls"])
+    # Falls back to ./.agentcap/ (which doesn't exist), NOT to $AGENTCAP_WORKSPACE.
+    assert result.exit_code == 0
+    assert "no workspace" in result.output
+
+
+def test_ls_accepts_parent_dir(tmp_path: Path):
+    """``ls <parent>`` finds ``<parent>/.agentcap/``."""
+    _seed_workspace_run_with_meta(tmp_path, "hermes-local-20260512-160000")
+    result = CliRunner().invoke(cli, ["ls", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "hermes-local-20260512-160000" in result.output
+
+
+def test_ls_accepts_dot_agentcap_dir(tmp_path: Path):
+    """``ls <parent>/.agentcap`` works too — same listing either way."""
+    _seed_workspace_run_with_meta(tmp_path, "hermes-local-20260512-160000")
+    result = CliRunner().invoke(cli, ["ls", str(tmp_path / ".agentcap")])
+    assert result.exit_code == 0, result.output
+    assert "hermes-local-20260512-160000" in result.output
+
+
+def test_ls_accepts_dot_from_inside_workspace(tmp_path: Path, monkeypatch):
+    """``ls .`` from inside a ``.agentcap/`` dir lists that workspace —
+    ``Path('.').name`` is ``''`` so the classifier must normalize."""
+    _seed_workspace_run_with_meta(tmp_path, "hermes-local-20260512-160000")
+    monkeypatch.chdir(tmp_path / ".agentcap")
+    result = CliRunner().invoke(cli, ["ls", "."])
+    assert result.exit_code == 0, result.output
+    assert "hermes-local-20260512-160000" in result.output
+
+
+def test_ls_missing_workspace_message(tmp_path: Path, monkeypatch):
+    """Missing-workspace error is silent about ``$AGENTCAP_WORKSPACE``
+    since ``ls`` doesn't consult it."""
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(cli, ["ls"])
+    assert result.exit_code == 0
+    assert "AGENTCAP_WORKSPACE" not in result.output
+    assert "no workspace" in result.output
+
+
 def _seed_workspace_run(root: Path, run_id: str, rids: list[tuple[str, str]]) -> None:
     """Create a fake workspace run with captures for each (rid, prompt)."""
     import json as _json
