@@ -27,25 +27,31 @@ with live preview and Esc walk-back. See
 
 ## Quick start
 
-Install the sandbox prereq (one-time) and agentcap itself.
+Install the prereqs (one-time) and agentcap itself. `podman` runs
+the per-agent sandbox, `fzf` drives the inspect / replay pickers
+(hard requirement; `agentcap inspect` errors out without it), and
+`trufflehog` runs the pre-push secret scan (`agentcap export`
+aborts on any verified hit; pass `--no-scan` to skip).
 
 ```bash
 # macOS
-brew install podman
+brew install podman fzf trufflehog
 podman machine init --memory 8192    # one-time; needs ≥4 GB for the test GGUF
 podman machine start
 
 # Linux
-sudo apt install -y podman
+sudo apt install -y podman fzf
+curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh \
+    | sh -s -- -b ~/.local/bin
 
 # Both
 pip install -e .
 ```
 
-Pick a server. The two common ones (see [Server backends](#server-backends) for the full list):
-
-(a) Inference Providers `--upstream https://router.huggingface.co`
-(b) Local inference server (like llama.app) `--upstream http://127.0.0.1:8000`
+Pick a server — typically (a) Inference Providers
+`--upstream https://router.huggingface.co` or (b) a local OpenAI-compat
+server like `llama.app` on `http://127.0.0.1:8000`. See
+[docs/capture.md](docs/capture.md) for the trade-offs.
 
 Example with a local `llama.app` server
 
