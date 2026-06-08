@@ -719,18 +719,39 @@ def scan_cmd(
 
 
 @cli.command("ls")
+@click.argument(
+    "workspace",
+    required=False,
+    type=click.Path(file_okay=False, dir_okay=True, resolve_path=False),
+)
 @click.option(
     "--long", "-l", "long_form", is_flag=True,
     help="Long form: include upstream and per-run task counts.",
 )
-def ls_cmd(long_form: bool) -> None:
-    """List runs in the workspace (``$AGENTCAP_WORKSPACE/.agentcap/`` or
-    ``./.agentcap/`` if AGENTCAP_WORKSPACE is unset)."""
+def ls_cmd(workspace: str | None, long_form: bool) -> None:
+    """List runs under a local workspace.
+
+    Without ``WORKSPACE``, looks at ``./.agentcap/``. Accepts either
+    the parent dir (where ``agentcap run`` created the ``.agentcap/``
+    subdir) or the ``.agentcap/`` dir itself.
+
+    Unlike ``agentcap run`` / ``export``, ``ls`` does NOT consult
+    ``$AGENTCAP_WORKSPACE`` — what you point it at is what you get.
+    """
     import json as _json
 
-    root = _workspace_root()
+    if workspace is None:
+        root = Path.cwd() / _WORKSPACE_DIR
+    else:
+        p = Path(workspace)
+        root = p if p.name == _WORKSPACE_DIR else p / _WORKSPACE_DIR
     if not root.is_dir():
-        click.echo(_no_workspace_msg(root), err=True)
+        click.echo(
+            f"no workspace at {str(root)!r}. "
+            f"Run `agentcap run` first, or pass a directory that "
+            f"contains a ``.agentcap/`` subdir.",
+            err=True,
+        )
         return
 
     rows: list[dict] = []
