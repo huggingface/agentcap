@@ -1332,8 +1332,12 @@ def _classify_source(source: str | None) -> tuple[str, str | None]:
 
 def _fetch_hf_parquet_meta(repo_id: str, path: str) -> dict:
     """Pull one parquet's preview-relevant metadata. Returns
-    ``{model, num_rows, tasks: [{id, turns, prompt}]}``. ``tasks`` is
-    empty when the parquet predates the ``task_id`` schema.
+    ``{agent, model, num_rows, tasks: [{id, turns, prompt}]}``.
+    ``agent`` and ``model`` come from the parquet's schema-level KV
+    metadata (stamped by ``agentcap export``). Parquets exported by
+    older versions don't carry those keys and read back as ``None``.
+    ``tasks`` is empty when the parquet predates the ``task_id``
+    schema.
 
     Tries the local ``huggingface_hub`` cache first via
     ``try_to_load_from_cache`` — if the user has previously
@@ -1345,7 +1349,7 @@ def _fetch_hf_parquet_meta(repo_id: str, path: str) -> dict:
     import json as _json
     from huggingface_hub import HfFileSystem, try_to_load_from_cache
     import pyarrow.parquet as pq
-    out: dict = {"model": None, "num_rows": 0, "tasks": []}
+    out: dict = {"agent": None, "model": None, "num_rows": 0, "tasks": []}
 
     local = try_to_load_from_cache(
         repo_id=repo_id, filename=path, repo_type="dataset",
@@ -1360,12 +1364,14 @@ def _fetch_hf_parquet_meta(repo_id: str, path: str) -> dict:
     with opener as fh:
         pf = pq.ParquetFile(fh)
         out["num_rows"] = pf.metadata.num_rows
+        # Schema-level KV metadata: ``export_local`` stamps ``agent``
+        # and ``model`` here. Bytes-keyed; ``None`` when missing.
+        schema_md = pf.schema_arrow.metadata or {}
+        for key in ("agent", "model"):
+            v = schema_md.get(key.encode())
+            if v:
+                out[key] = v.decode("utf-8", errors="replace")
         cols = pf.schema_arrow.names
-        if "model" in cols and pf.num_row_groups:
-            # First row-group + single column → tiny download.
-            rg = pf.read_row_group(0, columns=["model"])
-            if rg.num_rows:
-                out["model"] = rg.column("model")[0].as_py()
         if "task_id" in cols and pf.num_row_groups:
             # Sample tasks + prompts from row group 0 ONLY. Reading
             # ``task_id`` + ``turn`` across all ~88 row groups (one
@@ -1417,18 +1423,14 @@ def _fetch_hf_parquet_meta(repo_id: str, path: str) -> dict:
 
 def _hf_list_parquets(repo_id: str) -> list[dict]:
     """List ``.parquet`` files in ``<owner>/<name>`` via a single
-    ``HfApi().list_repo_tree`` call. Each row carries what the tree
-    provides plus what we can parse out of the export filename:
-    ``{path, size, agent, model, ts}``.
+    ``HfApi().list_repo_tree`` call. Each row carries only what the
+    tree provides: ``{path, size}``.
 
-    Export writes ``train-<agent>-<model>-<ts>-<hash>.parquet``, so
-    everything between the agent and the ts tokens is the model —
-    free signal we can show in the picker without fetching the
-    parquet footer.
-
-    ``num_rows`` and the task list still require the per-parquet
-    footer read and are hydrated asynchronously by
-    ``_pick_hf_dataset_parquet`` into the preview pane."""
+    ``agent`` / ``model`` / ``num_rows`` / task list all require the
+    per-parquet footer read and are hydrated asynchronously by
+    ``_pick_hf_dataset_parquet`` into the preview pane. They live in
+    the parquet's schema-level KV metadata (stamped by ``export_local``)
+    — the canonical source, not the filename."""
     from huggingface_hub import HfApi
     api = HfApi()
     tree = api.list_repo_tree(repo_id, repo_type="dataset", recursive=True)
@@ -1438,18 +1440,8 @@ def _hf_list_parquets(repo_id: str) -> list[dict]:
         if not path or not path.endswith(".parquet"):
             continue
         size = getattr(entry, "size", None) or 0
-        stem = Path(path).stem
-        agent = model = ts = None
-        parts = stem.split("-")
-        if len(parts) >= 5 and parts[0] == "train":
-            agent = parts[1]
-            model = "-".join(parts[2:-2])
-            ts = parts[-2]
-        base.append({
-            "path": path, "size": int(size),
-            "agent": agent, "model": model, "ts": ts,
-        })
-    base.sort(key=lambda r: (r["agent"] or "", r["ts"] or "", r["path"]))
+        base.append({"path": path, "size": int(size)})
+    base.sort(key=lambda r: r["path"])
     return base
 
 
@@ -1539,8 +1531,9 @@ def _hf_parquet_preview_cmd(tempdir_str: str, path: str) -> None:
     except (OSError, _json.JSONDecodeError) as exc:
         click.echo(f"(preview failed: {type(exc).__name__}: {exc})")
         return
-    click.echo(f"rows:   {meta.get('num_rows', 0):,}")
+    click.echo(f"agent:  {meta.get('agent') or '?'}")
     click.echo(f"model:  {meta.get('model') or '?'}")
+    click.echo(f"rows:   {meta.get('num_rows', 0):,}")
     tasks = meta.get("tasks") or []
     click.echo(f"tasks:  {len(tasks)}")
     if not tasks:
@@ -1677,21 +1670,19 @@ def _pick_hf_dataset_parquet(repo_id: str, tempdir: Path) -> Path | None:
             n /= 1024
         return f"{n}"
 
-    # Display columns ``AGENT  SIZE  MODEL`` — path is in the hidden
-    # tab-column for the preview lookup, but isn't useful for visual
-    # selection (it shows up in the preview pane anyway). ``ROWS``
-    # and the task list still need the footer fetch and live in the
-    # preview pane.
-    agent_w = max(len("AGENT"), max(len(r["agent"] or "?") for r in rows))
-    model_w = max(len("MODEL"), max(len(r["model"] or "?") for r in rows))
+    # Display columns ``SIZE  PATH``. Agent/model/rows/tasks all need
+    # the per-parquet schema-metadata + footer reads (deferred to the
+    # prefetch subprocess) so they live in the preview pane. fzf's
+    # fuzzy match against the path already lets the user filter by
+    # agent / model name since those appear in the filename — but
+    # we're not parsing them out as columns; that contract belongs to
+    # the parquet's KV metadata, not the filename.
+    def _fmt(size, path) -> str:
+        return f"{size:>7}  {path}"
 
-    def _fmt(agent, size, model) -> str:
-        return f"{agent:<{agent_w}}  {size:>7}  {model:<{model_w}}"
-
-    header = _fmt("AGENT", "SIZE", "MODEL")
+    header = _fmt("SIZE", "PATH")
     lines = [
-        _fmt(r["agent"] or "?", _size_label(r["size"]), r["model"] or "?")
-        + f"\t{r['path']}"
+        _fmt(_size_label(r["size"]), r["path"]) + f"\t{r['path']}"
         for r in rows
     ]
 

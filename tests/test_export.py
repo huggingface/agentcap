@@ -504,3 +504,38 @@ def test_export_local_round_trip(tmp_path: Path):
         assert r["run_id"] == "pi-local-20260601-090000"
     sample = json.loads(by_rid["ra"]["request"])
     assert sample["messages"][0]["role"] == "user"
+
+
+def test_export_local_stamps_agent_and_model_in_schema_metadata(tmp_path):
+    """``agent`` and ``model`` are written to the parquet's schema-level
+    KV metadata. ``inspect`` reads them from there instead of parsing
+    the filename — so it's the canonical labelling source."""
+    import pyarrow.parquet as pq
+    capture = tmp_path / "cap"
+    capture.mkdir()
+    _write_capture(capture, "ra", _BODY, {"choices": [{"index": 0}]})
+
+    out = tmp_path / "rows.parquet"
+    export_local(
+        capture, out, progress=False, agent="hermes", model="GLM-4.6",
+    )
+    md = pq.read_schema(out).metadata or {}
+    assert md.get(b"agent") == b"hermes"
+    assert md.get(b"model") == b"GLM-4.6"
+
+
+def test_export_local_omits_metadata_when_agent_model_unset(tmp_path):
+    """Backwards-compat: when callers don't pass ``agent``/``model``,
+    we don't write empty markers — the parquet just has no KV metadata
+    and the picker falls back to ``?`` on read."""
+    import pyarrow.parquet as pq
+    capture = tmp_path / "cap"
+    capture.mkdir()
+    _write_capture(capture, "ra", _BODY, {"choices": [{"index": 0}]})
+
+    out = tmp_path / "rows.parquet"
+    export_local(capture, out, progress=False)
+    md = pq.read_schema(out).metadata
+    # ``with_metadata({})`` is never called when both are None, so the
+    # schema carries no custom metadata at all.
+    assert md is None or (b"agent" not in md and b"model" not in md)

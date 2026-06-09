@@ -137,10 +137,18 @@ def export_local(
     batch_size: int = 32,
     progress: bool = True,
     provider_columns: dict | None = None,
+    agent: str | None = None,
+    model: str | None = None,
 ) -> int:
     """Stream the capture dir into a single parquet. Returns row count.
     Batches via ``ParquetWriter`` so a mid-render kill leaves a valid
-    parquet up to the last flushed batch."""
+    parquet up to the last flushed batch.
+
+    ``agent`` and ``model`` are stamped into the parquet's schema-level
+    KV metadata so downstream consumers (``agentcap inspect``'s picker
+    in particular) can label each parquet without re-parsing the
+    filename — that filename is a brittle contract, the KV metadata is
+    the authoritative source."""
     import pyarrow as pa
     import pyarrow.parquet as pq
 
@@ -199,7 +207,16 @@ def export_local(
                     idx, col, pa.array([None] * table.num_rows, type=dtype),
                 )
         if writer is None:
-            schema = table.schema
+            # Attach ``agent`` / ``model`` to the schema-level KV
+            # metadata so ``inspect`` can label each parquet without
+            # parsing the filename. ``None`` values are skipped so
+            # we don't write an empty marker.
+            kv = {
+                k.encode(): v.encode()
+                for k, v in (("agent", agent), ("model", model))
+                if v
+            }
+            schema = table.schema.with_metadata(kv) if kv else table.schema
             writer = pq.ParquetWriter(str(output), schema)
         else:
             table = table.cast(schema)
@@ -467,7 +484,7 @@ def push_captures_dataset(
             local_file = Path(tmpdir) / f"{i}-{filename}"
             n_rows = export_local(
                 cap_dir, local_file, provider_columns=extra_columns,
-                progress=False,
+                progress=False, agent=agent, model=model,
             )
             n_rows_list.append(n_rows)
             operations.append(CommitOperationAdd(
