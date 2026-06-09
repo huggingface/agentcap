@@ -1622,6 +1622,11 @@ def _hf_prefetch_cmd(
             )
         except Exception:  # noqa: BLE001
             return
+        # Re-check: Pass-B may have finished writing the FULL file
+        # while our network fetch was in flight; overwriting it with
+        # KV-only would discard tasks and leave the preview stuck.
+        if _has_tasks(target):
+            return
         try:
             _write_meta_atomic(target, meta)
         except OSError:
