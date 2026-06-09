@@ -1330,38 +1330,32 @@ def _classify_source(source: str | None) -> tuple[str, str | None]:
     )
 
 
-def _open_hf_parquet(
-    repo_id: str, path: str, revision: str | None,
-):
-    """Local cache hit at ``revision`` → ``open(local, 'rb')``;
-    otherwise stream via ``HfFileSystem`` (range reads, no full
-    download). Revision-pinning avoids stale local files after a
-    remote rewrite."""
-    from huggingface_hub import HfFileSystem, try_to_load_from_cache
-    if revision:
-        local = try_to_load_from_cache(
-            repo_id=repo_id, filename=path,
-            repo_type="dataset", revision=revision,
-        )
-        if isinstance(local, str) and Path(local).is_file():
-            return open(local, "rb")
-    return HfFileSystem().open(f"datasets/{repo_id}/{path}", "rb")
-
-
 def _fetch_hf_parquet_meta(
     repo_id: str, path: str, *,
     revision: str | None = None,
     kv_only: bool = False,
 ) -> dict:
     """Returns ``{agent, model, num_rows, tasks: [{id, turns, prompt}]}``.
-    ``agent`` / ``model`` come from the parquet's schema KV metadata;
-    parquets predating the backfill read back as ``None``.
-    ``kv_only=True`` skips the row-group reads."""
+    ``kv_only=True`` skips the row-group reads — return value has no
+    ``tasks`` key in that case (the preview cmd uses its presence to
+    distinguish a partial write from "no task_id schema")."""
     import json as _json
     import pyarrow.parquet as pq
-    out: dict = {"agent": None, "model": None, "num_rows": 0, "tasks": []}
+    from huggingface_hub import HfFileSystem, try_to_load_from_cache
+    out: dict = {"agent": None, "model": None, "num_rows": 0}
 
-    with _open_hf_parquet(repo_id, path, revision) as fh:
+    opener = None
+    if revision:
+        local = try_to_load_from_cache(
+            repo_id=repo_id, filename=path,
+            repo_type="dataset", revision=revision,
+        )
+        if isinstance(local, str) and Path(local).is_file():
+            opener = open(local, "rb")
+    if opener is None:
+        opener = HfFileSystem().open(f"datasets/{repo_id}/{path}", "rb")
+
+    with opener as fh:
         pf = pq.ParquetFile(fh)
         out["num_rows"] = pf.metadata.num_rows
         # Schema-level KV metadata: ``export_local`` stamps ``agent``
@@ -1373,6 +1367,7 @@ def _fetch_hf_parquet_meta(
                 out[key] = v.decode("utf-8", errors="replace")
         if kv_only:
             return out
+        out["tasks"] = []
         cols = pf.schema_arrow.names
         if "task_id" in cols and pf.num_row_groups:
             # Row group 0 sample only — tasks in later row groups
@@ -1434,14 +1429,11 @@ def _hf_list_parquets(repo_id: str) -> list[dict]:
     return base
 
 
-def _hf_meta_tempfile(tempdir: Path, path: str, *, kv: bool = False) -> Path:
-    """``kv=True`` → ``.kv.json`` sidecar (KV-only, written by Pass A).
-    ``kv=False`` → ``.json`` (full preview metadata).
-    SHA-1 prefix avoids collisions across HF paths."""
+def _hf_meta_tempfile(tempdir: Path, path: str) -> Path:
+    """SHA-1 prefix avoids collisions across HF paths."""
     import hashlib
     digest = hashlib.sha1(path.encode()).hexdigest()[:16]
-    suffix = ".kv.json" if kv else ".json"
-    return tempdir / f"{Path(path).stem}-{digest}{suffix}"
+    return tempdir / f"{Path(path).stem}-{digest}.json"
 
 
 def _write_meta_atomic(target: Path, meta: dict) -> None:
@@ -1451,26 +1443,6 @@ def _write_meta_atomic(target: Path, meta: dict) -> None:
     tmp = target.with_suffix(target.suffix + ".tmp")
     tmp.write_text(_json.dumps(meta, ensure_ascii=False))
     tmp.replace(target)
-
-
-def _fetch_hf_meta_into_tempdir(
-    repo_id: str, path: str, tempdir: Path,
-    revision: str | None = None,
-) -> None:
-    """Fetch + write the full metadata tempfile. On fetch failure
-    we don't write a placeholder — leaving the file absent keeps
-    the preview showing "loading…" instead of a fake empty parquet."""
-    target = _hf_meta_tempfile(tempdir, path)
-    if target.is_file():
-        return
-    try:
-        meta = _fetch_hf_parquet_meta(repo_id, path, revision=revision)
-    except Exception:  # noqa: BLE001
-        return
-    try:
-        _write_meta_atomic(target, meta)
-    except OSError:
-        pass  # tempdir was removed (picker exited) — silent
 
 
 _HF_PREVIEW_TASK_LIMIT = 15
@@ -1504,7 +1476,10 @@ def _hf_parquet_preview_cmd(tempdir_str: str, path: str) -> None:
     click.echo(f"agent:  {meta.get('agent') or '?'}")
     click.echo(f"model:  {meta.get('model') or '?'}")
     click.echo(f"rows:   {meta.get('num_rows', 0):,}")
-    tasks = meta.get("tasks") or []
+    if "tasks" not in meta:
+        click.echo("tasks:  …")
+        return
+    tasks = meta["tasks"]
     click.echo(f"tasks:  {len(tasks)}")
     if not tasks:
         click.echo()
@@ -1565,16 +1540,12 @@ def _hf_picker_list_cmd(tempdir_str: str, paths_file: str) -> None:
         path = entry["path"]
         size = entry.get("size", 0)
         agent = model = None
-        # Full tempfile first; KV sidecar second; placeholder otherwise.
-        for kv in (False, True):
-            tmpfile = _hf_meta_tempfile(tempdir, path, kv=kv)
-            if not tmpfile.is_file():
-                continue
+        tmpfile = _hf_meta_tempfile(tempdir, path)
+        if tmpfile.is_file():
             try:
                 meta = _json.loads(tmpfile.read_text())
                 agent = meta.get("agent")
                 model = meta.get("model")
-                break
             except (OSError, _json.JSONDecodeError):
                 pass
         click.echo(_format_picker_row(agent, model, size, path))
@@ -1631,12 +1602,22 @@ def _hf_prefetch_cmd(
         except (urllib.error.URLError, OSError):
             pass  # fzf not up yet, or already exited — harmless
 
+    target_for = lambda path: _hf_meta_tempfile(tempdir, path)
+
+    def _has_tasks(target: Path) -> bool:
+        """True if target already holds a Pass-B (full) write."""
+        if not target.is_file():
+            return False
+        try:
+            return "tasks" in _json.loads(target.read_text())
+        except (OSError, _json.JSONDecodeError):
+            return False
+
     # Pass A: KV-only footer reads, 4-way parallel.
     def _pass_kv(path: str) -> None:
-        target = _hf_meta_tempfile(tempdir, path, kv=True)
-        full = _hf_meta_tempfile(tempdir, path, kv=False)
-        if target.is_file() or full.is_file():
-            return  # already labelled
+        target = target_for(path)
+        if _has_tasks(target):
+            return  # full data already there; don't clobber
         try:
             meta = _fetch_hf_parquet_meta(
                 repo_id, path, revision=revision, kv_only=True,
@@ -1652,8 +1633,8 @@ def _hf_prefetch_cmd(
 
     # Pass B: full row-group reads, serial (avoids HF retry storms).
     def _pass_full(path: str) -> None:
-        target = _hf_meta_tempfile(tempdir, path, kv=False)
-        if target.is_file():
+        target = target_for(path)
+        if _has_tasks(target):
             return
         try:
             meta = _fetch_hf_parquet_meta(
@@ -1683,34 +1664,6 @@ def _hf_prefetch_cmd(
     a_thread.join(timeout=5)
 
 
-def _silence_hf_chatter() -> None:
-    """Mute huggingface_hub's retry warnings so transient hub
-    slowness doesn't leak to the user's terminal."""
-    import logging
-    logger = logging.getLogger("huggingface_hub")
-    if getattr(logger, "_agentcap_silenced", False):
-        return
-    logger.setLevel(logging.ERROR)
-    setattr(logger, "_agentcap_silenced", True)
-
-
-def _build_hf_session_rows(repo_id: str) -> tuple[list[dict], str | None]:
-    """One-shot per-session setup: list parquets + fetch the latest
-    commit SHA. Held at ``inspect_cmd`` scope so Esc-back doesn't
-    repeat it."""
-    from huggingface_hub import HfApi
-    _silence_hf_chatter()
-    api = HfApi()
-    rows = _hf_list_parquets(repo_id)
-    if not rows:
-        raise click.UsageError(f"no .parquet files in {repo_id}")
-    try:
-        revision = api.repo_info(repo_id, repo_type="dataset").sha
-    except Exception:  # noqa: BLE001
-        revision = None
-    return rows, revision
-
-
 def _pick_hf_dataset_parquet(
     repo_id: str, tempdir: Path,
     rows: list[dict], revision: str | None,
@@ -1728,15 +1681,14 @@ def _pick_hf_dataset_parquet(
 
     # Sync KV-only fetch for row 0 so the picker opens with at
     # least its first label populated.
-    row0_kv = _hf_meta_tempfile(tempdir, rows[0]["path"], kv=True)
-    row0_full = _hf_meta_tempfile(tempdir, rows[0]["path"], kv=False)
-    if not row0_kv.is_file() and not row0_full.is_file():
+    row0_target = _hf_meta_tempfile(tempdir, rows[0]["path"])
+    if not row0_target.is_file():
         try:
             kv_meta = _fetch_hf_parquet_meta(
                 repo_id, rows[0]["path"],
                 revision=revision, kv_only=True,
             )
-            _write_meta_atomic(row0_kv, kv_meta)
+            _write_meta_atomic(row0_target, kv_meta)
         except Exception:  # noqa: BLE001
             pass
 
@@ -1747,15 +1699,12 @@ def _pick_hf_dataset_parquet(
 
     def _line_for(r: dict) -> str:
         agent = model = None
-        for kv in (False, True):
-            tmpfile = _hf_meta_tempfile(tempdir, r["path"], kv=kv)
-            if not tmpfile.is_file():
-                continue
+        tmpfile = _hf_meta_tempfile(tempdir, r["path"])
+        if tmpfile.is_file():
             try:
                 meta = _json.loads(tmpfile.read_text())
                 agent = meta.get("agent")
                 model = meta.get("model")
-                break
             except (OSError, _json.JSONDecodeError):
                 pass
         return _format_picker_row(agent, model, r["size"], r["path"])
@@ -1916,10 +1865,23 @@ def inspect_cmd(target: str | None, source: str | None, print_rid_only: bool) ->
         # ``hf`` holds the picker's tempdir + row list at this scope
         # so Esc-back re-entries are instant.
         import contextlib as _contextlib
+        import logging as _logging
         import tempfile as _tempfile
         if kind == "hf":
+            # Mute huggingface_hub's retry warnings so transient hub
+            # slowness doesn't leak to the user's terminal.
+            _logging.getLogger("huggingface_hub").setLevel(_logging.ERROR)
+            from huggingface_hub import HfApi
+            hf_rows = _hf_list_parquets(payload)  # type: ignore[arg-type]
+            if not hf_rows:
+                raise click.UsageError(f"no .parquet files in {payload}")
+            try:
+                hf_revision = HfApi().repo_info(
+                    payload, repo_type="dataset",  # type: ignore[arg-type]
+                ).sha
+            except Exception:  # noqa: BLE001
+                hf_revision = None
             td_cm = _tempfile.TemporaryDirectory(prefix="agentcap-hf-meta-")
-            hf_rows, hf_revision = _build_hf_session_rows(payload)  # type: ignore[arg-type]
         else:
             td_cm = _contextlib.nullcontext(None)
             hf_rows, hf_revision = [], None
