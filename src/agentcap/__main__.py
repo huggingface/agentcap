@@ -1456,8 +1456,15 @@ def _hf_list_parquets(repo_id: str) -> list[dict]:
 def _hf_meta_tempfile(tempdir: Path, path: str) -> Path:
     """Per-parquet path under the picker's session tempdir. The
     prefetch subprocess writes to it; the preview cmd reads from
-    it. Stable filename so both sides agree without coordination."""
-    return tempdir / (path.replace("/", "__") + ".json")
+    it. Stable filename so both sides agree without coordination.
+
+    Uses a SHA-1 digest of the full path so distinct HF paths can't
+    map to the same tempfile (``a/b__c.parquet`` and ``a__b/c.parquet``
+    would otherwise collide under naive ``/`` → ``__`` replacement).
+    The stem is preserved as a readable prefix for debugging."""
+    import hashlib
+    digest = hashlib.sha1(path.encode()).hexdigest()[:16]
+    return tempdir / f"{Path(path).stem}-{digest}.json"
 
 
 def _write_meta_atomic(target: Path, meta: dict) -> None:
