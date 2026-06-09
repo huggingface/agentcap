@@ -1330,75 +1330,71 @@ def _classify_source(source: str | None) -> tuple[str, str | None]:
     )
 
 
-def _hf_meta_cache_path(repo_id: str, path: str) -> Path:
-    """Disk-cache location for one parquet's metadata. Filenames are
-    immutable (timestamp + hash in stem), so the cache never goes
-    stale — a re-export produces a new filename → fresh cache entry."""
-    safe_repo = repo_id.replace("/", "__")
-    safe_file = path.replace("/", "__")
-    d = Path.home() / ".cache" / "agentcap" / "hf-list" / safe_repo
-    d.mkdir(parents=True, exist_ok=True)
-    return d / (safe_file + ".json")
-
-
-def _fetch_hf_parquet_meta(repo_id: str, path: str) -> dict:
-    """Pull one parquet's preview-relevant metadata via HfFileSystem
-    (footer + small column reads, no full download). Returns
-    ``{model, num_rows, tasks: [{id, turns, prompt}]}``. ``tasks`` is
-    empty when the parquet predates the ``task_id`` schema."""
+def _fetch_hf_parquet_meta(
+    repo_id: str, path: str, *,
+    revision: str | None = None,
+    kv_only: bool = False,
+) -> dict:
+    """Returns ``{agent, model, num_rows, tasks: [{id, turns, prompt}]}``.
+    ``kv_only=True`` skips the row-group reads — return value has no
+    ``tasks`` key in that case (the preview cmd uses its presence to
+    distinguish a partial write from "no task_id schema")."""
     import json as _json
-    from huggingface_hub import HfFileSystem
     import pyarrow.parquet as pq
-    fs = HfFileSystem()
-    full = f"datasets/{repo_id}/{path}"
-    out: dict = {"model": None, "num_rows": 0, "tasks": []}
-    with fs.open(full, "rb") as fh:
+    from huggingface_hub import HfFileSystem, try_to_load_from_cache
+    out: dict = {"agent": None, "model": None, "num_rows": 0}
+
+    opener = None
+    if revision:
+        local = try_to_load_from_cache(
+            repo_id=repo_id, filename=path,
+            repo_type="dataset", revision=revision,
+        )
+        if isinstance(local, str) and Path(local).is_file():
+            opener = open(local, "rb")
+    if opener is None:
+        opener = HfFileSystem().open(f"datasets/{repo_id}/{path}", "rb")
+
+    with opener as fh:
         pf = pq.ParquetFile(fh)
         out["num_rows"] = pf.metadata.num_rows
+        # Schema-level KV metadata: ``export_local`` stamps ``agent``
+        # and ``model`` here. Bytes-keyed; ``None`` when missing.
+        schema_md = pf.schema_arrow.metadata or {}
+        for key in ("agent", "model"):
+            v = schema_md.get(key.encode())
+            if v:
+                out[key] = v.decode("utf-8", errors="replace")
+        if kv_only:
+            return out
+        out["tasks"] = []
         cols = pf.schema_arrow.names
-        if "model" in cols and pf.num_row_groups:
-            # First row-group + single column → tiny download.
-            rg = pf.read_row_group(0, columns=["model"])
-            if rg.num_rows:
-                out["model"] = rg.column("model")[0].as_py()
-        if "task_id" in cols:
-            # ``task_id`` + ``turn`` are tiny columns — read across all
-            # row groups so the task list / turn-count cover the whole
-            # parquet. Avoid pulling ``request`` across the full table:
-            # it's the giant per-row OpenAI body JSON; downloading it
-            # over HfFileSystem just to extract one prompt per task
-            # would make ``inspect`` open multi-MB of data per parquet.
-            read_cols = ["task_id"]
+        if "task_id" in cols and pf.num_row_groups:
+            # Row group 0 sample only — tasks in later row groups
+            # don't show up in the preview.
+            rg_cols = ["task_id"]
             if "turn" in cols:
-                read_cols.append("turn")
-            tbl = pf.read(columns=read_cols)
-            tids = tbl.column("task_id").to_pylist()
+                rg_cols.append("turn")
+            if "request" in cols:
+                rg_cols.append("request")
+            rg = pf.read_row_group(0, columns=rg_cols)
+            tids = rg.column("task_id").to_pylist()
             turns = (
-                tbl.column("turn").to_pylist()
-                if "turn" in read_cols else [None] * len(tids)
+                rg.column("turn").to_pylist()
+                if "turn" in rg_cols else [None] * len(tids)
+            )
+            raws = (
+                rg.column("request").to_pylist()
+                if "request" in rg_cols else [None] * len(tids)
             )
             per_task: dict[str, dict] = {}
-            for tid, t in zip(tids, turns):
+            for tid, t, raw in zip(tids, turns, raws):
                 if not tid:
                     continue
                 d = per_task.setdefault(tid, {"turns": 0, "prompt": None})
                 if t is not None and int(t) > d["turns"]:
                     d["turns"] = int(t)
-            # Sample prompts from row group 0 ONLY. ``request`` is
-            # huge per row, so even one row-group is a meaningful
-            # download; tasks whose first turn lives in a later
-            # row-group simply show ``None`` for the prompt.
-            if "request" in cols and pf.num_row_groups:
-                rg = pf.read_row_group(0, columns=["task_id", "request"])
-                for tid, raw in zip(
-                    rg.column("task_id").to_pylist(),
-                    rg.column("request").to_pylist(),
-                ):
-                    if not tid or not raw:
-                        continue
-                    d = per_task.get(tid)
-                    if d is None or d["prompt"] is not None:
-                        continue
+                if d["prompt"] is None and raw:
                     try:
                         msgs = (_json.loads(raw) or {}).get("messages") or []
                     except (_json.JSONDecodeError, ValueError, TypeError):
@@ -1415,50 +1411,10 @@ def _fetch_hf_parquet_meta(repo_id: str, path: str) -> dict:
     return out
 
 
-def _hf_parquet_meta(
-    repo_id: str, path: str, expected_blob_id: str | None = None,
-) -> dict:
-    """Read-through disk cache around ``_fetch_hf_parquet_meta``.
-    First hit pays the network round-trip; subsequent hits (including
-    across sessions) come back instantly. Cache lives under
-    ``~/.cache/agentcap/hf-list/``.
-
-    ``expected_blob_id`` is the git SHA of the parquet returned by
-    ``HfApi().list_repo_tree``. When provided, cached entries with a
-    different ``blob_id`` are invalidated — covers the "someone
-    overwrote the file at the same path" case. Without it the cache
-    is trusted blindly (sufficient for the preview command, which is
-    only ever called for paths that were just listed)."""
-    import json as _json
-    cache_path = _hf_meta_cache_path(repo_id, path)
-    if cache_path.is_file():
-        try:
-            cached = _json.loads(cache_path.read_text())
-            cached_blob = cached.get("_blob_id")
-            if (
-                expected_blob_id is None
-                or (cached_blob and cached_blob == expected_blob_id)
-            ):
-                return cached
-        except (OSError, _json.JSONDecodeError):
-            pass
-    meta = _fetch_hf_parquet_meta(repo_id, path)
-    if expected_blob_id is not None:
-        meta["_blob_id"] = expected_blob_id
-    try:
-        cache_path.write_text(_json.dumps(meta, ensure_ascii=False))
-    except OSError:
-        pass
-    return meta
-
-
 def _hf_list_parquets(repo_id: str) -> list[dict]:
-    """Return one row per ``.parquet`` file in ``<owner>/<name>``.
-    Each row: ``{path, size, agent, ts, model, num_rows}``. ``model``
-    + ``num_rows`` are pulled via ``_hf_parquet_meta`` (read-through
-    disk cache) — first call hits the network once per parquet in
-    parallel; later calls and preview hovers come from disk."""
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    """``.parquet`` files in ``<owner>/<name>`` as ``[{path, size}, ...]``,
+    sorted by path. Per-parquet metadata is hydrated later from each
+    parquet's footer."""
     from huggingface_hub import HfApi
     api = HfApi()
     tree = api.list_repo_tree(repo_id, repo_type="dataset", recursive=True)
@@ -1468,79 +1424,62 @@ def _hf_list_parquets(repo_id: str) -> list[dict]:
         if not path or not path.endswith(".parquet"):
             continue
         size = getattr(entry, "size", None) or 0
-        # ``blob_id`` is the git SHA — changes whenever the file's
-        # content does, so it doubles as our cache validator.
-        blob_id = getattr(entry, "blob_id", None)
-        stem = Path(path).stem
-        agent = ts = None
-        parts = stem.split("-")
-        if len(parts) >= 4 and parts[0] == "train":
-            agent = parts[1]
-            ts = parts[-2]
-        base.append({
-            "path": path, "size": int(size), "agent": agent, "ts": ts,
-            "blob_id": blob_id,
-        })
-
-    # Hydrate model + num_rows. A cache file is "fresh" only when its
-    # stored ``_blob_id`` matches the current tree entry's blob_id;
-    # anything else is treated as a miss and refetched in parallel.
-    def _is_fresh(r: dict) -> bool:
-        import json as _json
-        cache_path = _hf_meta_cache_path(repo_id, r["path"])
-        if not cache_path.is_file():
-            return False
-        try:
-            cached = _json.loads(cache_path.read_text())
-        except (OSError, _json.JSONDecodeError):
-            return False
-        return cached.get("_blob_id") == r["blob_id"]
-
-    misses = [r for r in base if not _is_fresh(r)]
-    if misses:
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            futs = {
-                pool.submit(_hf_parquet_meta, repo_id, r["path"], r["blob_id"]): r
-                for r in misses
-            }
-            for fut in as_completed(futs):
-                try:
-                    fut.result()
-                except Exception:  # noqa: BLE001
-                    pass  # picker still works without per-row model
-    for r in base:
-        try:
-            m = _hf_parquet_meta(repo_id, r["path"], r["blob_id"])
-        except Exception:  # noqa: BLE001
-            m = {"model": None, "num_rows": 0}
-        r["model"] = m.get("model")
-        r["num_rows"] = m.get("num_rows") or 0
-    base.sort(key=lambda r: (r["agent"] or "", r["ts"] or "", r["path"]))
+        base.append({"path": path, "size": int(size)})
+    base.sort(key=lambda r: r["path"])
     return base
+
+
+def _hf_meta_tempfile(tempdir: Path, path: str) -> Path:
+    """SHA-1 prefix avoids collisions across HF paths."""
+    import hashlib
+    digest = hashlib.sha1(path.encode()).hexdigest()[:16]
+    return tempdir / f"{Path(path).stem}-{digest}.json"
+
+
+def _write_meta_atomic(target: Path, meta: dict) -> None:
+    """Atomic write via .tmp + rename so the fzf preview cmd never
+    sees a half-written file."""
+    import json as _json
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    tmp.write_text(_json.dumps(meta, ensure_ascii=False))
+    tmp.replace(target)
 
 
 _HF_PREVIEW_TASK_LIMIT = 15
 
 
 @cli.command("_hf_parquet_preview", hidden=True)
-@click.argument("repo_id")
+@click.option(
+    "--tempdir", "tempdir_str", required=True,
+    type=click.Path(file_okay=False, dir_okay=True),
+    help="Session tempdir populated by the prefetch subprocess.",
+)
 @click.argument("path")
-def _hf_parquet_preview_cmd(repo_id: str, path: str) -> None:
-    """Internal: preview pane for the HF dataset parquet picker.
-    Reads from the on-disk cache populated by ``_hf_parquet_meta``;
-    fzf re-spawns this command on every hover so making it I/O-free
-    is what keeps row-to-row navigation snappy. The task list is
-    truncated to ``_HF_PREVIEW_TASK_LIMIT`` rows since the preview
-    pane can't show more than a screenful anyway."""
+def _hf_parquet_preview_cmd(tempdir_str: str, path: str) -> None:
+    """Render the fzf preview pane from the parquet's tempfile.
+    Exits immediately if not yet on disk; the prefetch subprocess
+    POSTs ``refresh-preview`` to re-invoke us once it lands."""
+    import json as _json
+    tempdir = Path(tempdir_str)
+    target = _hf_meta_tempfile(tempdir, path)
+
+    click.echo(f"path:   {path}")
+    if not target.is_file():
+        click.echo("loading…")
+        return
+
     try:
-        meta = _hf_parquet_meta(repo_id, path)
-    except Exception as exc:  # noqa: BLE001
+        meta = _json.loads(target.read_text())
+    except (OSError, _json.JSONDecodeError) as exc:
         click.echo(f"(preview failed: {type(exc).__name__}: {exc})")
         return
-    click.echo(f"path:   {path}")
-    click.echo(f"rows:   {meta.get('num_rows', 0):,}")
+    click.echo(f"agent:  {meta.get('agent') or '?'}")
     click.echo(f"model:  {meta.get('model') or '?'}")
-    tasks = meta.get("tasks") or []
+    click.echo(f"rows:   {meta.get('num_rows', 0):,}")
+    if "tasks" not in meta:
+        click.echo("tasks:  …")
+        return
+    tasks = meta["tasks"]
     click.echo(f"tasks:  {len(tasks)}")
     if not tasks:
         click.echo()
@@ -1557,73 +1496,278 @@ def _hf_parquet_preview_cmd(repo_id: str, path: str) -> None:
         click.echo(f"  … and {hidden} more")
 
 
-def _pick_hf_dataset_parquet(repo_id: str) -> Path | None:
-    """Level-1 picker over the ``.parquet`` files in an HF dataset.
-    Returns the local cached path of the picked parquet, or ``None``
-    if cancelled. The download happens here (after pick) so hovering
-    in the picker stays cheap — only the file the user actually
-    selected gets materialised."""
-    import shlex
-    import sys
-    from huggingface_hub import hf_hub_download
+_PICKER_AGENT_W = 10
+_PICKER_MODEL_W = 50
 
-    rows = _hf_list_parquets(repo_id)
-    if not rows:
-        raise click.UsageError(f"no .parquet files in {repo_id}")
-    # Display columns: AGENT  MODEL  ROWS  SIZE  PATH. Model + row
-    # count are hydrated from the parquet footer cache populated in
-    # ``_hf_list_parquets`` — no per-row network on picker open after
-    # the first time.
-    def _short_model(m: str | None) -> str:
-        if not m:
-            return "?"
-        # ``org/Model-Name`` → ``Model-Name``: the org repeats across
-        # rows and bloats the column for no extra signal.
-        return m.rsplit("/", 1)[-1]
 
-    agent_w = max(len("AGENT"), max(len(r["agent"] or "?") for r in rows))
-    model_w = max(len("MODEL"), max(len(_short_model(r["model"])) for r in rows))
-
-    def _fmt(agent, model, rows_n, size, path) -> str:
-        return (
-            f"{agent:<{agent_w}}  {model:<{model_w}}  "
-            f"{rows_n:>5}  {size:>7}  {path}"
-        )
-
+def _format_picker_row(
+    agent: str | None, model: str | None, size_bytes: int, path: str,
+) -> str:
+    """Picker row with fixed column widths so reload doesn't shift
+    the layout. ``path`` is in a hidden tab-delim col for the preview."""
     def _size_label(n: int) -> str:
         for unit in ("B", "K", "M", "G"):
             if n < 1024 or unit == "G":
                 return f"{n:.0f}{unit}" if unit == "B" else f"{n:.1f}{unit}"
             n /= 1024
         return f"{n}"
+    a = (agent or "...")[:_PICKER_AGENT_W].ljust(_PICKER_AGENT_W)
+    m = (model or "...")[:_PICKER_MODEL_W].ljust(_PICKER_MODEL_W)
+    s = _size_label(size_bytes).rjust(7)
+    return f"{a}  {m}  {s}\t{path}"
 
-    header = _fmt("AGENT", "MODEL", "ROWS", "SIZE", "PATH")
-    lines = [
-        # Hidden col 2 carries the path so the preview can use ``{2}``
-        # without a brittle awk over the visible columns.
-        _fmt(
-            r["agent"] or "?", _short_model(r["model"]),
-            str(r.get("num_rows") or 0), _size_label(r["size"]), r["path"],
-        ) + f"\t{r['path']}"
-        for r in rows
-    ]
+
+@cli.command("_hf_picker_list", hidden=True)
+@click.option(
+    "--tempdir", "tempdir_str", required=True,
+    type=click.Path(file_okay=False, dir_okay=True),
+)
+@click.option(
+    "--paths-file", "paths_file", required=True,
+    type=click.Path(file_okay=True, dir_okay=False),
+)
+def _hf_picker_list_cmd(tempdir_str: str, paths_file: str) -> None:
+    """Emit current rows to stdout. fzf's ``reload(...)`` source —
+    re-invoked after each Pass-A write. Rows without a tempfile
+    yet render as ``...`` placeholders."""
+    import json as _json
+    tempdir = Path(tempdir_str)
+    try:
+        entries = _json.loads(Path(paths_file).read_text())
+    except (OSError, _json.JSONDecodeError):
+        return
+    for entry in entries:
+        path = entry["path"]
+        size = entry.get("size", 0)
+        agent = model = None
+        tmpfile = _hf_meta_tempfile(tempdir, path)
+        if tmpfile.is_file():
+            try:
+                meta = _json.loads(tmpfile.read_text())
+                agent = meta.get("agent")
+                model = meta.get("model")
+            except (OSError, _json.JSONDecodeError):
+                pass
+        click.echo(_format_picker_row(agent, model, size, path))
+
+
+@cli.command("_hf_prefetch", hidden=True)
+@click.option(
+    "--tempdir", "tempdir_str", required=True,
+    type=click.Path(file_okay=False, dir_okay=True),
+)
+@click.option("--repo", "repo_id", required=True)
+@click.option(
+    "--fzf-port", "fzf_port", type=int, default=None,
+    help="HTTP port of fzf's --listen server, for refresh-preview "
+         "after each successful fetch.",
+)
+@click.option("--revision", "revision", type=str, default=None)
+@click.option("--paths-file", "paths_file", type=str, default=None)
+def _hf_prefetch_cmd(
+    tempdir_str: str, repo_id: str, fzf_port: int | None,
+    revision: str | None, paths_file: str | None,
+) -> None:
+    """Background fetcher: reads paths from stdin, runs Pass A
+    (parallel KV-only) and Pass B (serial full) concurrently, POSTs
+    fzf actions after each successful write. SIGKILLed by the picker
+    when fzf exits."""
+    import json as _json
+    import shlex as _shlex
+    import sys as _sys
+    import urllib.error
+    import urllib.request
+    tempdir = Path(tempdir_str)
+    try:
+        paths = _json.loads(_sys.stdin.read())
+    except (OSError, _json.JSONDecodeError):
+        return
+
+    # fzf invokes this as a shell cmd on each ``reload(...)`` POST.
+    reload_cmd = (
+        f"{_shlex.quote(_sys.executable)} -m agentcap _hf_picker_list"
+        f" --tempdir={_shlex.quote(tempdir_str)}"
+        f" --paths-file={_shlex.quote(paths_file or '')}"
+    ) if paths_file else None
+
+    def _nudge_fzf(body: bytes) -> None:
+        if fzf_port is None:
+            return
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{fzf_port}/", data=body, method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=0.5) as resp:
+                resp.read()
+        except (urllib.error.URLError, OSError):
+            pass  # fzf not up yet, or already exited — harmless
+
+    def _has_tasks(target: Path) -> bool:
+        """True if target already holds a Pass-B (full) write."""
+        if not target.is_file():
+            return False
+        try:
+            return "tasks" in _json.loads(target.read_text())
+        except (OSError, _json.JSONDecodeError):
+            return False
+
+    # Pass A: KV-only footer reads, 4-way parallel.
+    def _pass_kv(path: str) -> None:
+        target = _hf_meta_tempfile(tempdir, path)
+        if _has_tasks(target):
+            return  # full data already there; don't clobber
+        try:
+            meta = _fetch_hf_parquet_meta(
+                repo_id, path, revision=revision, kv_only=True,
+            )
+        except Exception:  # noqa: BLE001
+            return
+        # Re-check: Pass-B may have finished writing the FULL file
+        # while our network fetch was in flight; overwriting it with
+        # KV-only would discard tasks and leave the preview stuck.
+        if _has_tasks(target):
+            return
+        try:
+            _write_meta_atomic(target, meta)
+        except OSError:
+            return
+        if reload_cmd is not None:
+            _nudge_fzf(f"reload({reload_cmd})".encode())
+
+    # Pass B: full row-group reads, serial (avoids HF retry storms).
+    def _pass_full(path: str) -> None:
+        target = _hf_meta_tempfile(tempdir, path)
+        if _has_tasks(target):
+            return
+        try:
+            meta = _fetch_hf_parquet_meta(
+                repo_id, path, revision=revision, kv_only=False,
+            )
+        except Exception:  # noqa: BLE001
+            return
+        try:
+            _write_meta_atomic(target, meta)
+        except OSError:
+            return
+        _nudge_fzf(b"refresh-preview")
+
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    # Passes run concurrently so labels and previews fill in
+    # independently.
+    def _run_pass_a() -> None:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(_pass_kv, paths))
+
+    a_thread = threading.Thread(target=_run_pass_a, daemon=True)
+    a_thread.start()
+    for path in paths:
+        _pass_full(path)
+    a_thread.join(timeout=5)
+
+
+def _pick_hf_dataset_parquet(
+    repo_id: str, tempdir: Path,
+    rows: list[dict], revision: str | None,
+) -> Path | None:
+    """Pick a parquet from an HF dataset repo. Returns its local
+    path (via ``hf_hub_download`` after the user selects), or
+    ``None`` on Esc. ``tempdir`` outlives this call so re-entries
+    reuse already-fetched tempfiles."""
+    import json as _json
+    import shlex
+    import socket
+    import subprocess
+    import sys
+    from huggingface_hub import hf_hub_download
+
+    # Sync KV-only fetch for row 0 so the picker opens with at
+    # least its first label populated.
+    row0_target = _hf_meta_tempfile(tempdir, rows[0]["path"])
+    if not row0_target.is_file():
+        try:
+            kv_meta = _fetch_hf_parquet_meta(
+                repo_id, rows[0]["path"],
+                revision=revision, kv_only=True,
+            )
+            _write_meta_atomic(row0_target, kv_meta)
+        except Exception:  # noqa: BLE001
+            pass
+
+    paths_file = tempdir / "paths.json"
+    paths_file.write_text(_json.dumps(
+        [{"path": r["path"], "size": r["size"]} for r in rows],
+    ))
+
+    def _line_for(r: dict) -> str:
+        agent = model = None
+        tmpfile = _hf_meta_tempfile(tempdir, r["path"])
+        if tmpfile.is_file():
+            try:
+                meta = _json.loads(tmpfile.read_text())
+                agent = meta.get("agent")
+                model = meta.get("model")
+            except (OSError, _json.JSONDecodeError):
+                pass
+        return _format_picker_row(agent, model, r["size"], r["path"])
+
+    header = (
+        "AGENT".ljust(_PICKER_AGENT_W)
+        + "  "
+        + "MODEL".ljust(_PICKER_MODEL_W)
+        + "  "
+        + "SIZE".rjust(7)
+    )
+    lines = [_line_for(r) for r in rows]
+
+    # Pre-allocate fzf's --listen port.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        fzf_port = s.getsockname()[1]
+
+    manifest = _json.dumps([r["path"] for r in rows])
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "agentcap", "_hf_prefetch",
+         "--tempdir", str(tempdir), "--repo", repo_id,
+         "--fzf-port", str(fzf_port),
+         "--paths-file", str(paths_file),
+         *(["--revision", revision] if revision else []),
+         ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        assert proc.stdin is not None
+        proc.stdin.write(manifest.encode())
+        proc.stdin.close()
+    except (BrokenPipeError, OSError):
+        pass  # subprocess died early — we'll detect it via poll()
+
     preview = (
         f"{sys.executable} -m agentcap _hf_parquet_preview"
-        f" {shlex.quote(repo_id)} {{2}} 2>/dev/null"
+        f" --tempdir={shlex.quote(str(tempdir))} {{2}} 2>/dev/null"
     )
-    picked = _fzf_pick(
-        header, lines, preview,
-        extra_args=[
-            "--delimiter", "\t", "--with-nth", "1",
-            "--no-hscroll",
-        ],
-    )
+    try:
+        picked = _fzf_pick(
+            header, lines, preview,
+            extra_args=[
+                "--delimiter", "\t", "--with-nth", "1",
+                "--no-hscroll",
+                f"--listen=127.0.0.1:{fzf_port}",
+            ],
+        )
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
     if picked is None:
         return None
     rel = picked.rsplit("\t", 1)[-1].strip()
-    # ``hf_hub_download`` is a no-op when the file is already cached
-    # under ~/.cache/huggingface — no extra plumbing needed for the
-    # "cache between picker invocations" requirement.
     return Path(hf_hub_download(
         repo_id=repo_id, repo_type="dataset", filename=rel,
     ))
@@ -1721,25 +1865,52 @@ def inspect_cmd(target: str | None, source: str | None, print_rid_only: bool) ->
     #   parquet:     message → request → exit
     kind, payload = _classify_source(source) if target is None else ("workspace", None)
     if kind in ("parquet", "hf"):
-        while True:
-            if kind == "hf":
-                pq_path = _pick_hf_dataset_parquet(payload)  # type: ignore[arg-type]
-                if pq_path is None:
-                    return  # Esc on the parquet picker → exit
-            else:
-                pq_path = Path(payload)  # type: ignore[arg-type]
-            pq_source = str(pq_path)
+        # ``hf`` holds the picker's tempdir + row list at this scope
+        # so Esc-back re-entries are instant.
+        import contextlib as _contextlib
+        import logging as _logging
+        import tempfile as _tempfile
+        if kind == "hf":
+            # Mute huggingface_hub's retry warnings so transient hub
+            # slowness doesn't leak to the user's terminal.
+            _logging.getLogger("huggingface_hub").setLevel(_logging.ERROR)
+            from huggingface_hub import HfApi
+            hf_rows = _hf_list_parquets(payload)  # type: ignore[arg-type]
+            if not hf_rows:
+                raise click.UsageError(f"no .parquet files in {payload}")
+            try:
+                hf_revision = HfApi().repo_info(
+                    payload, repo_type="dataset",  # type: ignore[arg-type]
+                ).sha
+            except Exception:  # noqa: BLE001
+                hf_revision = None
+            td_cm = _tempfile.TemporaryDirectory(prefix="agentcap-hf-meta-")
+        else:
+            td_cm = _contextlib.nullcontext(None)
+            hf_rows, hf_revision = [], None
+        with td_cm as td_str:
+            hf_tempdir = Path(td_str) if td_str else None
             while True:
-                pick = _pick_parquet_request(pq_path)
-                if pick is None:
-                    break  # Esc on the request picker → back one level
-                if print_rid_only:
-                    full_rid, _, _, _, _ = _resolve_request_id(pick, pq_source)
-                    click.echo(full_rid)
-                    return
-                _pick_request_message(pick, source=pq_source)
-            if kind == "parquet":
-                return  # explicit parquet on CLI; Esc → exit
+                if kind == "hf":
+                    pq_path = _pick_hf_dataset_parquet(
+                        payload, hf_tempdir, hf_rows, hf_revision,  # type: ignore[arg-type]
+                    )
+                    if pq_path is None:
+                        return  # Esc on the parquet picker → exit
+                else:
+                    pq_path = Path(payload)  # type: ignore[arg-type]
+                pq_source = str(pq_path)
+                while True:
+                    pick = _pick_parquet_request(pq_path)
+                    if pick is None:
+                        break  # Esc on the request picker → back one level
+                    if print_rid_only:
+                        full_rid, _, _, _, _ = _resolve_request_id(pick, pq_source)
+                        click.echo(full_rid)
+                        return
+                    _pick_request_message(pick, source=pq_source)
+                if kind == "parquet":
+                    return  # explicit parquet on CLI; Esc → exit
 
     # Esc walks back one level: message picker → request picker → run
     # picker → exit. There's no single-key skip; pressing Esc three
