@@ -1331,17 +1331,33 @@ def _classify_source(source: str | None) -> tuple[str, str | None]:
 
 
 def _fetch_hf_parquet_meta(repo_id: str, path: str) -> dict:
-    """Pull one parquet's preview-relevant metadata via HfFileSystem
-    (footer + small column reads, no full download). Returns
+    """Pull one parquet's preview-relevant metadata. Returns
     ``{model, num_rows, tasks: [{id, turns, prompt}]}``. ``tasks`` is
-    empty when the parquet predates the ``task_id`` schema."""
+    empty when the parquet predates the ``task_id`` schema.
+
+    Tries the local ``huggingface_hub`` cache first via
+    ``try_to_load_from_cache`` — if the user has previously
+    ``hf_hub_download``-ed this parquet (e.g. by picking it through
+    inspect once already), we read the local file directly, which is
+    much faster than the ``HfFileSystem`` range-reads we'd otherwise
+    do over the network. On cache miss we fall back to HfFileSystem
+    (footer + row-group-0 reads, no full download)."""
     import json as _json
-    from huggingface_hub import HfFileSystem
+    from huggingface_hub import HfFileSystem, try_to_load_from_cache
     import pyarrow.parquet as pq
-    fs = HfFileSystem()
-    full = f"datasets/{repo_id}/{path}"
     out: dict = {"model": None, "num_rows": 0, "tasks": []}
-    with fs.open(full, "rb") as fh:
+
+    local = try_to_load_from_cache(
+        repo_id=repo_id, filename=path, repo_type="dataset",
+    )
+    # ``try_to_load_from_cache`` returns ``str``, ``_CACHED_NO_EXIST``,
+    # or ``None``. Only the first is usable.
+    if isinstance(local, str) and Path(local).is_file():
+        opener = open(local, "rb")
+    else:
+        opener = HfFileSystem().open(f"datasets/{repo_id}/{path}", "rb")
+
+    with opener as fh:
         pf = pq.ParquetFile(fh)
         out["num_rows"] = pf.metadata.num_rows
         cols = pf.schema_arrow.names
@@ -1612,10 +1628,17 @@ def _hf_prefetch_cmd(
             _nudge_fzf()
 
 
-def _pick_hf_dataset_parquet(repo_id: str) -> Path | None:
+def _pick_hf_dataset_parquet(repo_id: str, tempdir: Path) -> Path | None:
     """Level-1 picker over the ``.parquet`` files in an HF dataset.
     Returns the local cached path of the picked parquet, or ``None``
     if cancelled.
+
+    ``tempdir`` is owned by the CALLER (``inspect_cmd``) and persists
+    across re-entries to this picker — pressing Esc on the
+    request-level picker re-opens this one with all the previously
+    fetched previews still in place. A fresh subprocess is launched
+    on each entry, but it fast-skips already-fetched paths via the
+    early-return in ``_fetch_hf_meta_into_tempdir``.
 
     Loading strategy: ``list_repo_tree`` returns the file list cheaply
     (~1 s); fzf opens with that immediately. The expensive per-parquet
@@ -1634,7 +1657,6 @@ def _pick_hf_dataset_parquet(repo_id: str) -> Path | None:
     import socket
     import subprocess
     import sys
-    import tempfile
     from huggingface_hub import hf_hub_download
 
     rows = _hf_list_parquets(repo_id)
@@ -1666,70 +1688,66 @@ def _pick_hf_dataset_parquet(repo_id: str) -> Path | None:
         for r in rows
     ]
 
-    with tempfile.TemporaryDirectory(prefix="agentcap-hf-meta-") as td_str:
-        tempdir = Path(td_str)
-        # Pre-allocate a port for fzf's --listen HTTP API. We pass it
-        # to both fzf (so fzf listens on it) and to the prefetch
-        # subprocess (so it can POST ``refresh-preview`` after each
-        # file lands). There's a brief race between closing this
-        # socket and fzf binding, but it's local-only and the
-        # subprocess silently ignores connection errors anyway.
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("127.0.0.1", 0))
-            fzf_port = s.getsockname()[1]
+    # Pre-allocate a port for fzf's --listen HTTP API. We pass it
+    # to both fzf (so fzf listens on it) and to the prefetch
+    # subprocess (so it can POST ``refresh-preview`` after each
+    # file lands). There's a brief race between closing this
+    # socket and fzf binding, but it's local-only and the
+    # subprocess silently ignores connection errors anyway.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        fzf_port = s.getsockname()[1]
 
-        # Background prefetch for ALL rows via ``_hf_prefetch``. No
-        # sync-fetch in the main process: the picker opens after just
-        # the ``list_repo_tree`` call (~1 s) and previews fill in
-        # top-down as the subprocess writes them. Its stderr is
-        # /dev/null so urllib3/HfHub retry warnings don't surface.
-        # Each successful write triggers an HTTP POST to fzf's listen
-        # port, which causes fzf to re-run the preview cmd for the
-        # focused row — if that row's file just landed, the pane
-        # auto-updates without the user touching the keyboard.
-        manifest = _json.dumps([r["path"] for r in rows])
-        proc = subprocess.Popen(
-            [sys.executable, "-m", "agentcap", "_hf_prefetch",
-             "--tempdir", str(tempdir), "--repo", repo_id,
-             "--fzf-port", str(fzf_port)],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        try:
-            assert proc.stdin is not None
-            proc.stdin.write(manifest.encode())
-            proc.stdin.close()
-        except (BrokenPipeError, OSError):
-            pass  # subprocess died early — we'll detect it via poll()
+    # Background prefetch for ALL rows via ``_hf_prefetch``. The
+    # picker opens after just the ``list_repo_tree`` call (~1 s) and
+    # previews fill in top-down as the subprocess writes them. Its
+    # stderr is /dev/null so urllib3/HfHub retry warnings don't
+    # surface. Each successful write triggers an HTTP POST to fzf's
+    # listen port; fzf re-runs the preview cmd for the focused row
+    # and the pane auto-updates without the user touching the keyboard.
+    manifest = _json.dumps([r["path"] for r in rows])
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "agentcap", "_hf_prefetch",
+         "--tempdir", str(tempdir), "--repo", repo_id,
+         "--fzf-port", str(fzf_port)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        assert proc.stdin is not None
+        proc.stdin.write(manifest.encode())
+        proc.stdin.close()
+    except (BrokenPipeError, OSError):
+        pass  # subprocess died early — we'll detect it via poll()
 
-        preview = (
-            f"{sys.executable} -m agentcap _hf_parquet_preview"
-            f" --tempdir={shlex.quote(str(tempdir))} {{2}} 2>/dev/null"
+    preview = (
+        f"{sys.executable} -m agentcap _hf_parquet_preview"
+        f" --tempdir={shlex.quote(str(tempdir))} {{2}} 2>/dev/null"
+    )
+    try:
+        picked = _fzf_pick(
+            header, lines, preview,
+            extra_args=[
+                "--delimiter", "\t", "--with-nth", "1",
+                "--no-hscroll",
+                f"--listen=127.0.0.1:{fzf_port}",
+            ],
         )
-        try:
-            picked = _fzf_pick(
-                header, lines, preview,
-                extra_args=[
-                    "--delimiter", "\t", "--with-nth", "1",
-                    "--no-hscroll",
-                    f"--listen=127.0.0.1:{fzf_port}",
-                ],
-            )
-        finally:
-            # SIGKILL is decisive: takes the subprocess down instantly.
-            # We then ``wait`` briefly to reap the zombie. No graceful
-            # shutdown path needed — nothing under ``tempdir`` is
-            # shared state.
-            if proc.poll() is None:
-                proc.kill()
-                try:
-                    proc.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    pass
-        if picked is None:
-            return None
-        rel = picked.rsplit("\t", 1)[-1].strip()
+    finally:
+        # SIGKILL is decisive: takes the subprocess down instantly.
+        # We then ``wait`` briefly to reap the zombie. ``tempdir``
+        # outlives this call (the caller manages it) so any partial
+        # writes the subprocess made are kept for the next entry.
+        if proc.poll() is None:
+            proc.kill()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+    if picked is None:
+        return None
+    rel = picked.rsplit("\t", 1)[-1].strip()
 
     # ``hf_hub_download`` is a no-op when the file is already cached
     # under ~/.cache/huggingface — no extra plumbing needed for the
@@ -1831,25 +1849,37 @@ def inspect_cmd(target: str | None, source: str | None, print_rid_only: bool) ->
     #   parquet:     message → request → exit
     kind, payload = _classify_source(source) if target is None else ("workspace", None)
     if kind in ("parquet", "hf"):
-        while True:
-            if kind == "hf":
-                pq_path = _pick_hf_dataset_parquet(payload)  # type: ignore[arg-type]
-                if pq_path is None:
-                    return  # Esc on the parquet picker → exit
-            else:
-                pq_path = Path(payload)  # type: ignore[arg-type]
-            pq_source = str(pq_path)
+        # For ``hf`` we hold a tempdir at THIS scope so each Esc-back
+        # from the request picker re-enters the parquet picker with
+        # all previously fetched previews still on disk. ``parquet``
+        # case doesn't need it — its source IS the parquet path.
+        import contextlib as _contextlib
+        import tempfile as _tempfile
+        if kind == "hf":
+            td_cm = _tempfile.TemporaryDirectory(prefix="agentcap-hf-meta-")
+        else:
+            td_cm = _contextlib.nullcontext(None)
+        with td_cm as td_str:
+            hf_tempdir = Path(td_str) if td_str else None
             while True:
-                pick = _pick_parquet_request(pq_path)
-                if pick is None:
-                    break  # Esc on the request picker → back one level
-                if print_rid_only:
-                    full_rid, _, _, _, _ = _resolve_request_id(pick, pq_source)
-                    click.echo(full_rid)
-                    return
-                _pick_request_message(pick, source=pq_source)
-            if kind == "parquet":
-                return  # explicit parquet on CLI; Esc → exit
+                if kind == "hf":
+                    pq_path = _pick_hf_dataset_parquet(payload, hf_tempdir)  # type: ignore[arg-type]
+                    if pq_path is None:
+                        return  # Esc on the parquet picker → exit
+                else:
+                    pq_path = Path(payload)  # type: ignore[arg-type]
+                pq_source = str(pq_path)
+                while True:
+                    pick = _pick_parquet_request(pq_path)
+                    if pick is None:
+                        break  # Esc on the request picker → back one level
+                    if print_rid_only:
+                        full_rid, _, _, _, _ = _resolve_request_id(pick, pq_source)
+                        click.echo(full_rid)
+                        return
+                    _pick_request_message(pick, source=pq_source)
+                if kind == "parquet":
+                    return  # explicit parquet on CLI; Esc → exit
 
     # Esc walks back one level: message picker → request picker → run
     # picker → exit. There's no single-key skip; pressing Esc three
