@@ -1602,8 +1602,6 @@ def _hf_prefetch_cmd(
         except (urllib.error.URLError, OSError):
             pass  # fzf not up yet, or already exited — harmless
 
-    target_for = lambda path: _hf_meta_tempfile(tempdir, path)
-
     def _has_tasks(target: Path) -> bool:
         """True if target already holds a Pass-B (full) write."""
         if not target.is_file():
@@ -1615,7 +1613,7 @@ def _hf_prefetch_cmd(
 
     # Pass A: KV-only footer reads, 4-way parallel.
     def _pass_kv(path: str) -> None:
-        target = target_for(path)
+        target = _hf_meta_tempfile(tempdir, path)
         if _has_tasks(target):
             return  # full data already there; don't clobber
         try:
@@ -1633,7 +1631,7 @@ def _hf_prefetch_cmd(
 
     # Pass B: full row-group reads, serial (avoids HF retry storms).
     def _pass_full(path: str) -> None:
-        target = target_for(path)
+        target = _hf_meta_tempfile(tempdir, path)
         if _has_tasks(target):
             return
         try:
