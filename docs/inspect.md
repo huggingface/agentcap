@@ -1,13 +1,20 @@
 # Inspecting captures
 
 `agentcap inspect` is an fzf-driven picker over captured requests with
-a live preview pane. The same picker chain runs over three sources:
+a live preview pane. A single positional `TARGET` is classified by
+content — does the path exist? does it look like an hf URI? all hex?
+— and routed accordingly. `inspect` does NOT consult
+`$AGENTCAP_WORKSPACE`; what you point it at is what you get.
 
-| source                                  | how to pick it                                    |
-|-----------------------------------------|---------------------------------------------------|
-| local workspace (default)               | `agentcap inspect`                                |
-| one local parquet file                  | `agentcap inspect --source path/to/file.parquet`  |
-| HF dataset of captures                  | `agentcap inspect --source hf://datasets/<owner>/<name>` |
+| target shape                                | what it picks                |
+|---------------------------------------------|------------------------------|
+| (omitted)                                   | cwd's `.agentcap/`           |
+| `<dir>` (exists locally)                    | that dir's `.agentcap/`      |
+| `<run-id>` (under cwd's `.agentcap/`)       | scoped to that run           |
+| `<rid>` (32 hex)                            | body dump (cwd workspace)    |
+| `<file>.parquet`                            | parquet picker               |
+| `hf://datasets/<owner>/<name>`              | HF dataset picker            |
+| `<owner>/<name>` (not a local dir)          | HF dataset (shorthand)       |
 
 ![inspect demo](img/inspect.gif)
 
@@ -23,9 +30,10 @@ instead of falling back to a half-usable table dump.
 Two-step pick: run → request → message.
 
 ```bash
-agentcap inspect              # everything in the workspace
-agentcap inspect <run-id>     # one run, skip the run picker
-agentcap inspect <rid>        # bypass picker entirely, dump body
+agentcap inspect                          # cwd workspace
+agentcap inspect <dir>                    # another local workspace
+agentcap inspect <run-id>                 # one run, skip the run picker
+agentcap inspect <rid>                    # bypass picker, dump body
 ```
 
 In the picker:
@@ -45,14 +53,14 @@ Each non-negated term is highlighted in red inside the preview pane.
 
 ## Parquet flow
 
-`--source <path>.parquet` skips the run picker and opens the request
+Passing a `.parquet` path skips the run picker and opens the request
 picker directly against the parquet's rows. The preview pane reads
 from the parquet (request body, diff vs the prior call, status,
 size), and the message sub-picker drills into the synthesised
 assistant reply too.
 
 ```bash
-agentcap inspect --source ~/dev/runs/captures.parquet
+agentcap inspect ~/dev/runs/captures.parquet
 ```
 
 If the parquet predates the `task_id` / `turn` schema (pre-2026-06-05
@@ -65,9 +73,10 @@ exports), the LOC column shows `-` and rows chain linearly per
 Three-step pick: parquet → request → message.
 
 ```bash
-agentcap inspect --source hf://datasets/dacorvo/hf-hub-session-captures
-# or the bare shorthand:
-agentcap inspect --source dacorvo/hf-hub-session-captures
+agentcap inspect hf://datasets/dacorvo/hf-hub-session-captures
+# or the bare shorthand (only recognised as HF when no local dir
+# by that name exists):
+agentcap inspect dacorvo/hf-hub-session-captures
 ```
 
 Level 1 (parquet picker) shows one row per `.parquet` file in the
@@ -106,17 +115,15 @@ agentcap replay $(agentcap inspect --rid) --target http://127.0.0.1:8000
 When you already know the rid, skip the picker:
 
 ```bash
-# from the workspace
+# rid lookup is against cwd's ``.agentcap/`` workspace (8-char
+# prefix accepted; conflicts surface as an "ambiguous" error).
 agentcap inspect 6437573b
-
-# from a parquet
-agentcap inspect 6437573b7a2d41abbb465a61a569351a \
-    --source path/to/file.parquet
-
-# from an HF dataset
-agentcap inspect 6437573b7a2d41abbb465a61a569351a \
-    --source hf://datasets/dacorvo/hf-hub-session-captures
 ```
 
-Workspace lookups accept the 8-char prefix; parquet / HF lookups need
-the full 32-char rid (exact match).
+To dump a specific rid from a parquet or an HF dataset, open the
+picker with that source and pick the rid:
+
+```bash
+agentcap inspect path/to/file.parquet
+agentcap inspect hf://datasets/dacorvo/hf-hub-session-captures
+```

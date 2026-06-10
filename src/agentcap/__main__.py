@@ -90,8 +90,9 @@ def _resolve_api_key(
 
 
 def _complete_run_ids(ctx, param, incomplete):
-    """Shell completion for workspace run-ids."""
-    root = _workspace_root()
+    """Shell completion for workspace run-ids — always against cwd's
+    ``.agentcap/`` (inspect/replay don't consult ``$AGENTCAP_WORKSPACE``)."""
+    root = Path.cwd() / _WORKSPACE_DIR
     if not root.is_dir():
         return []
     return [
@@ -102,8 +103,8 @@ def _complete_run_ids(ctx, param, incomplete):
 
 
 def _complete_request_ids(ctx, param, incomplete):
-    """Shell completion for captured request-ids across the workspace."""
-    root = _workspace_root()
+    """Shell completion for captured request-ids across cwd's workspace."""
+    root = Path.cwd() / _WORKSPACE_DIR
     if not root.is_dir():
         return []
     out: list[str] = []
@@ -828,7 +829,7 @@ def ls_cmd(workspace: str | None, long_form: bool) -> None:
 
 
 def _resolve_request_id(
-    rid: str, source: str | None
+    rid: str, source: str | None, *, workspace: Path | None = None,
 ) -> tuple[str, dict, dict | None, dict | None, Path | None]:
     """Resolve ``rid`` (full or short prefix) to
     ``(full_rid, body, response_record, request_record, capture_dir)``.
@@ -838,12 +839,12 @@ def _resolve_request_id(
       parquet, hf://) — exact match only. Response and request
       records and ``capture_dir`` are unavailable in that path
       (just the body).
-    - Otherwise scans the workspace, accepting a prefix (git-style)
-      and returning the body, the paired response, the full
-      request record (which carries ``task_id``, ``turn``,
-      ``captured_at``, ``upstream_url``), and the capture dir the
-      rid was found in — exposing the dir lets callers load
-      sibling captures without scanning again.
+    - Otherwise scans ``workspace`` (defaults to ``_workspace_root()``
+      for legacy ``run`` / ``export`` callers; ``inspect`` / ``replay``
+      pass cwd explicitly), accepting a prefix (git-style) and
+      returning the body, the paired response, the full request
+      record (which carries ``task_id``, ``turn``, ``captured_at``,
+      ``upstream_url``), and the capture dir the rid was found in.
     """
     from . import replay
 
@@ -855,14 +856,16 @@ def _resolve_request_id(
         except (ValueError, FileNotFoundError) as exc:
             raise click.UsageError(str(exc))
 
+    if workspace is None:
+        workspace = _workspace_root()
     try:
-        found = replay.resolve_workspace_rid(_workspace_root(), rid)
+        found = replay.resolve_workspace_rid(workspace, rid)
     except replay.AmbiguousRequestId as exc:
         raise click.UsageError(str(exc))
     if found is None:
         raise click.UsageError(
-            f"request_id {rid!r} not found in workspace at {_workspace_root()}; "
-            f"pass --source to point at a capture dir, parquet, or hf:// URI."
+            f"request_id {rid!r} not found in workspace at {workspace}; "
+            f"pass a different TARGET (a dir, .parquet, or hf:// URI)."
         )
     capture_dir, full_rid = found
     import json as _json
@@ -881,15 +884,19 @@ def _resolve_request_id(
     return full_rid, body, resp_rec, req_rec, capture_dir
 
 
-def _enumerate_workspace_requests(scope: str | None) -> list[dict]:
+def _enumerate_workspace_requests(
+    scope: str | None, *, workspace: Path | None = None,
+) -> list[dict]:
     """Walk captures across the workspace (or one run if ``scope`` is a
     run-id) and return one row per captured request, grouped by run
     then chronological within each run. Each row has ``run_id``,
     ``rid``, ``captured_at``, ``status``, and ``preview`` (last user
-    message, truncated)."""
+    message, truncated). ``workspace`` defaults to ``_workspace_root()``
+    so legacy callers don't break; ``inspect`` / ``replay`` pass it
+    explicitly from the resolved TARGET."""
     import json as _json
 
-    root = _workspace_root()
+    root = workspace if workspace is not None else _workspace_root()
     if not root.is_dir():
         return []
     run_dirs = (
@@ -1060,20 +1067,18 @@ def _enumerate_parquet_requests(parquet_path: Path) -> list[dict]:
     return rows
 
 
-def _format_inspect_rows(
-    rows: list[dict], *, include_run: bool
-) -> tuple[str, list[str]]:
-    """Flat table: every row is one captured call, every visible column
-    is something the user might fuzzy-filter on (LOC =
-    ``task_id.<req_index>``, RID, optional RUN, MESSAGES — the latter
-    a ``(+N)`` / ``(init N)`` / ``(-X +Y)`` delta plus a one-line
-    role-aware summary). Time / status / model / size live in the
-    fzf preview pane (see ``_preview_cmd``).
+def _format_inspect_rows(rows: list[dict]) -> tuple[str, list[str]]:
+    """Flat table: one row per captured call. Columns are LOC
+    (``task_id.<req_index>``), RID, RUN (shown only when rows span
+    multiple runs — redundant otherwise), MESSAGES (``(+N)`` /
+    ``(init N)`` / ``(-X +Y)`` delta + one-line role-aware summary).
+    Time / status / model / size live in the fzf preview pane.
 
     Returns ``(header, fzf_lines)``. Each fzf line is the visible
     content followed by tab-delimited hidden columns the preview
     command pulls via ``{2}`` / ``{3}`` (full rid, previous rid) plus
     a searchable blob fzf matches against (column 4)."""
+    include_run = len({r.get("run_id") for r in rows}) > 1
 
     rid_w = 8
     loc_w = max(
@@ -1127,17 +1132,20 @@ def _format_inspect_rows(
 
 
 def _fzf_pick(
-    header: str,
+    header: str | None,
     lines: list[str],
     preview_cmd: str,
     *,
     extra_args: Sequence[str] = (),
 ) -> str | None:
-    """Run fzf over ``lines`` with ``header`` pinned at the top.
-    Returns the selected line, or ``None`` if the user cancelled
-    (Esc / Ctrl-C). Raises ``click.UsageError`` if fzf is not on PATH
-    — the gate lives here so every caller (``inspect``, ``replay``
-    without a request-id, future ones) is protected automatically."""
+    """Run fzf over ``lines``. Returns the selected line, or ``None``
+    if the user cancelled (Esc / Ctrl-C).
+
+    ``header=None`` means the first element of ``lines`` is the header
+    (passed to fzf via ``--header-lines=1`` so it stays in lockstep
+    with the body on reload — needed when the column widths grow as
+    background fetches land). Otherwise ``--header=<header>`` pins
+    a static line above the body."""
     import shutil
     import subprocess
 
@@ -1151,12 +1159,15 @@ def _fzf_pick(
         "fzf",
         "--ansi",
         "--layout=reverse",
-        "--header", header,
         "--header-first",
         "--preview", preview_cmd,
         "--preview-window=right:60%:wrap",
         "--no-sort",
     ]
+    if header is None:
+        args += ["--header-lines=1"]
+    else:
+        args += ["--header", header]
     args.extend(extra_args)
     proc = subprocess.run(
         args,
@@ -1169,15 +1180,16 @@ def _fzf_pick(
     return proc.stdout.rstrip("\n") or None
 
 
-def _pick_workspace_run() -> str | None:
+def _pick_workspace_run(*, workspace: Path | None = None) -> str | None:
     """Open an fzf picker over the runs in the workspace, returning the
     selected run-id, or ``None`` if cancelled. fzf is a hard
     requirement of ``inspect``; the gate lives at the top of
-    ``inspect_cmd``."""
+    ``inspect_cmd``. ``workspace`` defaults to ``_workspace_root()``;
+    ``inspect`` / ``replay`` pass cwd or the resolved dir explicitly."""
     import json as _json
     import sys
 
-    root = _workspace_root()
+    root = workspace if workspace is not None else _workspace_root()
     if not root.is_dir():
         raise click.UsageError(f"no workspace at {root}")
 
@@ -1207,36 +1219,44 @@ def _pick_workspace_run() -> str | None:
     if not rows:
         raise click.UsageError(f"no runs with captures in {root}")
 
-    run_w = max(len("RUN_ID"), max(len(r["run_id"]) for r in rows))
     agent_w = max(len("AGENT"), max(len(r["agent"]) for r in rows))
     model_w = max(len("MODEL"), max(len(r["model"]) for r in rows))
 
-    def _row(rid, agent, model, tasks, caps) -> str:
+    def _row(agent, model, tasks, caps) -> str:
         return (
-            f"{rid:<{run_w}}  {agent:<{agent_w}}  {model:<{model_w}}  "
+            f"{agent:<{agent_w}}  {model:<{model_w}}  "
             f"{tasks:>5}  {caps:>4}"
         )
 
-    header = _row("RUN_ID", "AGENT", "MODEL", "TASKS", "CAPS")
+    header = _row("AGENT", "MODEL", "TASKS", "CAPS")
+    # Tab-delim hidden col 2 carries the run_id — picker shells out to
+    # ``_run_preview`` with it, and we extract it from the picked line
+    # below. Visible layout matches the HF parquet picker's terser
+    # ``AGENT  MODEL  …`` style.
     lines = [
-        _row(r["run_id"], r["agent"], r["model"], str(r["n_tasks"]), str(r["n_caps"]))
+        _row(r["agent"], r["model"], str(r["n_tasks"]), str(r["n_caps"]))
+        + f"\t{r['run_id']}"
         for r in rows
     ]
-    # Preview shows the run.json metadata so the user sees what's inside
-    # before drilling in.
+    import shlex
+    ws_arg = f"--workspace {shlex.quote(str(root))}"
     preview = (
-        f"{sys.executable} -m agentcap _run_preview {{1}} 2>/dev/null | head -200"
+        f"{sys.executable} -m agentcap _run_preview {ws_arg} {{2}}"
+        f" 2>/dev/null | head -200"
     )
-
-    picked = _fzf_pick(header, lines, preview)
+    picked = _fzf_pick(
+        header, lines, preview,
+        extra_args=["--delimiter", "\t", "--with-nth", "1"],
+    )
     if picked is None:
         return None
-    tokens = picked.split()
-    return tokens[0] if tokens else None
+    fields = picked.rsplit("\t", 1)
+    return fields[1].strip() if len(fields) == 2 else None
 
 
 def _pick_workspace_request(
     scope: str | None, *, initial_short_rid: str | None = None,
+    workspace: Path | None = None,
 ) -> str | None:
     """fzf picker for a workspace request. Returns the picked short
     rid, or ``None`` if cancelled. fzf is a hard requirement of
@@ -1245,16 +1265,20 @@ def _pick_workspace_request(
     ``initial_short_rid`` (if given) positions the cursor on the row
     whose rid starts with that prefix when the picker opens — used
     when re-entering the picker from the message sub-picker so the
-    user lands back where they were."""
+    user lands back where they were. ``workspace`` defaults to
+    ``_workspace_root()``; ``inspect`` / ``replay`` pass it
+    explicitly from the resolved TARGET."""
+    import shlex
     import sys
 
-    rows = _enumerate_workspace_requests(scope)
+    if workspace is None:
+        workspace = _workspace_root()
+    rows = _enumerate_workspace_requests(scope, workspace=workspace)
     if not rows:
         where = f"run {scope!r}" if scope else "workspace"
         raise click.UsageError(f"no captured requests in {where}")
 
-    include_run = scope is None
-    header, fzf_lines = _format_inspect_rows(rows, include_run=include_run)
+    header, fzf_lines = _format_inspect_rows(rows)
     # Tab-delim hidden columns: 2 = full rid, 3 = previous-capture rid
     # (or "-" for the first capture of a task). Pre-computing the prev
     # rid here lets the preview pane skip a full cap-dir rescan per
@@ -1262,9 +1286,10 @@ def _pick_workspace_request(
     # query (``{q}``) in red so the user can see where the match
     # landed inside the preview. ``{q}`` is its own positional arg so
     # fzf's automatic shell-escaping handles quoting end-to-end.
+    ws_arg = f"--workspace {shlex.quote(str(workspace))}"
     preview = (
-        f"{sys.executable} -m agentcap _preview {{2}} {{3}} 2>/dev/null"
-        f" | head -400"
+        f"{sys.executable} -m agentcap _preview {ws_arg} {{2}} {{3}}"
+        f" 2>/dev/null | head -400"
         f" | {sys.executable} -m agentcap _highlight {{q}}"
     )
 
@@ -1300,33 +1325,65 @@ def _pick_workspace_request(
     return short
 
 
-def _classify_source(source: str | None) -> tuple[str, str | None]:
-    """Map ``--source`` into ``(kind, normalised_payload)``:
+def _classify_target(target: str | None) -> tuple[str, object]:
+    """Classify the ``TARGET`` positional of ``inspect`` / ``replay``.
 
-    - ``("workspace", None)`` — no source given.
-    - ``("parquet", abs_path)`` — local ``.parquet`` file.
-    - ``("hf", "<owner>/<name>")`` — ``hf://datasets/<owner>/<name>``
-      or the bare ``<owner>/<name>`` shorthand (matches the syntax
-      ``replay.load_request`` already accepts).
+    Returns ``(kind, payload)``:
+      - ``("workspace", Path)`` — local ``.agentcap`` dir to browse.
+      - ``("workspace-run", run_id)`` — scope to one run under cwd's
+        ``.agentcap`` (``run_id`` is the dir name).
+      - ``("rid", rid)`` — body dump; rid looked up in cwd's workspace.
+      - ``("parquet", Path)`` — local ``.parquet`` file.
+      - ``("hf", "<owner>/<name>")`` — HF dataset of captures.
 
-    Anything else raises ``UsageError``."""
-    if source is None:
-        return "workspace", None
-    if source.endswith(".parquet"):
-        p = Path(source)
+    Detection is content-based: ``<owner>/<name>`` is treated as HF
+    only when no local directory by that name exists, so a relative
+    path like ``./my-org/my-data`` (or ``my-org/my-data`` when it
+    exists as a dir) wins over the HF interpretation. Run-id and rid
+    are inferred from shape + existence under cwd's ``.agentcap``."""
+    import re
+    if target is None:
+        return "workspace", Path.cwd() / _WORKSPACE_DIR
+
+    if target.endswith(".parquet"):
+        p = Path(target)
         if not p.is_file():
-            raise click.UsageError(f"parquet not found: {source}")
-        return "parquet", str(p)
-    s = source
-    if s.startswith("hf://datasets/"):
-        s = s[len("hf://datasets/"):]
-    s = s.strip("/")
-    # ``owner/name`` shorthand — exactly one ``/``, both parts non-empty.
-    if s.count("/") == 1 and all(s.split("/")):
-        return "hf", s
+            raise click.UsageError(f"parquet not found: {target}")
+        return "parquet", p
+
+    if target.startswith("hf://"):
+        s = target.removeprefix("hf://datasets/").removeprefix("hf://").strip("/")
+        if s.count("/") == 1 and all(s.split("/")):
+            return "hf", s
+        raise click.UsageError(f"invalid hf URI: {target!r}")
+
+    # Local directory → workspace (accept either parent or .agentcap).
+    # Normalize first so ``.`` / ``<path>/.agentcap/.`` / trailing-slash
+    # forms classify correctly (``Path('.').name`` is ``''``, not
+    # ``'.agentcap'``).
+    if Path(target).is_dir():
+        p = Path(os.path.normpath(target)).absolute()
+        ws = p if p.name == _WORKSPACE_DIR else p / _WORKSPACE_DIR
+        return "workspace", ws
+
+    # Run-id under cwd's .agentcap (run dirs always carry a timestamp,
+    # so they reliably contain a dash).
+    cwd_ws = Path.cwd() / _WORKSPACE_DIR
+    if "-" in target and (cwd_ws / target / "run.json").is_file():
+        return "workspace-run", target
+
+    # ``<owner>/<name>`` HF shorthand — only when it's not a local path.
+    if target.count("/") == 1 and all(target.split("/")):
+        return "hf", target
+
+    # All-hex string → request-id (looked up in cwd workspace).
+    if re.fullmatch(r"[0-9a-f]+", target) and len(target) >= 6:
+        return "rid", target
+
     raise click.UsageError(
-        f"source must be a .parquet file or an hf://datasets/<owner>/<name> "
-        f"URI (or the bare <owner>/<name> shorthand); got {source!r}"
+        f"can't classify TARGET {target!r}: expected a directory, "
+        f"a .parquet file, an hf:// URI, an <owner>/<name> shorthand, "
+        f"a run-id (under ./.agentcap/), or a request-id (hex)."
     )
 
 
@@ -1359,14 +1416,23 @@ def _fetch_hf_parquet_meta(
         pf = pq.ParquetFile(fh)
         out["num_rows"] = pf.metadata.num_rows
         # Schema-level KV metadata: ``export_local`` stamps ``agent``
-        # and ``model`` here. Bytes-keyed; ``None`` when missing.
+        # / ``model`` / ``tasks`` here. Bytes-keyed; ``None`` when
+        # missing.
         schema_md = pf.schema_arrow.metadata or {}
         for key in ("agent", "model"):
             v = schema_md.get(key.encode())
             if v:
                 out[key] = v.decode("utf-8", errors="replace")
+        tasks_raw = schema_md.get(b"tasks")
+        if tasks_raw:
+            try:
+                out["tasks"] = _json.loads(tasks_raw.decode("utf-8"))
+                return out  # KV has the full preview slice — no row-group read needed
+            except _json.JSONDecodeError:
+                pass
         if kv_only:
             return out
+        # Legacy fallback for parquets exported before tasks landed in KV.
         out["tasks"] = []
         cols = pf.schema_arrow.names
         if "task_id" in cols and pf.num_row_groups:
@@ -1496,25 +1562,60 @@ def _hf_parquet_preview_cmd(tempdir_str: str, path: str) -> None:
         click.echo(f"  … and {hidden} more")
 
 
-_PICKER_AGENT_W = 10
-_PICKER_MODEL_W = 50
+def _short_model(model: str | None) -> str:
+    """Strip the ``org/`` prefix for display, matching the local run
+    picker's layout."""
+    return model.rsplit("/", 1)[-1] if model else "..."
 
 
-def _format_picker_row(
-    agent: str | None, model: str | None, size_bytes: int, path: str,
-) -> str:
-    """Picker row with fixed column widths so reload doesn't shift
-    the layout. ``path`` is in a hidden tab-delim col for the preview."""
-    def _size_label(n: int) -> str:
-        for unit in ("B", "K", "M", "G"):
-            if n < 1024 or unit == "G":
-                return f"{n:.0f}{unit}" if unit == "B" else f"{n:.1f}{unit}"
-            n /= 1024
-        return f"{n}"
-    a = (agent or "...")[:_PICKER_AGENT_W].ljust(_PICKER_AGENT_W)
-    m = (model or "...")[:_PICKER_MODEL_W].ljust(_PICKER_MODEL_W)
-    s = _size_label(size_bytes).rjust(7)
-    return f"{a}  {m}  {s}\t{path}"
+def _picker_rows(tempdir: Path, entries: list[dict]) -> list[str]:
+    """Build the picker's header + row list from current tempdir state.
+    Returns ``[header, *body]``. Columns ``AGENT  MODEL  TASKS  CAPS``
+    mirror the local run picker. ``TASKS`` shows ``?`` until Pass B
+    writes the task list for that row; widths are dynamic so layout
+    stays tight as KV / task counts land via fzf reload."""
+    import json as _json
+    loaded: list[tuple[str | None, str | None, str, str, str]] = []
+    for entry in entries:
+        path = entry["path"]
+        agent = model = None
+        n_tasks = "?"
+        n_caps = "?"
+        tmpfile = _hf_meta_tempfile(tempdir, path)
+        if tmpfile.is_file():
+            try:
+                meta = _json.loads(tmpfile.read_text())
+                agent = meta.get("agent")
+                model = meta.get("model")
+                if meta.get("num_rows") is not None:
+                    n_caps = str(meta["num_rows"])
+                if "tasks" in meta:
+                    n_tasks = str(len(meta["tasks"]))
+            except (OSError, _json.JSONDecodeError):
+                pass
+        loaded.append((agent, model, n_tasks, n_caps, path))
+
+    def _w(label: str, fn) -> int:
+        return max(len(label), *(len(fn(r)) for r in loaded)) if loaded else len(label)
+
+    agent_w = _w("AGENT", lambda r: r[0] or "...")
+    model_w = _w("MODEL", lambda r: _short_model(r[1]))
+    tasks_w = _w("TASKS", lambda r: r[2])
+    caps_w = _w("CAPS", lambda r: r[3])
+
+    def _line(agent: str, model: str, tasks: str, caps: str, path: str = "") -> str:
+        return (
+            f"{agent:<{agent_w}}  {model:<{model_w}}  "
+            f"{tasks:>{tasks_w}}  {caps:>{caps_w}}"
+            + (f"\t{path}" if path else "")
+        )
+
+    header = _line("AGENT", "MODEL", "TASKS", "CAPS")
+    body = [
+        _line(a or "...", _short_model(m), t, c, p)
+        for a, m, t, c, p in loaded
+    ]
+    return [header, *body]
 
 
 @cli.command("_hf_picker_list", hidden=True)
@@ -1528,27 +1629,14 @@ def _format_picker_row(
 )
 def _hf_picker_list_cmd(tempdir_str: str, paths_file: str) -> None:
     """Emit current rows to stdout. fzf's ``reload(...)`` source —
-    re-invoked after each Pass-A write. Rows without a tempfile
-    yet render as ``...`` placeholders."""
+    re-invoked after each Pass-A write."""
     import json as _json
-    tempdir = Path(tempdir_str)
     try:
         entries = _json.loads(Path(paths_file).read_text())
     except (OSError, _json.JSONDecodeError):
         return
-    for entry in entries:
-        path = entry["path"]
-        size = entry.get("size", 0)
-        agent = model = None
-        tmpfile = _hf_meta_tempfile(tempdir, path)
-        if tmpfile.is_file():
-            try:
-                meta = _json.loads(tmpfile.read_text())
-                agent = meta.get("agent")
-                model = meta.get("model")
-            except (OSError, _json.JSONDecodeError):
-                pass
-        click.echo(_format_picker_row(agent, model, size, path))
+    for line in _picker_rows(Path(tempdir_str), entries):
+        click.echo(line)
 
 
 @cli.command("_hf_prefetch", hidden=True)
@@ -1649,7 +1737,13 @@ def _hf_prefetch_cmd(
             _write_meta_atomic(target, meta)
         except OSError:
             return
-        _nudge_fzf(b"refresh-preview")
+        # ``reload`` so the row's TASKS count refreshes;
+        # ``refresh-preview`` so the focused row's preview pane picks up
+        # the new task list.
+        if reload_cmd is not None:
+            _nudge_fzf(f"reload({reload_cmd})+refresh-preview".encode())
+        else:
+            _nudge_fzf(b"refresh-preview")
 
     import threading
     from concurrent.futures import ThreadPoolExecutor
@@ -1700,26 +1794,9 @@ def _pick_hf_dataset_parquet(
         [{"path": r["path"], "size": r["size"]} for r in rows],
     ))
 
-    def _line_for(r: dict) -> str:
-        agent = model = None
-        tmpfile = _hf_meta_tempfile(tempdir, r["path"])
-        if tmpfile.is_file():
-            try:
-                meta = _json.loads(tmpfile.read_text())
-                agent = meta.get("agent")
-                model = meta.get("model")
-            except (OSError, _json.JSONDecodeError):
-                pass
-        return _format_picker_row(agent, model, r["size"], r["path"])
-
-    header = (
-        "AGENT".ljust(_PICKER_AGENT_W)
-        + "  "
-        + "MODEL".ljust(_PICKER_MODEL_W)
-        + "  "
-        + "SIZE".rjust(7)
+    lines = _picker_rows(
+        tempdir, [{"path": r["path"], "size": r["size"]} for r in rows],
     )
-    lines = [_line_for(r) for r in rows]
 
     # Pre-allocate fzf's --listen port.
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -1751,7 +1828,7 @@ def _pick_hf_dataset_parquet(
     )
     try:
         picked = _fzf_pick(
-            header, lines, preview,
+            None, lines, preview,
             extra_args=[
                 "--delimiter", "\t", "--with-nth", "1",
                 "--no-hscroll",
@@ -1788,7 +1865,7 @@ def _pick_parquet_request(parquet_path: Path) -> str | None:
     rows = _enumerate_parquet_requests(parquet_path)
     if not rows:
         raise click.UsageError(f"no rows in {parquet_path}")
-    header, fzf_lines = _format_inspect_rows(rows, include_run=True)
+    header, fzf_lines = _format_inspect_rows(rows)
     pq_quoted = shlex.quote(str(parquet_path))
     preview = (
         f"{sys.executable} -m agentcap _preview_parquet {pq_quoted}"
@@ -1818,36 +1895,40 @@ def _pick_parquet_request(parquet_path: Path) -> str | None:
 @cli.command("inspect")
 @click.argument("target", required=False, shell_complete=_complete_request_ids)
 @click.option(
-    "--source",
-    default=None,
-    help="Where to look up the request: a capture dir, a .parquet, or "
-    "hf://datasets/<owner>/<name>. Only honored when TARGET is a "
-    "request-id; defaults to scanning the local workspace.",
-)
-@click.option(
     "--rid",
     "print_rid_only",
     is_flag=True,
     help="When picking interactively, print only the selected request-id "
     "(useful for piping into `agentcap replay`).",
 )
-def inspect_cmd(target: str | None, source: str | None, print_rid_only: bool) -> None:
+def inspect_cmd(target: str | None, print_rid_only: bool) -> None:
     """Inspect captured requests.
 
     \b
-    - ``agentcap inspect``              pick a run, then a call (two-step)
-    - ``agentcap inspect <run-id>``     pick a call from that run
-    - ``agentcap inspect <rid>``        print the captured body for that request
+    - ``agentcap inspect``                          pick from cwd workspace
+    - ``agentcap inspect <run-id>``                 pick from one run in cwd workspace
+    - ``agentcap inspect <rid>``                    print the captured body
+    - ``agentcap inspect <dir>``                    pick from another local workspace
+    - ``agentcap inspect <file>.parquet``           pick from a captures parquet
+    - ``agentcap inspect hf://datasets/<o>/<n>``    pick from an HF dataset
+    - ``agentcap inspect <owner>/<name>``           same as above (shorthand)
 
-    A rid is 32 hex chars (proxy-minted UUID); a run-id contains a dash.
-    The interactive pickers require fzf on PATH (``_fzf_pick`` errors
-    out with a clear message if it isn't).
+    TARGET is classified by content (does the path exist? does it
+    look like an hf URI? all hex?). ``inspect`` does NOT consult
+    ``$AGENTCAP_WORKSPACE`` — what you point it at is what you get.
+
+    The interactive pickers require fzf on PATH.
     """
     import json as _json
 
-    # rid (full or short prefix) → body dump (single request).
-    if target and "-" not in target:
-        full_rid, body, resp_rec, _, _ = _resolve_request_id(target, source)
+    kind, payload = _classify_target(target)
+
+    if kind == "rid":
+        # Body dump from cwd workspace.
+        cwd_ws = Path.cwd() / _WORKSPACE_DIR
+        full_rid, body, resp_rec, _, _ = _resolve_request_id(
+            payload, None, workspace=cwd_ws,  # type: ignore[arg-type]
+        )
         if resp_rec is not None:
             click.echo(
                 f"  request_id={full_rid} "
@@ -1858,12 +1939,49 @@ def inspect_cmd(target: str | None, source: str | None, print_rid_only: bool) ->
         click.echo(_json.dumps(body, indent=2, ensure_ascii=False))
         return
 
-    # ``--source`` (no target): drive a parquet- or hf-dataset-rooted
-    # picker chain instead of the workspace. Esc walks back one level
-    # at a time, same as the workspace flow:
-    #   hf-dataset:  message → request → parquet → exit
-    #   parquet:     message → request → exit
-    kind, payload = _classify_source(source) if target is None else ("workspace", None)
+    if kind == "workspace":
+        ws: Path = payload  # type: ignore[assignment]
+        # run picker → request picker → message picker. Esc walks
+        # back one level at a time.
+        while True:
+            scope = _pick_workspace_run(workspace=ws)
+            if scope is None:
+                return
+            last_pick: str | None = None
+            while True:
+                pick = _pick_workspace_request(
+                    scope, initial_short_rid=last_pick, workspace=ws,
+                )
+                if pick is None:
+                    break
+                last_pick = pick
+                if print_rid_only:
+                    full_rid, _, _, _, _ = _resolve_request_id(
+                        pick, None, workspace=ws,
+                    )
+                    click.echo(full_rid)
+                    return
+                _pick_request_message(pick, workspace=ws)
+
+    if kind == "workspace-run":
+        ws = Path.cwd() / _WORKSPACE_DIR
+        scope = payload  # type: ignore[assignment]
+        last_pick = None
+        while True:
+            pick = _pick_workspace_request(
+                scope, initial_short_rid=last_pick, workspace=ws,
+            )
+            if pick is None:
+                return  # explicit run-id on CLI; Esc → exit
+            last_pick = pick
+            if print_rid_only:
+                full_rid, _, _, _, _ = _resolve_request_id(
+                    pick, None, workspace=ws,
+                )
+                click.echo(full_rid)
+                return
+            _pick_request_message(pick, workspace=ws)
+
     if kind in ("parquet", "hf"):
         # ``hf`` holds the picker's tempdir + row list at this scope
         # so Esc-back re-entries are instant.
@@ -1912,47 +2030,16 @@ def inspect_cmd(target: str | None, source: str | None, print_rid_only: bool) ->
                 if kind == "parquet":
                     return  # explicit parquet on CLI; Esc → exit
 
-    # Esc walks back one level: message picker → request picker → run
-    # picker → exit. There's no single-key skip; pressing Esc three
-    # times from the deepest level exits. A run-id passed on the CLI
-    # pins the request loop to that run (Esc on the request picker
-    # exits instead of falling back to a run picker).
-    cli_target = target
-
-    while True:
-        scope = cli_target
-        if scope is None:
-            scope = _pick_workspace_run()
-            if scope is None:
-                return  # Esc on the run picker → exit
-        # Drill into the selected run: pick a request, then drill into
-        # its flattened conversation. Esc on the message sub-picker
-        # returns here; the request picker re-opens with the cursor on
-        # the same row the user just visited.
-        last_pick: str | None = None
-        while True:
-            pick = _pick_workspace_request(
-                scope, initial_short_rid=last_pick,
-            )
-            if pick is None:
-                break  # Esc on the request picker → back one level
-            last_pick = pick
-            if print_rid_only:
-                full_rid, _, _, _, _ = _resolve_request_id(pick, None)
-                click.echo(full_rid)
-                return
-            _pick_request_message(pick)
-        if cli_target is not None:
-            return  # explicit run-id on CLI; Esc → exit
-
 
 @cli.command("_run_preview", hidden=True)
 @click.argument("run_id")
-def _run_preview_cmd(run_id: str) -> None:
+@click.option("--workspace", default=None, help="Workspace root (.agentcap dir).")
+def _run_preview_cmd(run_id: str, workspace: str | None) -> None:
     """Internal: preview a run's metadata for the run picker."""
     import json as _json
 
-    run_dir = _workspace_root() / run_id
+    root = Path(workspace) if workspace else _workspace_root()
+    run_dir = root / run_id
     meta_path = run_dir / "run.json"
     if not meta_path.is_file():
         click.echo(f"(no run.json at {meta_path})")
@@ -2115,7 +2202,10 @@ def _render_preview_message(m: dict) -> None:
 @cli.command("_preview", hidden=True)
 @click.argument("request_id")
 @click.argument("prev_request_id", required=False, default=None)
-def _preview_cmd(request_id: str, prev_request_id: str | None) -> None:
+@click.option("--workspace", default=None, help="Workspace root (.agentcap dir).")
+def _preview_cmd(
+    request_id: str, prev_request_id: str | None, workspace: str | None,
+) -> None:
     """Internal: header + initial PROMPT + MESSAGES diff for one
     captured request — used by the fzf preview pane.
 
@@ -2134,7 +2224,10 @@ def _preview_cmd(request_id: str, prev_request_id: str | None) -> None:
         click.echo("(section header — navigate to a request id)")
         return
 
-    full_rid, body, resp_rec, req_rec, cap_dir = _resolve_request_id(request_id, None)
+    ws = Path(workspace) if workspace else None
+    full_rid, body, resp_rec, req_rec, cap_dir = _resolve_request_id(
+        request_id, None, workspace=ws,
+    )
     messages = body.get("messages") or []
     initial_user = next(
         (m for m in messages if m.get("role") == "user"),
@@ -2488,7 +2581,10 @@ def _render_msg_preview(records: list[dict], row: int) -> None:
 @cli.command("_msg_preview", hidden=True)
 @click.argument("request_id")
 @click.argument("row", type=int)
-def _msg_preview_cmd(request_id: str, row: int) -> None:
+@click.option("--workspace", default=None, help="Workspace root (.agentcap dir).")
+def _msg_preview_cmd(
+    request_id: str, row: int, workspace: str | None,
+) -> None:
     """Internal: render one message (1-indexed ``row``) from the
     request's flattened message list. Used by the workspace-sourced
     message sub-picker."""
@@ -2496,7 +2592,10 @@ def _msg_preview_cmd(request_id: str, row: int) -> None:
     if not re.fullmatch(r"[0-9a-f]+", request_id):
         click.echo("(invalid request id)")
         return
-    _, body, resp_rec, _, _ = _resolve_request_id(request_id, None)
+    ws = Path(workspace) if workspace else None
+    _, body, resp_rec, _, _ = _resolve_request_id(
+        request_id, None, workspace=ws,
+    )
     _render_msg_preview(_request_messages_for_view(body, resp_rec), row)
 
 
@@ -2519,7 +2618,9 @@ def _msg_preview_parquet_cmd(
     _render_msg_preview(_request_messages_for_view(body, resp or None), row)
 
 
-def _pick_request_message(rid: str, *, source: str | None = None) -> None:
+def _pick_request_message(
+    rid: str, *, source: str | None = None, workspace: Path | None = None,
+) -> None:
     """Second-level fzf picker over the messages of the request the
     user selected in the request picker. Read-only browse: Esc / Enter
     both return to the caller without side effects.
@@ -2527,7 +2628,10 @@ def _pick_request_message(rid: str, *, source: str | None = None) -> None:
     ``source`` is ``None`` for workspace-sourced rids (current
     behaviour) and a local parquet path for parquet-sourced rids — the
     preview pipeline shells out to a different hidden command in each
-    case so the picker doesn't need to know how the body was loaded."""
+    case so the picker doesn't need to know how the body was loaded.
+    ``workspace`` overrides the default workspace lookup for
+    workspace-sourced rids (inspect/replay pass cwd or the resolved
+    dir explicitly)."""
     import shlex
     import sys
     # ``_resolve_request_id`` returns ``resp_rec=None`` for any
@@ -2539,7 +2643,9 @@ def _pick_request_message(rid: str, *, source: str | None = None) -> None:
         body, resp_rec, _, _ = _load_parquet_body(Path(source), rid)
         full_rid = rid
     else:
-        full_rid, body, resp_rec, _, _ = _resolve_request_id(rid, source)
+        full_rid, body, resp_rec, _, _ = _resolve_request_id(
+            rid, source, workspace=workspace,
+        )
     records = _request_messages_for_view(body, resp_rec)
     if not records:
         click.echo("(no messages in this request)")
@@ -2562,9 +2668,13 @@ def _pick_request_message(rid: str, *, source: str | None = None) -> None:
             f" | {sys.executable} -m agentcap _highlight {{q}}"
         )
     else:
+        ws_arg = (
+            f"--workspace {shlex.quote(str(workspace))} "
+            if workspace is not None else ""
+        )
         preview = (
-            f"{sys.executable} -m agentcap _msg_preview"
-            f" {full_rid} {{2}} 2>/dev/null"
+            f"{sys.executable} -m agentcap _msg_preview {ws_arg}"
+            f"{full_rid} {{2}} 2>/dev/null"
             f" | {sys.executable} -m agentcap _highlight {{q}}"
         )
     _fzf_pick(
@@ -2845,6 +2955,7 @@ def replay_cmd(
         f"  status={status} duration={dt:.2f}s bytes={n_bytes}",
         err=True,
     )
+
 
 
 def main() -> int:

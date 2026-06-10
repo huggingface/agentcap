@@ -150,6 +150,7 @@ def test_run_hf_router_api_key_auto_from_hf_token_env(
     monkeypatch.setattr("agentcap.proxy.serve_in_thread", fake_proxy)
     monkeypatch.setenv("HF_TOKEN", "hf_env_token")
     monkeypatch.setenv("AGENTCAP_WORKSPACE", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
 
     runner = CliRunner()
     result = runner.invoke(
@@ -183,7 +184,7 @@ def test_export_auto_detects_model_from_captures(
     parquet shape, but exercising both keeps the gate honest."""
     capture = tmp_path / "capture"
     capture.mkdir()
-    _write_capture(capture, "rid", "google/gemma-4-E4B-it")
+    _write_capture(capture, "abcdef12", "google/gemma-4-E4B-it")
 
     result = CliRunner().invoke(
         cli, ["export", str(capture), "--push", "me/d", *scan_args],
@@ -212,8 +213,8 @@ def test_export_no_model_in_captures_fails(tmp_path: Path):
     import json
     capture = tmp_path / "capture"
     capture.mkdir()
-    (capture / "rid.request.json").write_text(json.dumps({
-        "request_id": "rid", "captured_at": 1,
+    (capture / "abcdef12.request.json").write_text(json.dumps({
+        "request_id": "abcdef12", "captured_at": 1,
         "body": {"messages": []},
     }))
 
@@ -227,7 +228,7 @@ def test_export_no_model_in_captures_fails(tmp_path: Path):
 def test_export_push_rejects_malformed_dataset_uri(tmp_path: Path):
     capture = tmp_path / "capture"
     capture.mkdir()
-    _write_capture(capture, "rid", "m")
+    _write_capture(capture, "abcdef12", "m")
 
     result = CliRunner().invoke(
         cli, ["export", str(capture), "--push", "just-an-owner"],
@@ -245,7 +246,7 @@ def test_export_resolves_workdir_layout_and_reads_agent_from_run_json(
     workdir = tmp_path / "ws" / "hermes-local-20260512-162345"
     captures = workdir / "captures"
     captures.mkdir(parents=True)
-    _write_capture(captures, "rid", "google/gemma-4-E4B-it")
+    _write_capture(captures, "abcdef12", "google/gemma-4-E4B-it")
     (workdir / "run.json").write_text(json.dumps({"agent": "hermes"}))
 
     result = CliRunner().invoke(
@@ -263,11 +264,12 @@ def test_export_all_walks_workspace_in_one_commit(
     in one git commit."""
     import json
     monkeypatch.setenv("AGENTCAP_WORKSPACE", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
     ws = tmp_path / ".agentcap"
     for run_id in ("hermes-local-20260512-160000", "goose-local-20260512-170000"):
         d = ws / run_id / "captures"
         d.mkdir(parents=True)
-        _write_capture(d, "rid", "m")
+        _write_capture(d, "abcdef12", "m")
         (ws / run_id / "run.json").write_text(json.dumps({
             "agent": run_id.split("-")[0],
         }))
@@ -376,25 +378,27 @@ def _seed_workspace_run_with_meta(
 def test_inspect_resolves_rid_from_workspace(tmp_path: Path, monkeypatch):
     import json as _json
     monkeypatch.setenv("AGENTCAP_WORKSPACE", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
     cap = tmp_path / ".agentcap" / "hermes-local-20260101-000000" / "captures"
     cap.mkdir(parents=True)
     body = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
-    (cap / "rid.request.json").write_text(_json.dumps({
-        "request_id": "rid", "captured_at": 1,
+    (cap / "abcdef12.request.json").write_text(_json.dumps({
+        "request_id": "abcdef12", "captured_at": 1,
         "upstream_url": "http://x", "body": body,
     }))
-    (cap / "rid.response.json").write_text(_json.dumps({
-        "request_id": "rid", "captured_at_resp": 2,
+    (cap / "abcdef12.response.json").write_text(_json.dumps({
+        "request_id": "abcdef12", "captured_at_resp": 2,
         "status_code": 200, "body": {},
     }))
 
-    result = CliRunner().invoke(cli, ["inspect", "rid"])
+    result = CliRunner().invoke(cli, ["inspect", "abcdef12"])
     assert result.exit_code == 0, result.stderr
     assert _json.loads(result.stdout) == body
 
 
 def test_inspect_unknown_rid_errors(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("AGENTCAP_WORKSPACE", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
     (tmp_path / ".agentcap").mkdir()
     result = CliRunner().invoke(cli, ["inspect", "ghost"])
     assert result.exit_code != 0
@@ -406,10 +410,14 @@ def test_inspect_run_id_errors_without_fzf(tmp_path: Path, monkeypatch):
     the command errors out with a clear message instead of dumping a
     half-usable table."""
     monkeypatch.setenv("AGENTCAP_WORKSPACE", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("PATH", "")
-    _seed_workspace_run(
+    # _seed_workspace_run_with_meta writes the run.json the classifier
+    # needs to recognise the dashed name as a run-id under cwd's
+    # ``.agentcap`` (otherwise it falls through to other rules).
+    _seed_workspace_run_with_meta(
         tmp_path, "hermes-local-20260101-000000",
-        [("aaa", "first prompt"), ("bbb", "second prompt")],
+        agent="hermes", model="m",
     )
 
     result = CliRunner().invoke(cli, ["inspect", "hermes-local-20260101-000000"])
@@ -420,6 +428,7 @@ def test_inspect_run_id_errors_without_fzf(tmp_path: Path, monkeypatch):
 def test_inspect_no_arg_errors_without_fzf(tmp_path: Path, monkeypatch):
     """``inspect`` with no arg also needs the run picker; same error."""
     monkeypatch.setenv("AGENTCAP_WORKSPACE", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("PATH", "")
     _seed_workspace_run_with_meta(
         tmp_path, "hermes-local-20260101-000000",
@@ -437,6 +446,7 @@ def test_replay_no_request_id_errors_without_fzf(tmp_path: Path, monkeypatch):
     instead of crashing with ``FileNotFoundError`` from
     ``subprocess.run('fzf', ...)``."""
     monkeypatch.setenv("AGENTCAP_WORKSPACE", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("PATH", "")
     _seed_workspace_run_with_meta(
         tmp_path, "hermes-local-20260101-000000",
@@ -450,6 +460,7 @@ def test_replay_no_request_id_errors_without_fzf(tmp_path: Path, monkeypatch):
 
 def test_inspect_no_arg_empty_workspace_errors(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("AGENTCAP_WORKSPACE", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
     (tmp_path / ".agentcap").mkdir()
     result = CliRunner().invoke(cli, ["inspect"])
     assert result.exit_code != 0
@@ -467,11 +478,12 @@ def test_replay_posts_body_to_target(tmp_path: Path, monkeypatch):
     monkeypatch.delenv("AGENTCAP_API_KEY", raising=False)
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.setenv("AGENTCAP_WORKSPACE", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
     cap = tmp_path / ".agentcap" / "hermes-local-20260101-000000" / "captures"
     cap.mkdir(parents=True)
     body = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
-    (cap / "rid.request.json").write_text(_json.dumps({
-        "request_id": "rid", "captured_at": 1,
+    (cap / "abcdef12.request.json").write_text(_json.dumps({
+        "request_id": "abcdef12", "captured_at": 1,
         "upstream_url": "http://x", "body": body,
     }))
 
@@ -494,7 +506,7 @@ def test_replay_posts_body_to_target(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(httpx, "post", _fake_post)
 
     result = CliRunner().invoke(
-        cli, ["replay", "rid", "--target", "http://server:9"],
+        cli, ["replay", "abcdef12", "--target", "http://server:9"],
     )
     assert result.exit_code == 0, result.stderr
     assert seen["url"] == "http://server:9/v1/chat/completions"
@@ -506,7 +518,7 @@ def test_replay_posts_body_to_target(tmp_path: Path, monkeypatch):
 
     # --raw surfaces the pretty JSON dump instead.
     result = CliRunner().invoke(
-        cli, ["replay", "rid", "--target", "http://server:9", "--raw"],
+        cli, ["replay", "abcdef12", "--target", "http://server:9", "--raw"],
     )
     assert result.exit_code == 0, result.stderr
     assert '"choices"' in result.stdout
@@ -523,13 +535,14 @@ def test_replay_forwards_hf_token_to_router_target(tmp_path: Path, monkeypatch):
     # actually exercising the HF_TOKEN auto-resolve.
     monkeypatch.delenv("AGENTCAP_API_KEY", raising=False)
     monkeypatch.setenv("AGENTCAP_WORKSPACE", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HF_TOKEN", "hf_xyz")
     cap = tmp_path / ".agentcap" / "pi-hf-router-20260101-000000" / "captures"
     cap.mkdir(parents=True)
     body = {"model": "zai-org/GLM-4.6",
             "messages": [{"role": "user", "content": "hi"}]}
-    (cap / "rid.request.json").write_text(_json.dumps({
-        "request_id": "rid", "captured_at": 1,
+    (cap / "abcdef12.request.json").write_text(_json.dumps({
+        "request_id": "abcdef12", "captured_at": 1,
         "upstream_url": "https://router.huggingface.co", "body": body,
     }))
 
@@ -549,7 +562,7 @@ def test_replay_forwards_hf_token_to_router_target(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(httpx, "post", _fake_post)
 
     result = CliRunner().invoke(
-        cli, ["replay", "rid", "--target", "https://router.huggingface.co"],
+        cli, ["replay", "abcdef12", "--target", "https://router.huggingface.co"],
     )
     assert result.exit_code == 0, result.stderr
     assert seen["headers"] == {"Authorization": "Bearer hf_xyz"}
@@ -561,12 +574,13 @@ def test_replay_explicit_api_key_overrides_env(tmp_path: Path, monkeypatch):
     import json as _json
 
     monkeypatch.setenv("AGENTCAP_WORKSPACE", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HF_TOKEN", "hf_should_be_ignored")
     cap = tmp_path / ".agentcap" / "hermes-local-20260101-000000" / "captures"
     cap.mkdir(parents=True)
     body = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
-    (cap / "rid.request.json").write_text(_json.dumps({
-        "request_id": "rid", "captured_at": 1,
+    (cap / "abcdef12.request.json").write_text(_json.dumps({
+        "request_id": "abcdef12", "captured_at": 1,
         "upstream_url": "http://x", "body": body,
     }))
 
@@ -590,7 +604,7 @@ def test_replay_explicit_api_key_overrides_env(tmp_path: Path, monkeypatch):
     # the router.
     result = CliRunner().invoke(
         cli,
-        ["replay", "rid", "--target", "http://server:9",
+        ["replay", "abcdef12", "--target", "http://server:9",
          "--api-key", "explicit_key"],
     )
     assert result.exit_code == 0, result.stderr
@@ -607,14 +621,15 @@ def test_replay_forwards_headers_on_streaming_path(tmp_path: Path, monkeypatch):
     monkeypatch.delenv("AGENTCAP_API_KEY", raising=False)
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.setenv("AGENTCAP_WORKSPACE", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
     cap = tmp_path / ".agentcap" / "hermes-local-20260101-000000" / "captures"
     cap.mkdir(parents=True)
     body = {
         "model": "m", "stream": True,
         "messages": [{"role": "user", "content": "hi"}],
     }
-    (cap / "rid.request.json").write_text(_json.dumps({
-        "request_id": "rid", "captured_at": 1,
+    (cap / "abcdef12.request.json").write_text(_json.dumps({
+        "request_id": "abcdef12", "captured_at": 1,
         "upstream_url": "http://x", "body": body,
     }))
 
@@ -643,7 +658,7 @@ def test_replay_forwards_headers_on_streaming_path(tmp_path: Path, monkeypatch):
 
     result = CliRunner().invoke(
         cli,
-        ["replay", "rid", "--target", "http://server:9",
+        ["replay", "abcdef12", "--target", "http://server:9",
          "--api-key", "stream_key", "--raw"],
     )
     assert result.exit_code == 0, result.stderr

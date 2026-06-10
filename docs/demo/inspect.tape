@@ -29,7 +29,7 @@ Enter
 Show
 
 # Open the three-level picker chain over the HF dataset.
-Type "agentcap inspect --source dacorvo/hf-hub-session-captures"
+Type "agentcap inspect dacorvo/hf-hub-session-captures"
 Enter
 Sleep 3s
 
