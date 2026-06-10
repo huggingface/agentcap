@@ -281,7 +281,18 @@ def export_local(
         table = pq.read_table(str(output))
         kv = dict(table.schema.metadata or {})
         kv[b"tasks"] = json.dumps(tasks_list, ensure_ascii=False).encode()
-        pq.write_table(table.replace_schema_metadata(kv), str(output))
+        # Write the rewritten file to a sibling tempfile, then
+        # ``Path.replace`` it atop the original — POSIX-atomic, so a
+        # kill mid-rewrite leaves the original parquet intact instead
+        # of corrupting it.
+        tmp = output.with_suffix(output.suffix + ".rewrite")
+        try:
+            pq.write_table(table.replace_schema_metadata(kv), str(tmp))
+            tmp.replace(output)
+        except Exception:
+            if tmp.exists():
+                tmp.unlink()
+            raise
 
     return n_written
 
