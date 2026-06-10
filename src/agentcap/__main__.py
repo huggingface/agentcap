@@ -1358,8 +1358,11 @@ def _classify_target(target: str | None) -> tuple[str, object]:
         raise click.UsageError(f"invalid hf URI: {target!r}")
 
     # Local directory → workspace (accept either parent or .agentcap).
-    p = Path(target)
-    if p.is_dir():
+    # Normalize first so ``.`` / ``<path>/.agentcap/.`` / trailing-slash
+    # forms classify correctly (``Path('.').name`` is ``''``, not
+    # ``'.agentcap'``).
+    if Path(target).is_dir():
+        p = Path(os.path.normpath(target)).absolute()
         ws = p if p.name == _WORKSPACE_DIR else p / _WORKSPACE_DIR
         return "workspace", ws
 
