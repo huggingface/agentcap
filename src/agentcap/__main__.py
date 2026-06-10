@@ -1390,10 +1390,7 @@ def _classify_target(target: str | None) -> tuple[str, object]:
 
 @functools.lru_cache(maxsize=1)
 def _hf_filesystem():
-    """Shared ``HfFileSystem`` instance. ``token=get_token()`` is the
-    fix for two compounding issues against parallel footer reads:
-    anonymous traffic hits per-IP rate limits, and a fresh fs per
-    worker forces a new TLS handshake instead of reusing the pool."""
+    """Authenticated, process-wide ``HfFileSystem``."""
     from huggingface_hub import HfFileSystem, get_token
     return HfFileSystem(token=get_token())
 
