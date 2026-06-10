@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import os
 import sys
 from collections.abc import Sequence
@@ -1387,6 +1388,16 @@ def _classify_target(target: str | None) -> tuple[str, object]:
     )
 
 
+@functools.lru_cache(maxsize=1)
+def _hf_filesystem():
+    """Shared ``HfFileSystem`` instance. ``token=get_token()`` is the
+    fix for two compounding issues against parallel footer reads:
+    anonymous traffic hits per-IP rate limits, and a fresh fs per
+    worker forces a new TLS handshake instead of reusing the pool."""
+    from huggingface_hub import HfFileSystem, get_token
+    return HfFileSystem(token=get_token())
+
+
 def _fetch_hf_parquet_meta(
     repo_id: str, path: str, *,
     revision: str | None = None,
@@ -1398,7 +1409,7 @@ def _fetch_hf_parquet_meta(
     distinguish a partial write from "no task_id schema")."""
     import json as _json
     import pyarrow.parquet as pq
-    from huggingface_hub import HfFileSystem, try_to_load_from_cache
+    from huggingface_hub import try_to_load_from_cache
     out: dict = {"agent": None, "model": None, "num_rows": 0}
 
     opener = None
@@ -1410,7 +1421,7 @@ def _fetch_hf_parquet_meta(
         if isinstance(local, str) and Path(local).is_file():
             opener = open(local, "rb")
     if opener is None:
-        opener = HfFileSystem().open(f"datasets/{repo_id}/{path}", "rb")
+        opener = _hf_filesystem().open(f"datasets/{repo_id}/{path}", "rb")
 
     with opener as fh:
         pf = pq.ParquetFile(fh)
@@ -1775,19 +1786,6 @@ def _pick_hf_dataset_parquet(
     import subprocess
     import sys
     from huggingface_hub import hf_hub_download
-
-    # Sync KV-only fetch for row 0 so the picker opens with at
-    # least its first label populated.
-    row0_target = _hf_meta_tempfile(tempdir, rows[0]["path"])
-    if not row0_target.is_file():
-        try:
-            kv_meta = _fetch_hf_parquet_meta(
-                repo_id, rows[0]["path"],
-                revision=revision, kv_only=True,
-            )
-            _write_meta_atomic(row0_target, kv_meta)
-        except Exception:  # noqa: BLE001
-            pass
 
     paths_file = tempdir / "paths.json"
     paths_file.write_text(_json.dumps(
