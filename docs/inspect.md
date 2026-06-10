@@ -89,9 +89,10 @@ Picked parquets are downloaded once into the `huggingface_hub` cache
 (`~/.cache/huggingface/hub/`) — subsequent picks of the same file are
 instant.
 
-Level-1 metadata (model, agent, task list) is read from each parquet's
-schema KV via parallel footer reads over the HF filesystem; no full
-download is needed to populate the picker.
+Level-1 metadata (model, agent, task list) lives in each parquet's
+footer — `agentcap export` stamps it there at write time, and the
+picker reads it back with parallel range requests against the HF
+filesystem, no full download needed.
 
 ## Piping the picked rid
 
