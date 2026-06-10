@@ -265,14 +265,8 @@ def export_local(
         if writer is not None:
             writer.close()
 
-    # Post-process: stamp the accumulated task list into the parquet's
-    # schema KV metadata. The streaming writer's schema is frozen at
-    # open time, so we read the table back, attach ``tasks``, and
-    # rewrite. ``agentcap inspect`` reads this slice from the footer
-    # so the picker can show TASKS + per-task prompts without ever
-    # reading row-group bodies. Skip the rewrite if no rows had a
-    # ``task_id`` (old capture format → empty buffer; existing
-    # ``agent`` / ``model`` KV stays untouched).
+    # The streaming writer freezes the schema at open, so we can't
+    # stamp ``tasks`` until we've consumed every row.
     if tasks_buf:
         tasks_list = [
             {"id": tid, "turns": d["turns"], "prompt": d["prompt"]}
@@ -281,10 +275,8 @@ def export_local(
         table = pq.read_table(str(output))
         kv = dict(table.schema.metadata or {})
         kv[b"tasks"] = json.dumps(tasks_list, ensure_ascii=False).encode()
-        # Write the rewritten file to a sibling tempfile, then
-        # ``Path.replace`` it atop the original — POSIX-atomic, so a
-        # kill mid-rewrite leaves the original parquet intact instead
-        # of corrupting it.
+        # ``Path.replace`` is POSIX-atomic — a kill mid-rewrite leaves
+        # the original intact.
         tmp = output.with_suffix(output.suffix + ".rewrite")
         try:
             pq.write_table(table.replace_schema_metadata(kv), str(tmp))
