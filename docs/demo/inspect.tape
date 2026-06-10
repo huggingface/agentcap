@@ -1,10 +1,6 @@
 # Demo: agentcap inspect drilling into an HF dataset of captures.
 #
-# Uses dacorvo/hf-hub-session-captures as the source. The HF metadata
-# cache (~/.cache/agentcap/hf-list/) makes the first level-1 open
-# slow (~10s for ~20 parquets in parallel); pre-warm with one
-# interactive run before recording so the GIF starts at the picker
-# instead of waiting on a cold prefetch.
+# Uses dacorvo/hf-hub-session-captures as the source.
 #
 # Regenerate the GIF from the repo root:
 #   vhs docs/demo/inspect.tape
@@ -31,7 +27,7 @@ Show
 # Open the three-level picker chain over the HF dataset.
 Type "agentcap inspect dacorvo/hf-hub-session-captures"
 Enter
-Sleep 3s
+Sleep 8s
 
 # Level 1 (parquet picker): narrow to hermes' run, look at the
 # task list in the preview pane, then pick it.

@@ -89,17 +89,10 @@ Picked parquets are downloaded once into the `huggingface_hub` cache
 (`~/.cache/huggingface/hub/`) — subsequent picks of the same file are
 instant.
 
-### Caching
-
-Level-1 metadata (model, row count, task list) is also cached on disk
-under `~/.cache/agentcap/hf-list/<repo>/<file>.json`, keyed by the
-parquet's git `blob_id`. Net effect:
-
-- First open of a fresh dataset: ~10s for ~20 parquets (parallel
-  prefetch, fanout × 8).
-- Subsequent opens + every fzf hover: instant (cache hit).
-- If a file at the same path gets re-uploaded with different content,
-  the blob_id changes and the cache entry is automatically refetched.
+Level-1 metadata (model, agent, task list) lives in each parquet's
+footer — `agentcap export` stamps it there at write time, and the
+picker reads it back with parallel range requests against the HF
+filesystem, no full download needed.
 
 ## Piping the picked rid
 
