@@ -658,68 +658,6 @@ def _scan_run_dirs(
     return total_verified
 
 
-@cli.command("scan")
-@click.argument("targets", nargs=-1)
-@click.option(
-    "--all", "all_runs", is_flag=True,
-    help="Scan every run in the workspace.",
-)
-@click.option(
-    "--no-verify", "no_verify", is_flag=True,
-    help="Skip the provider-API verification step. Faster + offline-"
-    "safe, but every hit lands as unverified so the gate never fires.",
-)
-@click.option(
-    "--rescan", is_flag=True,
-    help="Ignore any cached ``<run_dir>/scan.json`` and re-run trufflehog.",
-)
-def scan_cmd(
-    targets: tuple[str, ...], all_runs: bool, no_verify: bool, rescan: bool,
-) -> None:
-    """Run trufflehog over a run's captures+traces. Exits non-zero on
-    any verified hit; unverified hits are listed but don't change the
-    exit code (false-positive rate is real). Verification is on by
-    default — disable with --no-verify. Results are persisted to
-    ``<run_dir>/scan.json`` and reused on subsequent runs unless
-    --rescan is passed."""
-    workspace = _workspace_root()
-    if all_runs and targets:
-        raise click.UsageError("pass --all OR positional run-ids, not both")
-    if not all_runs and not targets:
-        raise click.UsageError("specify one or more run-ids/paths, or pass --all")
-
-    if all_runs:
-        if not workspace.is_dir():
-            raise click.UsageError(_no_workspace_msg(workspace))
-        run_dirs = [
-            d for d in sorted(workspace.iterdir())
-            if d.is_dir() and (d / "run.json").is_file()
-        ]
-        if not run_dirs:
-            raise click.UsageError(f"no runs in {workspace}")
-    else:
-        run_dirs = []
-        for t in targets:
-            cand = workspace / t
-            if (cand / "run.json").is_file():
-                run_dirs.append(cand)
-                continue
-            p = Path(t)
-            if (p / "run.json").is_file():
-                run_dirs.append(p)
-                continue
-            raise click.UsageError(f"can't resolve {t!r} to a run dir")
-
-    n_verified = _scan_run_dirs(
-        run_dirs, no_verification=no_verify, rescan=rescan,
-    )
-    if n_verified > 0:
-        raise click.ClickException(
-            f"scan found {n_verified} verified secret(s); see output above"
-        )
-    click.echo("scan: no verified secrets found.", err=True)
-
-
 @cli.command("ls")
 @click.argument(
     "workspace",
