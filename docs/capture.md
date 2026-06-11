@@ -113,5 +113,4 @@ For known-good `(backend, model, agent)` tuples see
 
 - `agentcap ls` — list runs in the workspace.
 - [docs/inspect.md](inspect.md) — browse captured requests.
-- [docs/replay.md](replay.md) — re-issue a captured request elsewhere.
 - [docs/export.md](export.md) — publish to a HF dataset.

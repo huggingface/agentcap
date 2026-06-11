@@ -141,19 +141,7 @@ explicitly first.
     avoids pinning consumers to our exact normalisation of the
     template-input shape (see decision 3).
 
-14. **Replay applies no agentcap-side normalisation.** `agentcap
-    replay` re-issues a captured request with no flags that mutate
-    the body. The request is persisted as parsed JSON (so the
-    original byte sequence — whitespace, key ordering — isn't
-    recoverable, only the JSON object); streamed SSE response bytes
-    are kept verbatim. Cross-server strictness asymmetries (e.g.
-    captures from a lenient upstream sent at a strict upstream
-    that rejects explicit `null`s) are the consumer's normalisation
-    problem, not agentcap's. Multi-turn replay stays out of scope
-    because conversation state diverges as soon as the new model
-    responds differently.
-
-15. **Inference backend must deliver tool calls in `message.content`,
+14. **Inference backend must deliver tool calls in `message.content`,
     not `message.reasoning_content`.** Hermes (and presumably other
     agents) parses tool calls from the OpenAI-spec `content` field.
     Reasoning-by-default models (Qwen 3.5+, etc.) on llama.cpp put
