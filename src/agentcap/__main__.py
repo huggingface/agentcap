@@ -836,7 +836,7 @@ def _resolve_request_id(
     ``(full_rid, body, response_record, request_record, capture_dir)``.
 
     - If ``source`` is given, looks the rid up there via
-      ``replay.load_request`` (any agentcap-supported source: dir,
+      ``captures.load_request`` (any agentcap-supported source: dir,
       parquet, hf://) — exact match only. Response and request
       records and ``capture_dir`` are unavailable in that path
       (just the body).
@@ -847,11 +847,11 @@ def _resolve_request_id(
       record (which carries ``task_id``, ``turn``, ``captured_at``,
       ``upstream_url``), and the capture dir the rid was found in.
     """
-    from . import replay
+    from . import captures
 
     if source is not None:
         try:
-            return rid, replay.load_request(source, rid), None, None, None
+            return rid, captures.load_request(source, rid), None, None, None
         except KeyError as exc:
             raise click.UsageError(str(exc))
         except (ValueError, FileNotFoundError) as exc:
@@ -860,8 +860,8 @@ def _resolve_request_id(
     if workspace is None:
         workspace = _workspace_root()
     try:
-        found = replay.resolve_workspace_rid(workspace, rid)
-    except replay.AmbiguousRequestId as exc:
+        found = captures.resolve_workspace_rid(workspace, rid)
+    except captures.AmbiguousRequestId as exc:
         raise click.UsageError(str(exc))
     if found is None:
         raise click.UsageError(
@@ -2630,7 +2630,7 @@ def _pick_request_message(
     import shlex
     import sys
     # ``_resolve_request_id`` returns ``resp_rec=None`` for any
-    # ``source`` (it calls ``replay.load_request`` which only loads the
+    # ``source`` (it calls ``captures.load_request`` which only loads the
     # request body). For parquet sources, read the response back via
     # ``_load_parquet_body`` so the message picker can show the model
     # reply rows synthesised by ``_request_messages_for_view``.
