@@ -1,4 +1,4 @@
-"""Replay primitive: resolve a captured request by id, hand back the body.
+"""Resolve a captured request by id and hand back the body.
 
 No agentcap-side normalisation or mutation of the JSON object — captures
 persist the request as parsed JSON, so the original byte sequence

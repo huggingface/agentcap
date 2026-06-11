@@ -1,4 +1,4 @@
-"""Unit tests for ``agentcap.replay``."""
+"""Unit tests for ``agentcap.captures``."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from agentcap.replay import (
+from agentcap.captures import (
     load_request,
     load_requests,
     resolve_workspace_rid,
@@ -55,7 +55,7 @@ def test_load_request_missing_id_raises(tmp_path: Path) -> None:
 
 
 def test_load_request_from_parquet(tmp_path: Path) -> None:
-    """Round-trip a body through ``export_local`` and back via replay."""
+    """Round-trip a body through ``export_local`` and back via the loader."""
     from agentcap.export import export_local
 
     cap = tmp_path / "captures"
@@ -109,7 +109,7 @@ def test_resolve_workspace_rid_accepts_prefix(tmp_path: Path) -> None:
 
 
 def test_resolve_workspace_rid_ambiguous_prefix_raises(tmp_path: Path) -> None:
-    from agentcap.replay import AmbiguousRequestId
+    from agentcap.captures import AmbiguousRequestId
 
     ws = tmp_path / ".agentcap"
     cap = ws / "hermes-local-20260101-000000" / "captures"

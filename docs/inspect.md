@@ -97,11 +97,8 @@ filesystem, no full download needed.
 ## Piping the picked rid
 
 `--rid` makes the picker print the selected request id and exit
-instead of opening it — useful for chaining into `agentcap replay`.
-
-```bash
-agentcap replay $(agentcap inspect --rid) --target http://127.0.0.1:8000
-```
+instead of opening it — handy for capturing a selection into a script
+(e.g. `rid=$(agentcap inspect --rid)`).
 
 ## Looking up a specific rid
 

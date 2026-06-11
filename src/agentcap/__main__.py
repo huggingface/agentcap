@@ -92,7 +92,7 @@ def _resolve_api_key(
 
 def _complete_run_ids(ctx, param, incomplete):
     """Shell completion for workspace run-ids — always against cwd's
-    ``.agentcap/`` (inspect/replay don't consult ``$AGENTCAP_WORKSPACE``)."""
+    ``.agentcap/`` (inspect doesn't consult ``$AGENTCAP_WORKSPACE``)."""
     root = Path.cwd() / _WORKSPACE_DIR
     if not root.is_dir():
         return []
@@ -836,22 +836,22 @@ def _resolve_request_id(
     ``(full_rid, body, response_record, request_record, capture_dir)``.
 
     - If ``source`` is given, looks the rid up there via
-      ``replay.load_request`` (any agentcap-supported source: dir,
+      ``captures.load_request`` (any agentcap-supported source: dir,
       parquet, hf://) — exact match only. Response and request
       records and ``capture_dir`` are unavailable in that path
       (just the body).
     - Otherwise scans ``workspace`` (defaults to ``_workspace_root()``
-      for legacy ``run`` / ``export`` callers; ``inspect`` / ``replay``
-      pass cwd explicitly), accepting a prefix (git-style) and
+      for legacy ``run`` / ``export`` callers; ``inspect``
+      passes cwd explicitly), accepting a prefix (git-style) and
       returning the body, the paired response, the full request
       record (which carries ``task_id``, ``turn``, ``captured_at``,
       ``upstream_url``), and the capture dir the rid was found in.
     """
-    from . import replay
+    from . import captures
 
     if source is not None:
         try:
-            return rid, replay.load_request(source, rid), None, None, None
+            return rid, captures.load_request(source, rid), None, None, None
         except KeyError as exc:
             raise click.UsageError(str(exc))
         except (ValueError, FileNotFoundError) as exc:
@@ -860,8 +860,8 @@ def _resolve_request_id(
     if workspace is None:
         workspace = _workspace_root()
     try:
-        found = replay.resolve_workspace_rid(workspace, rid)
-    except replay.AmbiguousRequestId as exc:
+        found = captures.resolve_workspace_rid(workspace, rid)
+    except captures.AmbiguousRequestId as exc:
         raise click.UsageError(str(exc))
     if found is None:
         raise click.UsageError(
@@ -893,7 +893,7 @@ def _enumerate_workspace_requests(
     then chronological within each run. Each row has ``run_id``,
     ``rid``, ``captured_at``, ``status``, and ``preview`` (last user
     message, truncated). ``workspace`` defaults to ``_workspace_root()``
-    so legacy callers don't break; ``inspect`` / ``replay`` pass it
+    so legacy callers don't break; ``inspect`` passes it
     explicitly from the resolved TARGET."""
     import json as _json
 
@@ -1186,7 +1186,7 @@ def _pick_workspace_run(*, workspace: Path | None = None) -> str | None:
     selected run-id, or ``None`` if cancelled. fzf is a hard
     requirement of ``inspect``; the gate lives at the top of
     ``inspect_cmd``. ``workspace`` defaults to ``_workspace_root()``;
-    ``inspect`` / ``replay`` pass cwd or the resolved dir explicitly."""
+    ``inspect`` passes cwd or the resolved dir explicitly."""
     import json as _json
     import sys
 
@@ -1267,7 +1267,7 @@ def _pick_workspace_request(
     whose rid starts with that prefix when the picker opens — used
     when re-entering the picker from the message sub-picker so the
     user lands back where they were. ``workspace`` defaults to
-    ``_workspace_root()``; ``inspect`` / ``replay`` pass it
+    ``_workspace_root()``; ``inspect`` passes it
     explicitly from the resolved TARGET."""
     import shlex
     import sys
@@ -1327,7 +1327,7 @@ def _pick_workspace_request(
 
 
 def _classify_target(target: str | None) -> tuple[str, object]:
-    """Classify the ``TARGET`` positional of ``inspect`` / ``replay``.
+    """Classify the ``TARGET`` positional of ``inspect``.
 
     Returns ``(kind, payload)``:
       - ``("workspace", Path)`` — local ``.agentcap`` dir to browse.
@@ -1894,7 +1894,7 @@ def _pick_parquet_request(parquet_path: Path) -> str | None:
     "print_rid_only",
     is_flag=True,
     help="When picking interactively, print only the selected request-id "
-    "(useful for piping into `agentcap replay`).",
+    "(so it can be captured or piped into another command).",
 )
 def inspect_cmd(target: str | None, print_rid_only: bool) -> None:
     """Inspect captured requests.
@@ -2625,12 +2625,12 @@ def _pick_request_message(
     preview pipeline shells out to a different hidden command in each
     case so the picker doesn't need to know how the body was loaded.
     ``workspace`` overrides the default workspace lookup for
-    workspace-sourced rids (inspect/replay pass cwd or the resolved
+    workspace-sourced rids (inspect passes cwd or the resolved
     dir explicitly)."""
     import shlex
     import sys
     # ``_resolve_request_id`` returns ``resp_rec=None`` for any
-    # ``source`` (it calls ``replay.load_request`` which only loads the
+    # ``source`` (it calls ``captures.load_request`` which only loads the
     # request body). For parquet sources, read the response back via
     # ``_load_parquet_body`` so the message picker can show the model
     # reply rows synthesised by ``_request_messages_for_view``.
@@ -2735,222 +2735,6 @@ def _highlight_cmd(query: str) -> None:
         sys.stdout.write(
             pat.sub(lambda m: f"\033[1;31m{m.group(0)}\033[0m", line)
         )
-
-
-def _render_sse_stream(chunks) -> int:
-    """Parse an OpenAI-compatible SSE stream and emit only the generated
-    content (and tool-call name/arguments) to stdout. Returns the total
-    number of raw bytes consumed so the caller can report it."""
-    import json as _json
-
-    buf = ""
-    total = 0
-    tool_open = False
-    for chunk in chunks:
-        total += len(chunk)
-        buf += chunk.decode("utf-8", errors="replace")
-        while True:
-            sep = buf.find("\n\n")
-            if sep < 0:
-                break
-            event, buf = buf[: sep], buf[sep + 2:]
-            for line in event.split("\n"):
-                if not line.startswith("data:"):
-                    continue
-                payload = line[5:].strip()
-                if not payload or payload == "[DONE]":
-                    continue
-                try:
-                    obj = _json.loads(payload)
-                except _json.JSONDecodeError:
-                    continue
-                delta = (obj.get("choices") or [{}])[0].get("delta") or {}
-                content = delta.get("content")
-                if content:
-                    sys.stdout.write(content)
-                    sys.stdout.flush()
-                for tc in delta.get("tool_calls") or []:
-                    fn = tc.get("function") or {}
-                    name = fn.get("name")
-                    if name:
-                        prefix = ")\n" if tool_open else ""
-                        sys.stdout.write(f"{prefix}[tool:{name}](")
-                        tool_open = True
-                    args = fn.get("arguments")
-                    if args:
-                        sys.stdout.write(args)
-                        sys.stdout.flush()
-    if tool_open:
-        sys.stdout.write(")\n")
-    elif not buf.endswith("\n"):
-        sys.stdout.write("\n")
-    sys.stdout.flush()
-    return total
-
-
-def _render_buffered_completion(obj: dict) -> None:
-    """Render a non-streamed /v1/chat/completions response: just the
-    message text, then a compact tool-call summary if any."""
-    msg = ((obj.get("choices") or [{}])[0].get("message")) or {}
-    content = msg.get("content") or ""
-    if content:
-        sys.stdout.write(content)
-        if not content.endswith("\n"):
-            sys.stdout.write("\n")
-    for tc in msg.get("tool_calls") or []:
-        fn = tc.get("function") or {}
-        sys.stdout.write(f"[tool:{fn.get('name', '?')}]({fn.get('arguments', '')})\n")
-    sys.stdout.flush()
-
-
-@cli.command("replay")
-@click.argument("request_id", required=False, shell_complete=_complete_request_ids)
-@click.option(
-    "--target",
-    required=True,
-    help="Base URL of an OpenAI-compatible server (e.g. "
-    "http://127.0.0.1:8000). The captured JSON object is POSTed to "
-    "<target>/v1/chat/completions with no agentcap-side "
-    "normalisation (the original wire whitespace / key ordering is "
-    "not preserved by capture, only the JSON object is).",
-)
-@click.option(
-    "--source",
-    default=None,
-    help="Where to look up the request (see ``agentcap inspect``). "
-    "Defaults to scanning the local workspace.",
-)
-@click.option(
-    "--timeout",
-    type=float,
-    default=600.0,
-    show_default=True,
-    help="Per-request HTTP timeout in seconds.",
-)
-@click.option(
-    "--raw", "raw_output", is_flag=True,
-    help="Dump the raw response bytes (SSE for streamed, JSON for "
-    "buffered) instead of rendering just the generated text. Use "
-    "when debugging the wire shape.",
-)
-@click.option(
-    "--api-key",
-    "api_key",
-    envvar="AGENTCAP_API_KEY",
-    default=None,
-    help="Bearer token forwarded to ``--target``. Required for "
-    "authenticated upstreams like the HF Router; when ``--target`` "
-    "points at the router we also auto-try ``HF_TOKEN`` and "
-    "``~/.cache/huggingface/token`` (mirrors ``agentcap run``).",
-)
-def replay_cmd(
-    request_id: str | None, target: str, source: str | None,
-    timeout: float, raw_output: bool, api_key: str | None,
-) -> None:
-    """Re-issue one captured request to an OpenAI-compatible endpoint.
-
-    Without a request-id, opens the same fzf picker as ``agentcap inspect``
-    and replays whatever you select. Single-turn only — multi-turn replay
-    diverges as soon as the new model responds differently. The captured
-    JSON object is sent without agentcap-side normalisation (captures
-    store parsed JSON, so the original byte sequence isn't preserved).
-    Streams the rendered generation (assistant text + ``[tool:NAME](args)``
-    markers) to stdout; pass ``--raw`` to dump the SSE / JSON response
-    bytes from the target instead. Status and timing go to stderr.
-    """
-    import json as _json
-    import time
-
-    import httpx
-
-    if request_id is None:
-        if source is not None:
-            raise click.UsageError(
-                "request-id is required when --source points outside the workspace"
-            )
-        run = _pick_workspace_run()
-        if run is None:
-            return
-        picked = _pick_workspace_request(run)
-        if picked is None:
-            return  # cancelled
-        request_id = picked
-    full_rid, body, _, _, _ = _resolve_request_id(request_id, source)
-    url = target.rstrip("/") + "/v1/chat/completions"
-    is_stream = bool(body.get("stream"))
-    # Resolve auth the same way ``agentcap run`` does: explicit
-    # ``--api-key`` / ``AGENTCAP_API_KEY`` wins, otherwise auto-pick
-    # up ``HF_TOKEN`` / ~/.cache/huggingface/token when ``--target``
-    # looks like the HF Router. Without this, replaying a captured
-    # request against the router returned 401 every time.
-    api_key, api_key_source = _resolve_api_key(
-        upstream=target, explicit_api_key=api_key,
-    )
-    headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
-    if api_key_source:
-        click.echo(
-            f"  [auth] token source={api_key_source}",
-            err=True,
-        )
-    # Rough input size — chars/4 is a coarse token estimate but it sets
-    # expectations: 15k tokens means "wait a minute," not "something's wrong".
-    msgs_chars = sum(
-        len(_json.dumps(m, ensure_ascii=False))
-        for m in (body.get("messages") or [])
-    )
-    click.echo(
-        f"  rid={full_rid} POST {url} "
-        f"({'streaming' if is_stream else 'buffered'}, "
-        f"messages={len(body.get('messages') or [])}, "
-        f"tools={len(body.get('tools') or [])}, "
-        f"~{msgs_chars // 4} input tokens)…",
-        err=True,
-    )
-    t0 = time.monotonic()
-    n_bytes = 0
-    status: int | None = None
-    try:
-        if is_stream:
-            # Stream chunks to stdout as they arrive so a long generation
-            # gives immediate feedback instead of a wall of silence.
-            with httpx.stream(
-                "POST", url, json=body, timeout=timeout, headers=headers,
-            ) as resp:
-                status = resp.status_code
-                click.echo(
-                    f"  ← headers status={status} content-type="
-                    f"{resp.headers.get('content-type', '?')}",
-                    err=True,
-                )
-                if raw_output or status != 200:
-                    # Errors come back as a single JSON object, not SSE.
-                    # Always dump them raw so the user sees the message.
-                    for chunk in resp.iter_raw():
-                        sys.stdout.buffer.write(chunk)
-                        sys.stdout.buffer.flush()
-                        n_bytes += len(chunk)
-                else:
-                    n_bytes = _render_sse_stream(resp.iter_raw())
-        else:
-            resp = httpx.post(url, json=body, timeout=timeout, headers=headers)
-            status = resp.status_code
-            n_bytes = len(resp.content)
-            if raw_output or status != 200:
-                try:
-                    click.echo(_json.dumps(resp.json(), indent=2, ensure_ascii=False))
-                except ValueError:
-                    sys.stdout.buffer.write(resp.content)
-                    sys.stdout.buffer.write(b"\n")
-            else:
-                _render_buffered_completion(resp.json())
-    except httpx.HTTPError as exc:
-        raise click.ClickException(f"replay failed: {exc}")
-    dt = time.monotonic() - t0
-    click.echo(
-        f"  status={status} duration={dt:.2f}s bytes={n_bytes}",
-        err=True,
-    )
-
 
 
 def main() -> int:

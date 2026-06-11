@@ -6,13 +6,13 @@ An end-to-end harness for running real coding agents at scale across
 the agent through a corpus of prompts, captures every chat-completion
 request/response from the wire (request bodies as parsed JSON;
 streamed responses as raw SSE bytes), and pushes the result to the
-Hub — so consumers can replay, render, or analyse what the agent
+Hub — so consumers can render, analyse, or re-issue what the agent
 actually sent and got back, without reconstructing it from a log.
 
 The pipeline:
 
 ```
-  corpus  ──►  sandboxed agent run  ──►  capture  ──►  export  ──►  publish  ──►  inspect / replay
+  corpus  ──►  sandboxed agent run  ──►  capture  ──►  export  ──►  publish  ──►  inspect
 ```
 
 Repeat for each `(agent, model)` you want compared — the corpus
@@ -28,7 +28,7 @@ with live preview and Esc walk-back. See
 ## Quick start
 
 Install the prereqs (one-time) and agentcap itself. `podman` runs
-the per-agent sandbox, `fzf` drives the inspect / replay pickers
+the per-agent sandbox, `fzf` drives the inspect pickers
 (hard requirement; `agentcap inspect` errors out without it), and
 `trufflehog` runs the pre-push secret scan (`agentcap export`
 aborts on any verified hit; pass `--no-scan` to skip).
@@ -45,6 +45,8 @@ curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scr
     | sh -s -- -b ~/.local/bin
 
 # Both
+python -m venv .venv
+source .venv/bin/activate
 pip install -e .
 ```
 
@@ -98,22 +100,15 @@ agentcap inspect <run-id>              # one run only
 agentcap inspect <request-id>          # dump a specific body
 ```
 
-Re-issue a single captured request to an OpenAI-compatible target.
-
-```bash
-agentcap replay <request-id> --target http://127.0.0.1:8000
-```
-
 ## Usage
 
-The four sub-commands have a dedicated walkthrough each — flags,
+The three sub-commands have a dedicated walkthrough each — flags,
 flows, and a recorded demo:
 
 | command           | docs page                                  |
 |-------------------|--------------------------------------------|
 | `agentcap run`    | [docs/capture.md](docs/capture.md) — sandboxes, multi-turn, follow-ups, backends |
 | `agentcap inspect`| [docs/inspect.md](docs/inspect.md) — workspace / parquet / HF dataset pickers   |
-| `agentcap replay` | [docs/replay.md](docs/replay.md) — re-issue any captured request elsewhere     |
 | `agentcap export` | [docs/export.md](docs/export.md) — push captures + traces as a HF Collection  |
 
 See [docs/tested-models-and-agents.md](docs/tested-models-and-agents.md)
