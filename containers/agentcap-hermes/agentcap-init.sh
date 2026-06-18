@@ -64,6 +64,15 @@ if [ -n "${AGENTCAP_SKILLS_DIR:-}" ] && [ -d "$AGENTCAP_SKILLS_DIR" ]; then
     fi
     [ -f "$AGENTCAP_SKILLS_DIR/agents/AGENTS.md" ] && \
         ln -sf "$AGENTCAP_SKILLS_DIR/agents/AGENTS.md" "$PWD/AGENTS.md"
+    # A skill bundle may ship an executable ``mcp-server``; register it as a
+    # hermes MCP server so its tools are first-class (offered in every turn),
+    # not just catalog docs the agent must discover and shell out to. ``yes``
+    # auto-confirms the interactive "enable all tools?" prompt.
+    for d in "$AGENTCAP_SKILLS_DIR/skills/"*/; do
+        srv="${d}mcp-server"
+        [ -x "$srv" ] && \
+            yes | hermes mcp add "$(basename "$d")" --command "$srv" >/dev/null 2>&1 || true
+    done
 fi
 
 # Record this shell's PID so the sandbox can target the about-to-be
