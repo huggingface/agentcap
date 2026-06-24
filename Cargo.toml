@@ -1,0 +1,46 @@
+[package]
+name = "agentcap"
+version = "0.0.1"
+edition = "2021"
+description = "Run coding agents at scale across (agent × model × corpus), capture every chat-completion byte, publish as a Hugging Face dataset."
+license = "Apache-2.0"
+repository = "https://github.com/huggingface/agentcap"
+
+[[bin]]
+name = "agentcap"
+path = "src/main.rs"
+
+[lib]
+name = "agentcap"
+path = "src/lib.rs"
+
+[dependencies]
+# Hub: dataset repo create_commit + Xet upload + ranged GET (footer reads). The blocking feature
+# gives synchronous counterparts of every async op (each wraps its own runtime), so the whole app
+# is synchronous — no tokio to manage; inspect's concurrency uses std threads.
+hf-hub = { version = "1.0.0-rc.1", features = ["rustls-tls", "blocking"] }
+# Parquet write (export) + read (inspect, footer KV). Pin the whole arrow family to one major.
+arrow = "56"
+parquet = { version = "56", features = ["arrow"] }
+# Terminal UI for `inspect`.
+ratatui = "0.29"
+crossterm = "0.28"
+nucleo = "0.5"
+unicode-width = "0.2"
+bytes = "1" # name hf-hub's returned Bytes (ranged footer reads)
+# Serde: preserve_order keeps tool_call key order in captured bodies (load-bearing — see captures.py).
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+anyhow = "1"
+url = "2"
+clap = { version = "4", features = ["derive"] }
+# Only for the Collections REST call (no hf-hub Collections API).
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
+tempfile = "3"
+chrono = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
