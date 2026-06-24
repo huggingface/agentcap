@@ -21,8 +21,6 @@ import subprocess
 from pathlib import Path
 from typing import Sequence
 
-import yaml
-
 from . import AgentDriver, AgentTurn
 from ..sandbox import Sandbox
 
@@ -71,6 +69,15 @@ def _rewrite_config(
     ``model.base_url`` and (optionally) ``context_length``. Kept for
     unit tests; the production path bakes the equivalent into the
     image, so the driver never calls this at runtime."""
+
+    try:
+        import yaml
+    except ImportError as exc:
+        raise RuntimeError(
+            "Hermes config rewriting requires PyYAML. Install it with "
+            "`pip install 'agentcap[yaml]'` or `pip install pyyaml`."
+        ) from exc
+
     cfg = yaml.safe_load(config_text) or {}
     if not isinstance(cfg, dict):
         raise ValueError("hermes config.yaml is not a YAML mapping")

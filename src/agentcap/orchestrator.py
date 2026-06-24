@@ -18,7 +18,7 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 
 from .drivers import AgentDriver, AgentTurn
 from .followups import FollowUp
@@ -52,15 +52,76 @@ class TaskResult:
 
 
 def read_tasks_txt(path: Path | str) -> list[str]:
-    """Read a plain-text tasks file (one prompt per line, ``#`` comments
-    and blank lines ignored)."""
-    text = Path(path).read_text()
+    """Read a tasks file.
+
+    ``.txt`` files keep the legacy one-prompt-per-line format, with blank
+    lines and ``#`` comments ignored. ``.yaml``/``.yml`` files accept either
+    a top-level list of prompts or a mapping with a ``tasks`` list. Each YAML
+    task may be a string, or a mapping with a ``prompt`` key.
+    """
+    path = Path(path)
+    if path.suffix.lower() in {".yaml", ".yml"}:
+        return _read_tasks_yaml(path)
+    return _read_tasks_text(path)
+
+
+def _read_tasks_text(path: Path) -> list[str]:
+    text = path.read_text()
     out: list[str] = []
     for line in text.splitlines():
         s = line.strip()
         if not s or s.startswith("#"):
             continue
         out.append(s)
+    return out
+
+
+def _read_tasks_yaml(path: Path) -> list[str]:
+    try:
+        import yaml
+    except ImportError as exc:
+        raise RuntimeError(
+            "YAML task files require PyYAML. Install it with "
+            "`pip install 'agentcap[yaml]'` or `pip install pyyaml`, "
+            "or use a .txt tasks file."
+        ) from exc
+
+    data = yaml.safe_load(path.read_text())
+    if data is None:
+        return []
+
+    if isinstance(data, dict):
+        if "tasks" not in data:
+            raise ValueError("YAML tasks file must contain a top-level 'tasks' key")
+        data = data["tasks"]
+
+    if not isinstance(data, list):
+        raise ValueError(
+            "YAML tasks file must be a list, or a mapping with a 'tasks' list"
+        )
+
+    out: list[str] = []
+    for i, item in enumerate(data, start=1):
+        prompt: Any
+
+        if isinstance(item, str):
+            prompt = item
+        elif isinstance(item, dict):
+            if "prompt" not in item:
+                raise ValueError(f"YAML task #{i} mapping must contain a 'prompt' key")
+            prompt = item["prompt"]
+        else:
+            raise ValueError(
+                f"YAML task #{i} must be a string or a mapping with a 'prompt' key"
+            )
+
+        if not isinstance(prompt, str):
+            raise ValueError(f"YAML task #{i} prompt must be a string")
+
+        prompt = prompt.strip()
+        if prompt:
+            out.append(prompt)
+
     return out
 
 

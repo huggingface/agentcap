@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -290,3 +291,38 @@ def test_run_task_aborts_on_followup_turn_timeout():
     assert len(result.turns) == 1
     aborted = [e for e in events if e[0] == "task_aborted"]
     assert aborted and aborted[0][1]["reason"] == "follow-up-turn-timeout"
+
+def test_read_tasks_yaml_list_of_strings(tmp_path: Path):
+    pytest.importorskip("yaml")
+    p = tmp_path / "tasks.yaml"
+    p.write_text("- first task\n- second task\n")
+    assert read_tasks_txt(p) == ["first task", "second task"]
+
+
+def test_read_tasks_yaml_mapping_with_task_objects(tmp_path: Path):
+    pytest.importorskip("yaml")
+    p = tmp_path / "tasks.yml"
+    p.write_text(
+        "tasks:\n"
+        "  - prompt: |\n"
+        "      first line\n"
+        "      second line\n"
+        "  - second task\n"
+    )
+    assert read_tasks_txt(p) == ["first line\nsecond line", "second task"]
+
+
+def test_read_tasks_yaml_validates_shape(tmp_path: Path):
+    pytest.importorskip("yaml")
+    p = tmp_path / "tasks.yaml"
+    p.write_text("name: not-a-task-list\n")
+    with pytest.raises(ValueError, match="top-level 'tasks' key"):
+        read_tasks_txt(p)
+
+
+def test_read_tasks_yaml_requires_pyyaml(monkeypatch, tmp_path: Path):
+    p = tmp_path / "tasks.yaml"
+    p.write_text("- first task\n")
+    monkeypatch.setitem(sys.modules, "yaml", None)
+    with pytest.raises(RuntimeError, match="YAML task files require PyYAML"):
+        read_tasks_txt(p)

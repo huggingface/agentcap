@@ -22,12 +22,13 @@ agentcap run \
 
 Four required pieces:
 
-| flag        | what it picks                                                |
-|-------------|--------------------------------------------------------------|
-| `--agent`   | which CLI to drive (`hermes` \| `opencode` \| `goose` \| `pi`) |
-| `--model`   | the model id the agent will ask for (required for all agents)  |
-| `--upstream`| where the proxy forwards calls — any OpenAI-compat endpoint  |
-| `--tasks`   | path to `tasks.txt`, one initial user prompt per line        |
+
+| flag         | what it picks                                                                                       |
+| -------------- | ----------------------------------------------------------------------------------------------------- |
+| `--agent`    | which CLI to drive (`hermes` \| `opencode` \| `goose` \| `pi`)                                      |
+| `--model`    | the model id the agent will ask for (required for all agents)                                       |
+| `--upstream` | where the proxy forwards calls — any OpenAI-compat endpoint                                        |
+| `--tasks`    | path to a tasks file:`.txt` has one prompt per line; `.yaml`/`.yml` accepts a list or `tasks:` list |
 
 The proxy listens on a free local port and rewrites the agent's
 endpoint to point at itself, so the agent talks to the proxy and the
@@ -45,11 +46,12 @@ agentcap run --agent goose --model zai-org/GLM-4.6 \
     --turns 4 --followup synthesized
 ```
 
-| `--followup` | next-turn prompt                                          |
-|--------------|-----------------------------------------------------------|
-| `continue`   | literal string `"continue"`                                |
-| `templates`  | one of a fixed pool (varies per turn)                      |
-| `synthesized`| a small LLM is asked to produce a natural next user message |
+
+| `--followup`  | next-turn prompt                                            |
+| --------------- | ------------------------------------------------------------- |
+| `continue`    | literal string`"continue"`                                  |
+| `templates`   | one of a fixed pool (varies per turn)                       |
+| `synthesized` | a small LLM is asked to produce a natural next user message |
 
 `synthesized` calls a separate model — by default the same upstream,
 override with `--synth-upstream` / `--synth-model`. The follow-up call
@@ -100,11 +102,12 @@ multi-minute cold build the first time each agent is invoked.
 
 The proxy is backend-agnostic; `--upstream` is the only switch.
 
-| backend                       | when to use                                          |
-|-------------------------------|------------------------------------------------------|
-| Inference Providers (`router.huggingface.co`) | demos, casual capture; pay-per-token         |
-| Local `llama.app` server      | full control over quant / chat template / sampler    |
-| `transformers serve`          | small models; awkward for big ones at long context   |
+
+| backend                                       | when to use                                        |
+| ----------------------------------------------- | ---------------------------------------------------- |
+| Inference Providers (`router.huggingface.co`) | demos, casual capture; pay-per-token               |
+| Local`llama.app` server                       | full control over quant / chat template / sampler  |
+| `transformers serve`                          | small models; awkward for big ones at long context |
 
 For known-good `(backend, model, agent)` tuples see
 [docs/tested-models-and-agents.md](tested-models-and-agents.md).

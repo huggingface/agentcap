@@ -361,7 +361,10 @@ def export_cmd(
     "tasks_file",
     required=True,
     type=click.Path(exists=True, dir_okay=False),
-    help="Plain-text file with one prompt per line (# comments + blank lines ignored).",
+    help=(
+        "Tasks file. .txt uses one prompt per line (# comments + blank lines "
+        "ignored); .yaml/.yml uses a list of prompts or a top-level tasks list."
+    ),
 )
 @click.option(
     "--turns",
