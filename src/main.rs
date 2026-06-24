@@ -14,6 +14,39 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Drive an agent through a corpus, capturing every chat-completion.
+    Run {
+        /// Agent driver: hermes | opencode | goose | pi.
+        #[arg(long)]
+        agent: String,
+        /// Model id the agent requests (recorded as the `model` field).
+        #[arg(long)]
+        model: Option<String>,
+        /// Base URL of the upstream model server.
+        #[arg(long)]
+        upstream: String,
+        /// Bearer token forwarded upstream (env: AGENTCAP_API_KEY).
+        #[arg(long, env = "AGENTCAP_API_KEY")]
+        api_key: Option<String>,
+        /// Host dir exposed as the agent's cwd (bind-mounted writable).
+        #[arg(long)]
+        sandbox: Option<String>,
+        /// Host dir with a huggingface/skills checkout (bind-mounted read-only).
+        #[arg(long)]
+        skills: Option<String>,
+        /// Plain-text file: one prompt per line (# comments + blanks ignored).
+        #[arg(long)]
+        tasks: String,
+        /// Total turns per task (1 = no follow-ups).
+        #[arg(long, default_value_t = 1)]
+        turns: i64,
+        /// Follow-up strategy for turns 2..N: continue | templates | synthesized.
+        #[arg(long, default_value = "continue")]
+        followup: String,
+        /// Per-turn timeout in seconds.
+        #[arg(long, default_value_t = 1200.0)]
+        timeout: f64,
+    },
     /// List runs in a workspace.
     Ls {
         /// Workspace dir (defaults to ./.agentcap).
@@ -47,6 +80,20 @@ enum Cmd {
 
 fn main() -> Result<()> {
     match Cli::parse().cmd {
+        Cmd::Run {
+            agent,
+            model,
+            upstream,
+            api_key,
+            sandbox,
+            skills,
+            tasks,
+            turns,
+            followup,
+            timeout,
+        } => agentcap::run::run(
+            agent, model, upstream, api_key, sandbox, skills, tasks, turns, followup, timeout,
+        ),
         Cmd::Ls { workspace, long } => agentcap::ls::run(workspace, long),
         Cmd::Export {
             targets,
