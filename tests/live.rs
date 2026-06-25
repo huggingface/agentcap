@@ -164,16 +164,18 @@ fn live_pi() {
 
 #[test]
 #[ignore = "live: needs a model server + podman"]
-fn live_hermes() {
-    run_agent("hermes", false);
-}
-
-#[test]
-#[ignore = "live: needs a model server + podman"]
 fn live_goose() {
     run_agent("goose", false);
 }
 
-// opencode is intentionally omitted: opencode 1.15.x doesn't pick up the baked
-// `agent.minimal` from the per-agent image (fails "agent minimal not found"),
-// matching the `@pytest.mark.skip` on `test_opencode_live`.
+// hermes and opencode are intentionally omitted — neither runs via `agentcap run`
+// on the tiny CI model:
+//   - hermes: its base system prompt (~3.9k tokens) exceeds the budget on
+//     Qwen3-1.7B, so it bails before any model call. The Python suite never ran
+//     hermes through the CLI either — `test_hermes_live` drove the driver directly
+//     with prompt-shrinking flags (`ignore_rules`, `toolsets="file"`) that `run`
+//     doesn't expose. hermes stdout parsing is covered by unit tests.
+//   - opencode: 1.15.x doesn't pick up the baked `agent.minimal` from the image
+//     (matching the `@pytest.mark.skip` on `test_opencode_live`).
+// pi (symlink/JSONL traces) + goose (dump-traces/SQLite) cover the full stack
+// across both trace-surfacing mechanisms.
