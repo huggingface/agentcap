@@ -1,0 +1,107 @@
+name: Test - Live
+
+# Full agent×model end-to-end: spin a real llama.cpp server, build the per-agent
+# sandbox images on demand, and drive `agentcap run` against the server for each
+# agent (pi/hermes/goose). Heavy (GGUF download + image builds + CPU inference) —
+# this is agentcap's "live" tier, the Rust port of `linux-live-tests.yml`.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "containers/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/live.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  # Pinned to match tests/conftest.py (the proven Python live setup).
+  GGUF_REPO: Qwen/Qwen3-1.7B-GGUF
+  GGUF_FILE: Qwen3-1.7B-Q8_0.gguf
+  LLAMA_IMAGE: ghcr.io/ggml-org/llama.cpp:server-b9487
+  LLAMA_PORT: "8080"
+
+jobs:
+  live:
+    name: Live (agent × model)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Install podman
+        run: sudo apt-get update && sudo apt-get install -y podman
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: live
+
+      # GGUF weights (~1.8 GB). Cache so only the first run downloads.
+      - name: Cache GGUF
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ~/models
+          key: gguf-${{ env.GGUF_FILE }}-v1
+
+      - name: Download GGUF (on cache miss)
+        run: |
+          mkdir -p "$HOME/models"
+          if [ ! -f "$HOME/models/${GGUF_FILE}" ]; then
+            curl -sSfL -o "$HOME/models/${GGUF_FILE}" \
+              "https://huggingface.co/${GGUF_REPO}/resolve/main/${GGUF_FILE}"
+          fi
+
+      # Per-agent sandbox images are built on demand by `agentcap run`; cache the
+      # rootless container store so `ensure_image` short-circuits on hash match.
+      - name: Cache sandbox images
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ~/.local/share/containers
+          key: sandbox-images-${{ hashFiles('containers/**') }}
+          restore-keys: |
+            sandbox-images-
+
+      - name: Start llama.cpp server
+        run: |
+          podman run --rm -d --name agentcap-llama \
+            -p "127.0.0.1:${LLAMA_PORT}:8080" \
+            --mount "type=bind,src=$HOME/models,dst=/models,ro" \
+            "${LLAMA_IMAGE}" \
+            --model "/models/${GGUF_FILE}" \
+            --host 0.0.0.0 --port 8080 \
+            --ctx-size 8192 --reasoning-format none --jinja
+          echo "Waiting for llama serve…"
+          for i in $(seq 1 180); do
+            if curl -sf "http://127.0.0.1:${LLAMA_PORT}/v1/models" >/dev/null; then
+              echo "ready after ${i}s"; break
+            fi
+            sleep 1
+          done
+          curl -sf "http://127.0.0.1:${LLAMA_PORT}/v1/models" >/dev/null \
+            || { echo "llama serve never became ready"; podman logs agentcap-llama | tail -50; exit 1; }
+          echo "AGENTCAP_TEST_LLM_URL=http://127.0.0.1:${LLAMA_PORT}" >> "$GITHUB_ENV"
+
+      # Serial: the agents share one CPU-bound server. Builds each per-agent image
+      # on first use (cached thereafter).
+      - name: Live tests
+        run: cargo test --test live -- --ignored --nocapture --test-threads=1
+
+      - name: Stop llama.cpp server
+        if: always()
+        run: podman rm -f agentcap-llama || true
