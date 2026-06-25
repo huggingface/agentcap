@@ -1,0 +1,5 @@
+# Pin the toolchain so local `cargo fmt/clippy/test` matches CI (which pins the
+# same version in .github/workflows). Bump here and in the workflows together.
+[toolchain]
+channel = "1.95.0"
+components = ["rustfmt", "clippy"]

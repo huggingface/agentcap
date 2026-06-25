@@ -199,7 +199,7 @@ pub fn enumerate_workspace_requests(run_dir: &Path) -> Vec<ReqRow> {
         let row = build_req_row(&run_id, rid, req, status, &mut chains);
         rows.push(row);
     }
-    rows.sort_by(|a, b| (a.run_id.clone(), a.captured_at).cmp(&(b.run_id.clone(), b.captured_at)));
+    rows.sort_by_key(|a| (a.run_id.clone(), a.captured_at));
     rows
 }
 
