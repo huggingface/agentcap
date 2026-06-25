@@ -100,9 +100,7 @@ jobs:
       # Serial: the agents share one CPU-bound server. Builds each per-agent image
       # on first use (cached thereafter).
       - name: Live tests
-        # TODO: scoped to pi while diagnosing the first live run; restore to the
-        # full set (`cargo test --test live`) once green.
-        run: cargo test --test live live_pi -- --ignored --nocapture --test-threads=1
+        run: cargo test --test live -- --ignored --nocapture --test-threads=1
 
       - name: Stop llama.cpp server
         if: always()

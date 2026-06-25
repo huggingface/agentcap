@@ -66,8 +66,12 @@ struct CaptureProxy {
 impl CaptureProxy {
     fn new(upstream: &str, capture_dir: PathBuf) -> Result<Self> {
         std::fs::create_dir_all(&capture_dir).with_context(|| format!("creating {}", capture_dir.display()))?;
-        // No timeout: agent calls can be long; the agent decides when to give up.
-        let client = Client::builder().build().context("building HTTP client")?;
+        // Generous per-request cap: blocking's 30s default truncates slow streamed
+        // generations; finite so a hung upstream can't wedge a worker forever.
+        let client = Client::builder()
+            .timeout(Duration::from_secs(900))
+            .build()
+            .context("building HTTP client")?;
         Ok(CaptureProxy {
             upstream: upstream.trim_end_matches('/').to_string(),
             capture_dir,

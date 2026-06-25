@@ -5,6 +5,8 @@
 //! server directly so the captured corpus stays a clean record of agent↔model
 //! interaction. Any failure falls back to `"continue"` (logged).
 
+use std::time::Duration;
+
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
 
@@ -44,7 +46,12 @@ impl SynthesizedFollowUp {
             model: model.to_string(),
             api_key: api_key.map(str::to_string),
             fallback: "continue".to_string(),
-            client: Client::new(),
+            // Generous cap (blocking's 30s default is too short for a slow synth);
+            // falls back to "continue" if it still times out.
+            client: Client::builder()
+                .timeout(Duration::from_secs(300))
+                .build()
+                .unwrap_or_default(),
         }
     }
 
