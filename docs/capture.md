@@ -51,10 +51,9 @@ agentcap run --agent goose --model zai-org/GLM-4.6 \
 | `templates`  | one of a fixed pool (varies per turn)                      |
 | `synthesized`| a small LLM is asked to produce a natural next user message |
 
-`synthesized` calls a separate model — by default the same upstream,
-override with `--synth-upstream` / `--synth-model`. The follow-up call
-**bypasses the capture proxy** so the capture stays a clean record of
-agent ↔ model interaction.
+`synthesized` reuses the run's own `--upstream` and `--model` to draft
+the next message. The follow-up call **bypasses the capture proxy** so
+the capture stays a clean record of agent ↔ model interaction.
 
 ## Where captures land
 
