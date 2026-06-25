@@ -32,90 +32,47 @@ curl -fsSL https://raw.githubusercontent.com/huggingface/agentcap/main/scripts/i
 ```
 
 [`scripts/install.sh`](scripts/install.sh) detects your platform, downloads the
-matching binary, and installs it to `~/.local/bin`. Pass flags after `sh -s --` —
-`-b <dir>` to change the install dir, `-v <tag>` to pin a version:
+matching binary, and installs it to `~/.local/bin` — append `-b <dir>` or
+`-v <tag>` (after `sh -s --`) to change the dir or pin a version. Binaries are
+also on [GitHub Releases](https://github.com/huggingface/agentcap/releases)
+(`agentcap-x86_64-linux`, `agentcap-arm64-apple-darwin`); to compile instead, see
+[Building from source](#building-from-source).
+
+Two tools are each needed only for the command that uses them — `podman` for the
+sandbox `agentcap run` drives, and `trufflehog` for the secret scan `agentcap
+export` runs before pushing (skip with `--no-scan`):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/huggingface/agentcap/main/scripts/install.sh | sh -s -- -b /usr/local/bin
+brew install podman trufflehog     # macOS  (+ one-time `podman machine` setup, see docs/capture.md)
+sudo apt install -y podman         # Linux  (trufflehog via its own installer if you'll export)
 ```
-
-Or grab a binary straight from [GitHub Releases](https://github.com/huggingface/agentcap/releases):
-
-| Platform            | Binary                        |
-|---------------------|-------------------------------|
-| Linux x86_64        | `agentcap-x86_64-linux`       |
-| macOS Apple Silicon | `agentcap-arm64-apple-darwin` |
-
-To build it yourself instead, see [Building from source](#building-from-source).
 
 ## Quick start
 
-agentcap shells out to two external tools at runtime: `podman` runs the
-per-agent sandbox (`agentcap run`), and `trufflehog` runs the pre-push
-secret scan (`agentcap export` aborts on any verified hit; pass
-`--no-scan` to skip). The inspect pickers are built in — no fzf.
-
-```bash
-# macOS
-brew install podman trufflehog
-podman machine init --memory 8192    # one-time; needs ≥4 GB for the test GGUF
-podman machine start
-
-# Linux
-sudo apt install -y podman
-curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh \
-    | sh -s -- -b ~/.local/bin
-```
-
-Pick a server — typically (a) Inference Providers
-`--upstream https://router.huggingface.co` or (b) a local OpenAI-compat
-server like `llama.app` on `http://127.0.0.1:8000`. See
-[docs/capture.md](docs/capture.md) for the trade-offs.
-
-Example with a local `llama.app` server
-
-```bash
-./scripts/start_llama_cpp_server.sh ggml-org/gemma-4-E4B-it-GGUF &
-```
-
-Drive an agent through a corpus. Each run mints a fresh subdir under .agentcap/ in the workspace ($AGENTCAP_WORKSPACE or cwd).
+Capture an agent run against Hugging Face Inference Providers — set `HF_TOKEN`
+(or run `hf auth login`), then point `--upstream` at the router:
 
 ```bash
 agentcap run \
     --agent hermes \
-    --model google/gemma-4-E4B-it \
-    --upstream http://127.0.0.1:8000 \
+    --model zai-org/GLM-4.6 \
+    --upstream https://router.huggingface.co \
     --tasks examples/transformers-coding-session/tasks.txt \
     --turns 4 --followup synthesized
 ```
 
-Browse what's captured. ``--long`` adds upstream + per-run counts.
+Each run lands in a fresh subdir under `.agentcap/` (in `$AGENTCAP_WORKSPACE`,
+else the cwd). Browse it, then publish to the Hub:
 
 ```bash
-agentcap ls
+agentcap ls                                       # list runs (-l adds upstream + counts)
+agentcap export --all --push my-org/my-captures   # parquet + traces -> paired HF datasets
+agentcap inspect my-org/my-captures-captures      # browse the published captures
 ```
 
-Push everything. ``--push <owner>/<base>`` produces paired captures + traces
-datasets and groups them in a Collection.
-
-```bash
-agentcap export --all --push my-org/my-captures
-```
-
-Or push selected runs only.
-
-```bash
-agentcap export hermes-local-20260512-162345 \
-    --push my-org/my-captures
-```
-
-Browse captured requests
-
-```bash
-agentcap inspect                       # everything in the workspace
-agentcap inspect <run-id>              # one run only
-agentcap inspect <request-id>          # dump a specific body
-```
+Prefer a local model server to the router? See
+[docs/capture.md](docs/capture.md) for llama.cpp / `transformers serve` setups
+and the backend trade-offs.
 
 ## Usage
 
