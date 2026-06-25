@@ -1,4 +1,4 @@
-//! `ls`: list runs under a local workspace. Ports `ls_cmd`.
+//! `ls`: list runs under a local workspace.
 //!
 //! Unlike `export`, `ls` does NOT consult `$AGENTCAP_WORKSPACE` — what you point
 //! it at is what you get. Accepts either the parent dir or the `.agentcap/` dir.

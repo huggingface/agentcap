@@ -1,5 +1,5 @@
 //! Synthesized follow-up: sends `(original_task, last_response)` to a model and
-//! uses the reply as the next user message. Ports `followups/synthesized.py`.
+//! uses the reply as the next user message.
 //!
 //! By design this call **bypasses the capture proxy** — it talks to the model
 //! server directly so the captured corpus stays a clean record of agent↔model

@@ -1,7 +1,6 @@
 //! Capture record shapes + persistence. Writes `<rid>.request.json` /
 //! `<rid>.response.json` in the exact shape the data/UI half reads (see
-//! `parquet_io` / `captures`). Ports the `_persist_*` / fingerprint / SSE-model
-//! helpers from `proxy.py`.
+//! `parquet_io` / `captures`).
 
 use std::io;
 use std::path::Path;

@@ -1,5 +1,5 @@
 //! Opt-in cross-implementation check: write a parquet with the Rust exporter to
-//! `$AGENTCAP_PARQUET_OUT`, so a Python/pyarrow reader can confirm the schema,
+//! `$AGENTCAP_PARQUET_OUT`, so a pyarrow reader can confirm the schema,
 //! KV metadata, and row JSON load cleanly. Ignored by default (needs the env
 //! var + leaves the file in place):
 //!

@@ -1,7 +1,7 @@
 //! Live end-to-end tests: drive the real `agentcap run` binary through a real
 //! OpenAI-compatible server for each agent, asserting the wire path (the agent
 //! reaches the model through the proxy and the turn completes) — not task
-//! quality. Ports `test_cli_live.py` + `test_drivers_live.py`.
+//! quality.
 //!
 //! `#[ignore]` by default so `cargo test` stays hermetic. The `Test - Live`
 //! workflow provisions a llama.cpp server + builds the per-agent images, then
@@ -171,11 +171,8 @@ fn live_goose() {
 // hermes and opencode are intentionally omitted — neither runs via `agentcap run`
 // on the tiny CI model:
 //   - hermes: its base system prompt (~3.9k tokens) exceeds the budget on
-//     Qwen3-1.7B, so it bails before any model call. The Python suite never ran
-//     hermes through the CLI either — `test_hermes_live` drove the driver directly
-//     with prompt-shrinking flags (`ignore_rules`, `toolsets="file"`) that `run`
-//     doesn't expose. hermes stdout parsing is covered by unit tests.
-//   - opencode: 1.15.x doesn't pick up the baked `agent.minimal` from the image
-//     (matching the `@pytest.mark.skip` on `test_opencode_live`).
+//     Qwen3-1.7B, so it bails before any model call. hermes stdout parsing is
+//     covered by unit tests.
+//   - opencode: 1.15.x doesn't pick up the baked `agent.minimal` from the image.
 // pi (symlink/JSONL traces) + goose (dump-traces/SQLite) cover the full stack
 // across both trace-surfacing mechanisms.

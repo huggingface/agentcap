@@ -1,4 +1,4 @@
-//! Podman container sandbox. Ports `sandbox/podman.py` + `sandbox/__init__.py`.
+//! Podman container sandbox.
 //!
 //! Each [`PodmanSandbox::run`] is a fresh `podman run --rm` against a pre-built
 //! per-agent image. Host paths in `writable_paths` / `readonly_paths` are
@@ -178,7 +178,7 @@ fn run_child(wrapped: &[String], timeout: Option<Duration>) -> std::result::Resu
 }
 
 /// Provision (build the image if needed) and return a sandbox, or an error with
-/// an install hint. Ports `require_sandbox_or_die`.
+/// an install hint.
 pub fn require_sandbox(
     agent: &str,
     env: BTreeMap<String, String>,

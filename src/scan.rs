@@ -1,7 +1,7 @@
 //! Secret scan over a capture run, gating `export`.
 //!
-//! Shells out to `trufflehog filesystem` and parses its JSON. Policy (matching
-//! the Python `scan.py`): a single **verified** hit aborts the export;
+//! Shells out to `trufflehog filesystem` and parses its JSON. Policy: a single
+//! **verified** hit aborts the export;
 //! **unverified** hits are reported but non-blocking (pattern matchers have a
 //! real false-positive rate). Results are cached to `<run_dir>/scan.json`; the
 //! cache is invalidated by `rescan` or when a pattern-only cache can't satisfy a

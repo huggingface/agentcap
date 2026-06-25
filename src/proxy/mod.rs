@@ -1,4 +1,4 @@
-//! Synchronous capture proxy. Ports `proxy.py`.
+//! Synchronous capture proxy.
 //!
 //! A `tiny_http` server on a worker-thread pool fronts an OpenAI-compatible
 //! upstream. `POST /v1/chat/completions` is captured to

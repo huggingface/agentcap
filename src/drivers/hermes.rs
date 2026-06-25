@@ -1,5 +1,5 @@
-//! Hermes driver: `hermes chat -q "<prompt>"` non-interactively. Ports
-//! `drivers/hermes.py`. The proxy URL + config are baked into the image.
+//! Hermes driver: `hermes chat -q "<prompt>"` non-interactively. The proxy URL
+//! + config are baked into the image.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};

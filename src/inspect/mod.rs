@@ -1,5 +1,5 @@
 //! `inspect`: classify the TARGET and launch the picker (or dump a request body
-//! for a bare hex rid). Ports `_classify_target` + `inspect_cmd`.
+//! for a bare hex rid).
 
 mod app;
 mod render;
@@ -111,7 +111,7 @@ fn dump_rid(rid: &str, rid_flag: bool) -> Result<()> {
     Ok(())
 }
 
-/// Classify the TARGET positional. Ports `_classify_target`.
+/// Classify the TARGET positional.
 fn classify_target(target: Option<&str>) -> Result<Target> {
     let Some(target) = target else {
         return Ok(Target::Workspace(std::env::current_dir()?.join(WORKSPACE_DIR)));

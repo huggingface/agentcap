@@ -1,4 +1,4 @@
-//! pi-mono driver: `pi -p "<prompt>" --provider local`. Ports `drivers/pi.py`.
+//! pi-mono driver: `pi -p "<prompt>" --provider local`.
 //! pi mints its own session UUID on start and resumes the latest via `--continue`.
 
 use std::collections::BTreeMap;

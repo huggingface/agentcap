@@ -1,5 +1,5 @@
 //! The `run` command: drive an agent CLI through a corpus, capture every
-//! chat-completion, and summarise. Ports `run_cmd` from `__main__.py`.
+//! chat-completion, and summarise.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

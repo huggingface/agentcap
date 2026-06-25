@@ -1,5 +1,5 @@
 //! Decode OpenAI-compatible responses into a single synthesized assistant
-//! message. Ports `_decode_sse_response` / `_decode_response` from the Python.
+//! message.
 
 use crate::model::DecodedResponse;
 use serde_json::{json, Value};
@@ -120,7 +120,7 @@ mod tests {
     use serde_json::json;
 
     /// Assemble an SSE blob: one `data: <json>` line per object + trailing
-    /// `[DONE]`, matching the Python test helper.
+    /// `[DONE]`.
     fn sse(objs: &[Value]) -> String {
         let mut s: String = objs
             .iter()

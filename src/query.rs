@@ -1,5 +1,5 @@
 //! fzf-style query parsing → the literal substrings to highlight in the preview
-//! pane. Ports `_parse_fzf_terms`. nucleo handles the actual matching with the
+//! pane. nucleo handles the actual matching with the
 //! same operator atoms; this only extracts what to colour.
 
 /// Split a query into the literal text of each non-negated term, with the

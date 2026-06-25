@@ -1,5 +1,5 @@
-//! Goose driver: `goose run -t "<prompt>"`. Ports `drivers/goose.py`. The proxy
-//! URL + provider are baked into the image ENV; the driver sets `GOOSE_MODEL`.
+//! Goose driver: `goose run -t "<prompt>"`. The proxy URL + provider are baked
+//! into the image ENV; the driver sets `GOOSE_MODEL`.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

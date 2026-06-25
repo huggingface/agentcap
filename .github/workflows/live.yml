@@ -3,7 +3,7 @@ name: Test - Live
 # Full agent×model end-to-end: spin a real llama.cpp server, build the per-agent
 # sandbox images on demand, and drive `agentcap run` against the server for each
 # agent (pi/hermes/goose). Heavy (GGUF download + image builds + CPU inference) —
-# this is agentcap's "live" tier, the Rust port of `linux-live-tests.yml`.
+# this is agentcap's "live" tier (real agent × model, end-to-end).
 
 on:
   push:
@@ -29,7 +29,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "1"
-  # Pinned to match tests/conftest.py (the proven Python live setup).
+  # Pinned to the proven live setup (Qwen3-1.7B-Q8 on a CPU llama.cpp server).
   GGUF_REPO: Qwen/Qwen3-1.7B-GGUF
   GGUF_FILE: Qwen3-1.7B-Q8_0.gguf
   LLAMA_IMAGE: ghcr.io/ggml-org/llama.cpp:server-b9487

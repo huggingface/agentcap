@@ -2,7 +2,7 @@ name: Test - Unit & Integration
 
 # Hermetic tests only: unit tests + the loopback proxy integration test. No
 # network, podman, or model server. The full agent×model end-to-end ("live")
-# tests are a separate, resource-heavy category — see `linux-live-tests.yml`.
+# tests are a separate, resource-heavy category — see `live.yml`.
 
 on:
   pull_request:

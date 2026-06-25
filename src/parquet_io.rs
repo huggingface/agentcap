@@ -1,7 +1,6 @@
 //! Capture dir → parquet (export) and parquet → request bodies (read).
 //!
-//! Ports `export.py`'s `export_local` / `_iter_pairs` / `_row` and the parquet
-//! readers in `captures.py`. The `request` / `response` columns are
+//! The `request` / `response` columns are
 //! JSON-stringified bodies (Arrow can't infer a schema over heterogeneous
 //! tool-schema fields); `agent` / `model` / `tasks` are stamped into the
 //! parquet key-value metadata so the inspect picker can label files cheaply.

@@ -1,8 +1,7 @@
 //! Resolve a captured request by id and hand back the body.
 //!
 //! No normalization of the JSON — captures persist the request as parsed JSON,
-//! so the original byte sequence isn't recoverable, but the object is. Ports
-//! `captures.py` (`load_request(s)`, `resolve_workspace_rid`).
+//! so the original byte sequence isn't recoverable, but the object is.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

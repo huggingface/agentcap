@@ -1,6 +1,4 @@
-//! Message diffing + one-line summaries for the inspect picker. Ports
-//! `_message_key` / `_diff_messages` / `_delta_label` / `_message_text` /
-//! `_message_summary` / `_flatten` from the Python.
+//! Message diffing + one-line summaries for the inspect picker.
 
 use crate::model::canonical_json;
 use serde_json::Value;
@@ -37,7 +35,7 @@ pub fn message_key(m: &Value) -> MessageKey {
     }
 }
 
-/// Python truthiness for the values we test: non-empty arrays/strings/objects,
+/// Truthiness for the values we test: non-empty arrays/strings/objects,
 /// non-zero numbers, `true`. `null`/`false`/empty are falsy.
 fn is_truthy(v: &Value) -> bool {
     match v {

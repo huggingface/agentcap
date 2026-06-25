@@ -1,9 +1,9 @@
 //! Identify the inference backend behind an upstream URL.
 //!
-//! This is the pure subset the export path needs: hostname classification
-//! ([`hostname_fallback`]) + the HF Router sub-provider pin
-//! ([`refine_for_sub_provider`]). The network `probe` (live introspection) is
-//! part of the capture/runtime half and lives in the Python package for now.
+//! Hostname classification ([`hostname_fallback`]) + the HF Router sub-provider pin
+//! ([`refine_for_sub_provider`]) — what `run` and `export` use to slug a backend.
+//! Live network introspection of the backend isn't implemented; the hostname slug
+//! is enough for both paths.
 
 use std::net::IpAddr;
 

@@ -1,9 +1,9 @@
-//! Per-agent podman image lifecycle. Ports `sandbox/podman_provisioning.py`.
+//! Per-agent podman image lifecycle.
 //!
 //! The Containerfile is the source of truth: its SHA256 (plus any sibling
 //! context dir) is baked into the built image as a label; a mismatch on a later
-//! run forces a rebuild. The hash algorithm matches the Python byte-for-byte so
-//! Rust and Python agree and don't trigger needless rebuilds.
+//! run forces a rebuild. The hash format is fixed so images built by earlier
+//! agentcap versions are reused on upgrade, not needlessly rebuilt.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};

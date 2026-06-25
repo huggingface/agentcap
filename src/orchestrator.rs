@@ -1,5 +1,5 @@
-//! Drive an agent driver through a corpus with a follow-up strategy. Ports
-//! `orchestrator.py`. Proxy-agnostic: the caller wires capture context via the
+//! Drive an agent driver through a corpus with a follow-up strategy.
+//! Proxy-agnostic: the caller wires capture context via the
 //! `set_ctx` callback (the proxy stamps it onto each capture).
 
 use std::path::Path;

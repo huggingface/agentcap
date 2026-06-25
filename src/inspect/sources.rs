@@ -1,8 +1,6 @@
 //! Data layer for inspect: enumerate runs / requests / messages from a
 //! workspace or a parquet, and load request/response bodies for the preview and
-//! message levels. Ports `_enumerate_workspace_requests`,
-//! `_enumerate_parquet_requests`, `_request_messages_for_view`, and the
-//! body/response loaders from `__main__.py`.
+//! message levels.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -311,7 +309,7 @@ fn value_to_string(v: &Value) -> String {
 }
 
 /// Flatten request `messages[]` + the decoded response into one record per
-/// picker row. Ports `_request_messages_for_view`.
+/// picker row.
 pub fn request_messages_for_view(body: &Value, resp: Option<&Value>) -> Vec<MsgRecord> {
     let mut records = Vec::new();
     let msgs = body
