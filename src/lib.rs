@@ -1,7 +1,7 @@
-//! agentcap — Rust port (data/UI half: export, push, scan, inspect).
+//! agentcap — capture agent ↔ model interactions and publish them as HF datasets.
 //!
-//! The capture/runtime half (`run`, proxy, sandbox, drivers) still lives in the
-//! Python package under `src/agentcap/`; this crate reads the captures it writes.
+//! `run` drives an agent through a corpus behind a capture proxy; `export` renders
+//! the captures to parquet and pushes them to the Hub; `inspect` / `ls` browse them.
 
 pub mod captures;
 pub mod diff;
