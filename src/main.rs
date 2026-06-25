@@ -13,6 +13,9 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+// `Run` carries the full run config (many args); this enum is parsed once at
+// startup, not stored in bulk, so the variant-size spread doesn't matter.
+#[allow(clippy::large_enum_variant)]
 enum Cmd {
     /// Drive an agent through a corpus, capturing every chat-completion.
     Run {
@@ -38,6 +41,10 @@ enum Cmd {
         /// bind-mounted read-only and its `bin/` prepended to the agent's PATH.
         #[arg(long)]
         tool_dir: Option<String>,
+        /// Free-form label recorded in run.json and exported as a column
+        /// (e.g. a tier/condition tag for a comparison sweep).
+        #[arg(long)]
+        label: Option<String>,
         /// Plain-text file: one prompt per line (# comments + blanks ignored).
         #[arg(long)]
         tasks: String,
@@ -92,12 +99,13 @@ fn main() -> Result<()> {
             sandbox,
             skills,
             tool_dir,
+            label,
             tasks,
             turns,
             followup,
             timeout,
         } => agentcap::run::run(
-            agent, model, upstream, api_key, sandbox, skills, tool_dir, tasks, turns, followup, timeout,
+            agent, model, upstream, api_key, sandbox, skills, tool_dir, label, tasks, turns, followup, timeout,
         ),
         Cmd::Ls { workspace, long } => agentcap::ls::run(workspace, long),
         Cmd::Export {
