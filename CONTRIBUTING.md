@@ -9,25 +9,27 @@ reports against new (agent, model) tuples are all welcome.
 ```bash
 git clone https://github.com/huggingface/agentcap
 cd agentcap
-pip install -e '.[dev]'
+cargo build
 ```
 
-Python 3.10+ required.
+The toolchain is pinned in [rust-toolchain.toml](rust-toolchain.toml) — rustup
+fetches it automatically.
 
 ## Running tests
 
 ```bash
-pytest tests/                # all tests; live ones skip if prereqs absent
-pytest -m "not live" tests/  # unit only (what CI runs)
+cargo test                            # unit + loopback proxy integration (what CI runs)
+cargo test --test live -- --ignored   # live tier; skips if no model server (needs podman)
 ```
 
-Live integration tests (driver + real model server) require local
+Live integration tests (real agent + model server inside podman) require local
 prerequisites — see "Running tests" in the README.
 
 Lint:
 
 ```bash
-ruff check .
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
 ```
 
 Both lint and unit tests must pass for CI to be green.

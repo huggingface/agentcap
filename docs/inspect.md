@@ -1,6 +1,6 @@
 # Inspecting captures
 
-`agentcap inspect` is an fzf-driven picker over captured requests with
+`agentcap inspect` is a built-in terminal picker over captured requests with
 a live preview pane. A single positional `TARGET` is classified by
 content — does the path exist? does it look like an hf URI? all hex?
 — and routed accordingly. `inspect` does NOT consult
@@ -20,10 +20,6 @@ content — does the path exist? does it look like an hf URI? all hex?
 
 _Regenerate from the repo root with `vhs docs/demo/inspect.tape` —
 the tape's ``Output`` directive writes ``docs/img/inspect.gif``._
-
-fzf is a hard requirement — install via `brew install fzf` or your
-package manager. Without it, `inspect` errors out with a clear message
-instead of falling back to a half-usable table dump.
 
 ## Workspace flow
 
@@ -47,7 +43,7 @@ In the picker:
   response), then on a second Enter, dumps that message's content.
 - **Esc** walks back one level: message → request → run → exit.
 
-fzf operators work in the search bar: `'word` for exact match,
+fzf-style operators work in the search bar: `'word` for exact match,
 `^word` / `word$` for anchors, `!word` to exclude, `|` to OR.
 Each non-negated term is highlighted in red inside the preview pane.
 

@@ -25,29 +25,46 @@ _Three-level picker chain over an HF dataset of captures
 with live preview and Esc walk-back. See
 [docs/inspect.md](docs/inspect.md) for the rest._
 
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/huggingface/agentcap/main/scripts/install.sh | sh
+```
+
+[`scripts/install.sh`](scripts/install.sh) detects your platform, downloads the
+matching binary, and installs it to `~/.local/bin`. Pass flags after `sh -s --` —
+`-b <dir>` to change the install dir, `-v <tag>` to pin a version:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/huggingface/agentcap/main/scripts/install.sh | sh -s -- -b /usr/local/bin
+```
+
+Or grab a binary straight from [GitHub Releases](https://github.com/huggingface/agentcap/releases):
+
+| Platform            | Binary                        |
+|---------------------|-------------------------------|
+| Linux x86_64        | `agentcap-x86_64-linux`       |
+| macOS Apple Silicon | `agentcap-arm64-apple-darwin` |
+
+To build it yourself instead, see [Building from source](#building-from-source).
+
 ## Quick start
 
-Install the prereqs (one-time) and agentcap itself. `podman` runs
-the per-agent sandbox, `fzf` drives the inspect pickers
-(hard requirement; `agentcap inspect` errors out without it), and
-`trufflehog` runs the pre-push secret scan (`agentcap export`
-aborts on any verified hit; pass `--no-scan` to skip).
+agentcap shells out to two external tools at runtime: `podman` runs the
+per-agent sandbox (`agentcap run`), and `trufflehog` runs the pre-push
+secret scan (`agentcap export` aborts on any verified hit; pass
+`--no-scan` to skip). The inspect pickers are built in — no fzf.
 
 ```bash
 # macOS
-brew install podman fzf trufflehog
+brew install podman trufflehog
 podman machine init --memory 8192    # one-time; needs ≥4 GB for the test GGUF
 podman machine start
 
 # Linux
-sudo apt install -y podman fzf
+sudo apt install -y podman
 curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh \
     | sh -s -- -b ~/.local/bin
-
-# Both
-python -m venv .venv
-source .venv/bin/activate
-pip install -e .
 ```
 
 Pick a server — typically (a) Inference Providers
@@ -168,26 +185,37 @@ no agentcap-side normalisation of keys or values, so re-rendering
 through the model's chat template is a few lines via
 `transformers.AutoTokenizer.apply_chat_template`.
 
+## Building from source
+
+A Rust toolchain is all you need — no system libraries. The version is
+pinned in [rust-toolchain.toml](rust-toolchain.toml) (rustup fetches it
+automatically).
+
+```bash
+cargo build --release      # binary at target/release/agentcap
+cargo install --path .     # …or install it onto your PATH (~/.cargo/bin)
+```
+
 ## Running tests
 
 ```bash
-pip install -e '.[dev]'
-pytest tests/
+cargo test                 # unit + loopback proxy integration (hermetic; no podman)
 ```
 
-Live driver tests in [tests/test_drivers_live.py](tests/test_drivers_live.py)
-run when a model endpoint is reachable, skip otherwise. Either set
-`AGENTCAP_TEST_LLM_URL=http://host:port/v1`, or have the `llama`
-executable on `$PATH` so the fixture spawns one via `llama serve`
-(install with `curl -fsSL https://llama.app/install.sh | sh`).
-Override the agent's model id with `AGENTCAP_TEST_MODEL` and the
-GGUF with `AGENTCAP_TEST_GGUF` (defaults to Qwen3-1.7B-Q8 fetched
-from the Hub — small + fast enough to chain a tool call on CPU,
-which is what the live tests assert).
+The **live** tier drives the real `agentcap run` binary through a model
+server for each agent inside podman, so it's `#[ignore]`d by default. With
+a server reachable — `AGENTCAP_TEST_LLM_URL=http://host:port`, or one
+already on `:8000` / `:8080`:
 
-The per-agent sandbox is built / booted lazily on first use (same
-lifecycle as `agentcap run`), so the first session pays a multi-
-minute cold-build per agent.
+```bash
+cargo test --test live -- --ignored
+```
+
+Each live test skips (passes) if no server is reachable; override the model
+id with `AGENTCAP_TEST_MODEL`. The per-agent sandbox image is built lazily
+on first use (same lifecycle as `agentcap run`), so the first run pays a
+multi-minute cold build per agent. CI runs this as the **Test - Live**
+workflow against a pinned llama.cpp + Qwen3-1.7B GGUF.
 
 ## License
 
