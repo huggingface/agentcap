@@ -1,0 +1,9 @@
+# Build artefacts and run outputs — never commit (the bundle alone is ~16 GB).
+# Anchored to this dir so they don't match like-named subdirs (e.g. the skill's
+# own transformers/ folder).
+/toolenv/
+/transformers/
+/inputs/
+/sandbox-*/
+/xet-test/
+/.agentcap/
