@@ -1,4 +1,4 @@
-//! Follow-up strategies for multi-turn runs. Ports `followups/*`.
+//! Follow-up strategies for multi-turn runs.
 //!
 //! `turn` is the 1-indexed number of the upcoming turn (first follow-up is
 //! `turn=2`). `continue` is cheapest; `templates` rotates a small pool;

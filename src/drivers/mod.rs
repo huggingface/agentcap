@@ -1,4 +1,4 @@
-//! Agent driver adapters. Ports `drivers/__init__.py` + the four agent modules.
+//! Agent driver adapters.
 //!
 //! A driver wraps an agent CLI so the orchestrator can `start` a session,
 //! `resume` it, and read back the final response text. Drivers shell out via the

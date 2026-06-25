@@ -1,7 +1,6 @@
 //! Preview-pane rendering for inspect: build `ratatui::Text` for a run, a
 //! request (header + prompt + message diff), a flattened message, and an HF
-//! parquet entry. Query terms are highlighted (bold red), replacing the Python
-//! `_highlight` ANSI pipeline.
+//! parquet entry. Query terms are highlighted (bold red).
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
@@ -13,7 +12,7 @@ use super::sources::{MsgRecord, ReqRow, RunRow};
 
 const ARGS_CAP: usize = 240;
 
-/// Run metadata preview (run picker). Ports `_run_preview_cmd`.
+/// Run metadata preview (run picker).
 pub fn run_preview(run: &RunRow) -> Text<'static> {
     let meta: Value = std::fs::read(run.run_dir.join("run.json"))
         .ok()
@@ -75,7 +74,7 @@ pub fn hf_parquet_preview(
     Text::from(lines)
 }
 
-/// Request preview: header + initial prompt + message diff. Ports `_preview_cmd`.
+/// Request preview: header + initial prompt + message diff.
 pub fn request_preview(row: &ReqRow, body: &Value, prev_body: Option<&Value>, terms: &[String]) -> Text<'static> {
     let messages = body
         .get("messages")
@@ -157,7 +156,7 @@ pub fn request_preview(row: &ReqRow, body: &Value, prev_body: Option<&Value>, te
     Text::from(lines)
 }
 
-/// One flattened message detail (message picker). Ports `_render_msg_preview`.
+/// One flattened message detail (message picker).
 pub fn message_preview(rec: &MsgRecord, terms: &[String]) -> Text<'static> {
     let mut lines = vec![plain(format!("role:         {}", rec.role))];
     match rec.msg_idx {

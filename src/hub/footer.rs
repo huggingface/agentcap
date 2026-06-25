@@ -3,8 +3,8 @@
 //!
 //! Our writer stamps `agent`/`model`/`tasks` into the parquet key-value
 //! metadata, so a footer read surfaces the full preview slice. (Parquets written
-//! by the Python pyarrow path keep those under the embedded `ARROW:schema` blob
-//! instead; those show only the row count here until selected.)
+//! by pyarrow keep those under the embedded `ARROW:schema` blob instead; those
+//! show only the row count here until selected.)
 
 use anyhow::{bail, Result};
 use parquet::errors::ParquetError;

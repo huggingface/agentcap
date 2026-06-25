@@ -1,7 +1,7 @@
 //! Live end-to-end tests: drive the real `agentcap run` binary through a real
 //! OpenAI-compatible server for each agent, asserting the wire path (the agent
 //! reaches the model through the proxy and the turn completes) — not task
-//! quality. Ports `test_cli_live.py` + `test_drivers_live.py`.
+//! quality.
 //!
 //! `#[ignore]` by default so `cargo test` stays hermetic. The `Test - Live`
 //! workflow provisions a llama.cpp server + builds the per-agent images, then

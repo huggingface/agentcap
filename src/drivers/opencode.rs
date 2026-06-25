@@ -1,4 +1,4 @@
-//! OpenCode driver: `opencode run --format json`. Ports `drivers/opencode.py`.
+//! OpenCode driver: `opencode run --format json`.
 //! OpenCode emits NDJSON events on stdout: `text` events carry assistant chunks,
 //! every event has `sessionID`, `tool_use` events carry error states.
 

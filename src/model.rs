@@ -16,9 +16,9 @@ pub struct DecodedResponse {
     pub finish_reason: Option<String>,
 }
 
-/// Canonical JSON string with object keys sorted recursively — the Rust analog
-/// of Python's `json.dumps(obj, sort_keys=True)`. Used to make heterogeneous
-/// sub-objects (message content arrays, tool_calls) comparable for diffing.
+/// Canonical JSON string with object keys sorted recursively. Used to make
+/// heterogeneous sub-objects (message content arrays, tool_calls) comparable
+/// for diffing.
 pub fn canonical_json(v: &Value) -> String {
     let mut out = String::new();
     write_canonical(v, &mut out);

@@ -1,6 +1,6 @@
 //! `export`: render capture dirs to parquet and push to the Hub.
 //!
-//! Ports `export.py` + the `export_cmd` orchestration in `__main__.py`. Three
+//! Three
 //! artifacts per push: `<owner>/<base>-captures` (parquet), one
 //! `<owner>/<base>-<agent>-traces` per agent (raw native traces), and a
 //! Collection titled `<base>` grouping them. The trufflehog gate (verified hits
