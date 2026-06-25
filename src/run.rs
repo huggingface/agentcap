@@ -25,6 +25,7 @@ pub fn run(
     api_key: Option<String>,
     sandbox_dir: Option<String>,
     skills_dir: Option<String>,
+    tool_dir: Option<String>,
     tasks_file: String,
     turns: i64,
     followup: String,
@@ -102,6 +103,14 @@ pub fn run(
         let skills_abs = abs(Path::new(s));
         env.insert("AGENTCAP_SKILLS_DIR".into(), skills_abs.clone());
         readonly.push(PathBuf::from(skills_abs));
+    }
+    // A self-contained toolchain dir: mount it read-only at its host path and
+    // hand the init script its bin/ to prepend to PATH (src==dst keeps the
+    // bundle's interpreter shebangs valid in-container).
+    if let Some(t) = &tool_dir {
+        let tool_abs = abs(Path::new(t));
+        env.insert("AGENTCAP_TOOL_BIN".into(), abs(&Path::new(&tool_abs).join("bin")));
+        readonly.push(PathBuf::from(tool_abs));
     }
     let writable: Vec<PathBuf> = vec![
         PathBuf::from(abs(&traces)),
