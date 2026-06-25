@@ -25,80 +25,54 @@ _Three-level picker chain over an HF dataset of captures
 with live preview and Esc walk-back. See
 [docs/inspect.md](docs/inspect.md) for the rest._
 
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/huggingface/agentcap/main/scripts/install.sh | sh
+```
+
+[`scripts/install.sh`](scripts/install.sh) detects your platform, downloads the
+matching binary, and installs it to `~/.local/bin` — append `-b <dir>` or
+`-v <tag>` (after `sh -s --`) to change the dir or pin a version. Binaries are
+also on [GitHub Releases](https://github.com/huggingface/agentcap/releases)
+(`agentcap-x86_64-linux`, `agentcap-arm64-apple-darwin`); to compile instead, see
+[Building from source](#building-from-source).
+
+Two tools are each needed only for the command that uses them — `podman` for the
+sandbox `agentcap run` drives, and `trufflehog` for the secret scan `agentcap
+export` runs before pushing (skip with `--no-scan`):
+
+```bash
+brew install podman trufflehog     # macOS  (+ one-time `podman machine` setup, see docs/capture.md)
+sudo apt install -y podman         # Linux  (trufflehog via its own installer if you'll export)
+```
+
 ## Quick start
 
-Install the prereqs (one-time) and agentcap itself. `podman` runs
-the per-agent sandbox, `fzf` drives the inspect pickers
-(hard requirement; `agentcap inspect` errors out without it), and
-`trufflehog` runs the pre-push secret scan (`agentcap export`
-aborts on any verified hit; pass `--no-scan` to skip).
-
-```bash
-# macOS
-brew install podman fzf trufflehog
-podman machine init --memory 8192    # one-time; needs ≥4 GB for the test GGUF
-podman machine start
-
-# Linux
-sudo apt install -y podman fzf
-curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh \
-    | sh -s -- -b ~/.local/bin
-
-# Both
-python -m venv .venv
-source .venv/bin/activate
-pip install -e .
-```
-
-Pick a server — typically (a) Inference Providers
-`--upstream https://router.huggingface.co` or (b) a local OpenAI-compat
-server like `llama.app` on `http://127.0.0.1:8000`. See
-[docs/capture.md](docs/capture.md) for the trade-offs.
-
-Example with a local `llama.app` server
-
-```bash
-./scripts/start_llama_cpp_server.sh ggml-org/gemma-4-E4B-it-GGUF &
-```
-
-Drive an agent through a corpus. Each run mints a fresh subdir under .agentcap/ in the workspace ($AGENTCAP_WORKSPACE or cwd).
+Capture an agent run against Hugging Face Inference Providers — set `HF_TOKEN`
+(or run `hf auth login`), then point `--upstream` at the router:
 
 ```bash
 agentcap run \
     --agent hermes \
-    --model google/gemma-4-E4B-it \
-    --upstream http://127.0.0.1:8000 \
+    --model zai-org/GLM-4.6 \
+    --upstream https://router.huggingface.co \
     --tasks examples/transformers-coding-session/tasks.txt \
     --turns 4 --followup synthesized
 ```
 
-Browse what's captured. ``--long`` adds upstream + per-run counts.
+Each run lands in a fresh subdir under `.agentcap/` (in `$AGENTCAP_WORKSPACE`,
+else the cwd). Browse it, then publish to the Hub:
 
 ```bash
-agentcap ls
+agentcap ls                                       # list runs (-l adds upstream + counts)
+agentcap export --all --push my-org/my-captures   # parquet + traces -> paired HF datasets
+agentcap inspect my-org/my-captures-captures      # browse the published captures
 ```
 
-Push everything. ``--push <owner>/<base>`` produces paired captures + traces
-datasets and groups them in a Collection.
-
-```bash
-agentcap export --all --push my-org/my-captures
-```
-
-Or push selected runs only.
-
-```bash
-agentcap export hermes-local-20260512-162345 \
-    --push my-org/my-captures
-```
-
-Browse captured requests
-
-```bash
-agentcap inspect                       # everything in the workspace
-agentcap inspect <run-id>              # one run only
-agentcap inspect <request-id>          # dump a specific body
-```
+Prefer a local model server to the router? See
+[docs/capture.md](docs/capture.md) for llama.cpp / `transformers serve` setups
+and the backend trade-offs.
 
 ## Usage
 
@@ -168,26 +142,37 @@ no agentcap-side normalisation of keys or values, so re-rendering
 through the model's chat template is a few lines via
 `transformers.AutoTokenizer.apply_chat_template`.
 
+## Building from source
+
+A Rust toolchain is all you need — no system libraries. The version is
+pinned in [rust-toolchain.toml](rust-toolchain.toml) (rustup fetches it
+automatically).
+
+```bash
+cargo build --release      # binary at target/release/agentcap
+cargo install --path .     # …or install it onto your PATH (~/.cargo/bin)
+```
+
 ## Running tests
 
 ```bash
-pip install -e '.[dev]'
-pytest tests/
+cargo test                 # unit + loopback proxy integration (hermetic; no podman)
 ```
 
-Live driver tests in [tests/test_drivers_live.py](tests/test_drivers_live.py)
-run when a model endpoint is reachable, skip otherwise. Either set
-`AGENTCAP_TEST_LLM_URL=http://host:port/v1`, or have the `llama`
-executable on `$PATH` so the fixture spawns one via `llama serve`
-(install with `curl -fsSL https://llama.app/install.sh | sh`).
-Override the agent's model id with `AGENTCAP_TEST_MODEL` and the
-GGUF with `AGENTCAP_TEST_GGUF` (defaults to Qwen3-1.7B-Q8 fetched
-from the Hub — small + fast enough to chain a tool call on CPU,
-which is what the live tests assert).
+The **live** tier drives the real `agentcap run` binary through a model
+server for each agent inside podman, so it's `#[ignore]`d by default. With
+a server reachable — `AGENTCAP_TEST_LLM_URL=http://host:port`, or one
+already on `:8000` / `:8080`:
 
-The per-agent sandbox is built / booted lazily on first use (same
-lifecycle as `agentcap run`), so the first session pays a multi-
-minute cold-build per agent.
+```bash
+cargo test --test live -- --ignored
+```
+
+Each live test skips (passes) if no server is reachable; override the model
+id with `AGENTCAP_TEST_MODEL`. The per-agent sandbox image is built lazily
+on first use (same lifecycle as `agentcap run`), so the first run pays a
+multi-minute cold build per agent. CI runs this as the **Test - Live**
+workflow against a pinned llama.cpp + Qwen3-1.7B GGUF.
 
 ## License
 

@@ -105,6 +105,15 @@ The proxy is backend-agnostic; `--upstream` is the only switch.
 | Local `llama.app` server      | full control over quant / chat template / sampler    |
 | `transformers serve`          | small models; awkward for big ones at long context   |
 
+Spin up a local `llama.app` server (it auto-installs `llama` on first use) and
+point `--upstream` at it:
+
+```bash
+./scripts/start_llama_cpp_server.sh ggml-org/gemma-4-E4B-it-GGUF &
+agentcap run --agent hermes --model google/gemma-4-E4B-it \
+    --upstream http://127.0.0.1:8000 --tasks examples/transformers-coding-session/tasks.txt
+```
+
 For known-good `(backend, model, agent)` tuples see
 [docs/tested-models-and-agents.md](tested-models-and-agents.md).
 
