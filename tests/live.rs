@@ -40,6 +40,35 @@ fn upstream() -> Option<String> {
     None
 }
 
+/// Last `n` chars of `s`, for failure dumps.
+fn tail(s: &str, n: usize) -> String {
+    let start = s.char_indices().rev().take(n).last().map(|(i, _)| i).unwrap_or(0);
+    s[start..].to_string()
+}
+
+/// Dump everything useful when a turn doesn't complete: run.json, the agentcap
+/// binary's stderr (orchestrator `[turn_done] rc=…` / `[task_aborted] reason=…`),
+/// and each per-turn session log (the agent's own stdout/stderr).
+fn diagnostics(run_dir: &std::path::Path, summary: &Value, bin_stderr: &[u8]) -> String {
+    let mut out = format!("--- run.json ---\n{summary:#}\n");
+    out.push_str(&format!(
+        "--- agentcap stderr (tail) ---\n{}\n",
+        tail(&String::from_utf8_lossy(bin_stderr), 4000)
+    ));
+    if let Ok(rd) = std::fs::read_dir(run_dir.join("sessions")) {
+        for e in rd.flatten() {
+            let p = e.path();
+            let body = std::fs::read_to_string(&p).unwrap_or_default();
+            out.push_str(&format!(
+                "--- sessions/{} (tail) ---\n{}\n",
+                p.file_name().unwrap().to_string_lossy(),
+                tail(&body, 2000)
+            ));
+        }
+    }
+    out
+}
+
 /// `agentcap run --agent <agent>` against the live server; assert the run dir,
 /// run.json shape, captures, and (for pi) the streamed JSONL trace.
 fn run_agent(agent: &str, expect_jsonl_traces: bool) {
@@ -101,7 +130,8 @@ fn run_agent(agent: &str, expect_jsonl_traces: bool) {
     assert_eq!(
         task["completed_turns"],
         json!(1),
-        "wire path: agent didn't complete the turn"
+        "wire path: agent didn't complete the turn\n{}",
+        diagnostics(&run_dir, &summary, &out.stderr)
     );
     assert!(
         task["session_id"].as_str().is_some_and(|s| !s.is_empty()),
