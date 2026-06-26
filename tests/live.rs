@@ -81,6 +81,10 @@ fn diagnostics(run_dir: &std::path::Path, summary: &Value, bin_stderr: &[u8]) ->
 /// `agentcap run --agent <agent>` against the live server; assert the run dir,
 /// run.json shape, captures, and (for pi) the streamed JSONL trace.
 fn run_agent(agent: &str, expect_jsonl_traces: bool) {
+    if !podman_available() {
+        eprintln!("skip live[{agent}]: no podman on PATH");
+        return;
+    }
     let Some(upstream) = upstream() else {
         eprintln!("skip live[{agent}]: no llama server (set AGENTCAP_TEST_LLM_URL or run one on :8000/:8080)");
         return;
