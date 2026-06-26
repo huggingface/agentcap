@@ -337,6 +337,12 @@ fn agent_from_run_json(run_dir: &Path) -> Option<String> {
     rec.get("agent").and_then(Value::as_str).map(str::to_string)
 }
 
+/// Optional free-form `label` recorded by `run --label` (e.g. a sweep tier).
+fn label_from_run_json(run_dir: &Path) -> Option<String> {
+    let rec = read_json(&run_dir.join("run.json")).ok()?;
+    rec.get("label").and_then(Value::as_str).map(str::to_string)
+}
+
 fn push_captures_dataset(
     client: &HFClientSync,
     items: &[CapItem],
@@ -370,6 +376,11 @@ fn push_captures_dataset(
     for (i, item) in items.iter().enumerate() {
         let mut extra = detect_provider_columns(&item.capture_dir);
         let provider = extra.iter().find(|(k, _)| k == "provider").map(|(_, v)| v.clone());
+        if let Some(run_dir) = item.capture_dir.parent() {
+            if let Some(label) = label_from_run_json(run_dir) {
+                extra.push(("label".to_string(), label));
+            }
+        }
         extra.push(("run_id".to_string(), item.run_id.clone()));
         let filename = default_filename(item.agent.as_deref(), Some(&item.model), provider.as_deref());
         let local = tmp.path().join(format!("{i}-{filename}"));

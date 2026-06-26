@@ -1,0 +1,25 @@
+# transformers-agentic corpus — 16 prompts from huggingface/is-it-agentic-enough
+# (src/ae/data/transformers.yaml), one prompt per line as agentcap requires.
+# Each task names a specific HF model so the agent must actually load and run
+# it (otherwise it answers from world knowledge and measures nothing). Order
+# matches the source: task_01..task_16. Inputs (cat.jpg, sample.wav) are seeded
+# into the agent's cwd under ./inputs/ by run.sh.
+#
+# atomic (13): one agentic-CLI command covers it in the "after" state.
+Using the model distilbert/distilbert-base-uncased-finetuned-sst-2-english, classify the sentiment of this sentence and report the label and score: "I absolutely loved the movie, it was fantastic!"
+Using the model dslim/bert-base-NER, extract the named entities from this sentence and report them with their types: "Apple CEO Tim Cook visited Paris last week to meet President Macron."
+Using the model openai/whisper-tiny, transcribe the audio file at ./inputs/sample.wav and report the transcript.
+Using the model llava-hf/llava-interleave-qwen-0.5b-hf, caption the image at ./inputs/cat.jpg and report the caption.
+Using the tokenizer from HuggingFaceTB/SmolLM2-360M-Instruct, tokenize the sentence "The quick brown fox jumps over the lazy dog." and tell me how many tokens it is.
+Using the model facebook/bart-large-cnn, summarize this article in one or two sentences: The James Webb Space Telescope has captured unprecedented images of distant galaxies, revealing structures that formed less than a billion years after the Big Bang. Scientists say the observations, released today, challenge existing models of early galaxy formation and suggest that massive galaxies assembled far more quickly than previously thought. The data will be made publicly available next month.
+Using distilbert/distilbert-base-cased-distilled-squad, answer this question from the given context and report the answer. Question: "Who invented the telephone?" Context: "Alexander Graham Bell invented the telephone in 1876."
+Using distilbert/distilbert-base-uncased, fill in the masked token in this sentence and report the top prediction: "The capital of France is [MASK]."
+Using facebook/bart-large-mnli, classify this sentence into exactly one of the labels technology, sports, or cooking, and report the chosen label: "The new GPU massively speeds up deep-learning training."
+Using google/vit-base-patch16-224, classify the image at ./inputs/cat.jpg and report the top predicted label.
+Using facebook/detr-resnet-50, detect the objects in the image at ./inputs/cat.jpg and report the detected labels.
+Using llava-hf/llava-interleave-qwen-0.5b-hf, answer this question about the image at ./inputs/cat.jpg: "What animal is in the image?"
+Using HuggingFaceTB/SmolLM2-360M-Instruct, generate a short (one or two sentence) continuation of this prompt and report the generated text: "Once upon a time, in a small village by the sea,"
+Using the zero-shot audio classifier laion/clap-htsat-unfused, classify the audio file at ./inputs/sample.wav into one of speech, music, or noise, and report the chosen label.
+# compositional (2): no single CLI command fits; the agent must write Python.
+Transcribe the audio file at ./inputs/sample.wav using openai/whisper-tiny, then classify the sentiment of the transcript using distilbert/distilbert-base-uncased-finetuned-sst-2-english. Report both the transcript and the sentiment.
+Caption the image at ./inputs/cat.jpg using llava-hf/llava-interleave-qwen-0.5b-hf, then translate the caption to French using Helsinki-NLP/opus-mt-en-fr. Report both the English caption and the French translation.

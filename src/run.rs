@@ -26,6 +26,7 @@ pub fn run(
     sandbox_dir: Option<String>,
     skills_dir: Option<String>,
     tool_dir: Option<String>,
+    label: Option<String>,
     tasks_file: String,
     turns: i64,
     followup: String,
@@ -68,6 +69,7 @@ pub fn run(
         &upstream,
         turns,
         &followup,
+        label.as_deref(),
         &[],
     )?;
 
@@ -155,6 +157,7 @@ pub fn run(
         &upstream,
         turns,
         &followup,
+        label.as_deref(),
         &results,
     )?;
     let n_ok = results.iter().filter(|r| r.completed_turns() as i64 == turns).count();
@@ -227,6 +230,7 @@ fn write_run_json(
     upstream: &str,
     turns: i64,
     followup: &str,
+    label: Option<&str>,
     results: &[TaskResult],
 ) -> Result<()> {
     let tasks: Vec<_> = results
@@ -245,10 +249,13 @@ fn write_run_json(
             })
         })
         .collect();
-    let summary = json!({
+    let mut summary = json!({
         "agent": agent, "model": model, "provider": provider, "upstream": upstream,
         "turns_per_task": turns, "followup": followup, "tasks": tasks,
     });
+    if let Some(l) = label {
+        summary["label"] = json!(l);
+    }
     std::fs::write(workdir.join("run.json"), serde_json::to_string_pretty(&summary)?)?;
     Ok(())
 }
