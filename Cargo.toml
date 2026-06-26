@@ -1,6 +1,6 @@
 [package]
 name = "agentcap"
-version = "0.1.0+dev"
+version = "0.1.1+dev"
 edition = "2021"
 description = "Run coding agents at scale across (agent × model × corpus), capture every chat-completion byte, publish as a Hugging Face dataset."
 license = "Apache-2.0"
