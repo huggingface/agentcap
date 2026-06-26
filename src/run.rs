@@ -25,6 +25,7 @@ pub fn run(
     api_key: Option<String>,
     sandbox_dir: Option<String>,
     skills_dir: Option<String>,
+    tool_dir: Option<String>,
     tasks_file: String,
     turns: i64,
     followup: String,
@@ -103,6 +104,12 @@ pub fn run(
         env.insert("AGENTCAP_SKILLS_DIR".into(), skills_abs.clone());
         readonly.push(PathBuf::from(skills_abs));
     }
+    // A self-contained toolchain dir, mounted read-only at its host path.
+    if let Some(t) = &tool_dir {
+        let (tool_bin, mount) = tool_dir_wiring(t);
+        env.insert("AGENTCAP_TOOL_BIN".into(), tool_bin);
+        readonly.push(mount);
+    }
     let writable: Vec<PathBuf> = vec![
         PathBuf::from(abs(&traces)),
         PathBuf::from(abs(&state)),
@@ -164,6 +171,16 @@ fn abs(p: &Path) -> String {
         .unwrap_or_else(|_| p.to_path_buf())
         .to_string_lossy()
         .into_owned()
+}
+
+/// Sandbox wiring for `--tool-dir`: the `AGENTCAP_TOOL_BIN` value (the bundle's
+/// `bin/`) and the read-only mount. The mount is the bundle *root*, not `bin/`,
+/// so the interpreter and libs that `bin/` shebangs into come too; both are
+/// absolute so the src==dst bind keeps those shebangs valid in-container.
+fn tool_dir_wiring(tool_dir: &str) -> (String, PathBuf) {
+    let root = abs(Path::new(tool_dir));
+    let bin = abs(&Path::new(&root).join("bin"));
+    (bin, PathBuf::from(root))
 }
 
 fn is_hf_router(upstream: &str) -> bool {
@@ -234,4 +251,26 @@ fn write_run_json(
     });
     std::fs::write(workdir.join("run.json"), serde_json::to_string_pretty(&summary)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_dir_wiring_points_at_bin_and_mounts_root() {
+        let (bin, mount) = tool_dir_wiring("/opt/toolbox");
+        // bin/ is on PATH; the whole bundle (interpreter + libs, not just bin/) is mounted.
+        assert_eq!(bin, "/opt/toolbox/bin");
+        assert_eq!(mount, PathBuf::from("/opt/toolbox"));
+    }
+
+    #[test]
+    fn tool_dir_wiring_absolutizes_relative_paths() {
+        // Relocatable src==dst mount needs absolute paths even for a relative arg.
+        let (bin, mount) = tool_dir_wiring("toolbox");
+        assert!(mount.is_absolute(), "mount not absolute: {mount:?}");
+        assert!(Path::new(&bin).is_absolute(), "bin not absolute: {bin}");
+        assert!(bin.ends_with("toolbox/bin"), "bin not under toolbox/bin: {bin}");
+    }
 }

@@ -34,6 +34,10 @@ enum Cmd {
         /// Host dir with a huggingface/skills checkout (bind-mounted read-only).
         #[arg(long)]
         skills: Option<String>,
+        /// Host dir of a self-contained toolchain (e.g. a relocatable venv);
+        /// bind-mounted read-only and its `bin/` prepended to the agent's PATH.
+        #[arg(long)]
+        tool_dir: Option<String>,
         /// Plain-text file: one prompt per line (# comments + blanks ignored).
         #[arg(long)]
         tasks: String,
@@ -87,12 +91,13 @@ fn main() -> Result<()> {
             api_key,
             sandbox,
             skills,
+            tool_dir,
             tasks,
             turns,
             followup,
             timeout,
         } => agentcap::run::run(
-            agent, model, upstream, api_key, sandbox, skills, tasks, turns, followup, timeout,
+            agent, model, upstream, api_key, sandbox, skills, tool_dir, tasks, turns, followup, timeout,
         ),
         Cmd::Ls { workspace, long } => agentcap::ls::run(workspace, long),
         Cmd::Export {

@@ -9,6 +9,7 @@
 //!   AGENTCAP_TEST_LLM_URL=http://127.0.0.1:8000 cargo test --test live -- --ignored
 //! Each test skips (passes) if no server is reachable.
 
+use std::collections::BTreeMap;
 use std::process::Command;
 use std::time::Duration;
 
@@ -38,6 +39,14 @@ fn upstream() -> Option<String> {
         }
     }
     None
+}
+
+/// Is `podman` on PATH? The tool-dir test needs only podman (no model server),
+/// so it gates on this rather than [`upstream`].
+fn podman_available() -> bool {
+    std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).any(|d| d.join("podman").is_file()))
+        .unwrap_or(false)
 }
 
 /// Last `n` chars of `s`, for failure dumps.
@@ -72,6 +81,10 @@ fn diagnostics(run_dir: &std::path::Path, summary: &Value, bin_stderr: &[u8]) ->
 /// `agentcap run --agent <agent>` against the live server; assert the run dir,
 /// run.json shape, captures, and (for pi) the streamed JSONL trace.
 fn run_agent(agent: &str, expect_jsonl_traces: bool) {
+    if !podman_available() {
+        eprintln!("skip live[{agent}]: no podman on PATH");
+        return;
+    }
     let Some(upstream) = upstream() else {
         eprintln!("skip live[{agent}]: no llama server (set AGENTCAP_TEST_LLM_URL or run one on :8000/:8080)");
         return;
@@ -166,6 +179,66 @@ fn live_pi() {
 #[ignore = "live: needs a model server + podman"]
 fn live_goose() {
     run_agent("goose", false);
+}
+
+/// `--tool-dir`: the bundle mounts read-only and its `bin/` lands on the agent's
+/// PATH. Driven straight through the sandbox (no model) so the mount + init-script
+/// wiring is asserted deterministically; `run()`'s derivation of this env from
+/// `--tool-dir` is unit-tested in `run.rs`. Needs only podman (any agent image —
+/// the tool-dir init block is identical across all four).
+#[test]
+#[ignore = "live: needs podman + a built per-agent image"]
+fn live_tool_dir_mount() {
+    if !podman_available() {
+        eprintln!("skip live[tool-dir]: no podman on PATH");
+        return;
+    }
+
+    // A self-contained bundle: bin/greet prints a sentinel.
+    let tmp = tempfile::tempdir().unwrap();
+    let bundle = tmp.path().join("toolbox");
+    std::fs::create_dir_all(bundle.join("bin")).unwrap();
+    let greet = bundle.join("bin/greet");
+    std::fs::write(&greet, "#!/bin/sh\necho TOOLDIR_SENTINEL_OK\n").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&greet, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    // The env run() derives for this bundle: bin/ on AGENTCAP_TOOL_BIN, the whole
+    // bundle mounted read-only at its host path.
+    let env: BTreeMap<String, String> = BTreeMap::from([(
+        "AGENTCAP_TOOL_BIN".to_string(),
+        bundle.join("bin").to_string_lossy().into_owned(),
+    )]);
+    let sandbox = agentcap::sandbox::require_sandbox("pi", env.clone(), vec![bundle.clone()], vec![], &|m| {
+        eprintln!("  [sandbox] {m}")
+    })
+    .expect("provision pi sandbox");
+
+    let probe = ["sh", "-c", "command -v greet; greet"].map(String::from);
+    let out = sandbox
+        .run(&probe, &env, None, Some(Duration::from_secs(600)))
+        .unwrap_or_else(|e| match e {
+            agentcap::sandbox::SandboxError::Timeout => panic!("tool-dir probe timed out"),
+            agentcap::sandbox::SandboxError::Other(e) => panic!("tool-dir probe errored: {e}"),
+        });
+
+    assert_eq!(
+        out.code, 0,
+        "probe rc={}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        out.code, out.stdout, out.stderr
+    );
+    assert!(
+        out.stdout.contains("/bin/greet"),
+        "bundle bin/ not on PATH\nstdout:\n{}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("TOOLDIR_SENTINEL_OK"),
+        "mounted tool not runnable\nstdout:\n{}",
+        out.stdout
+    );
 }
 
 // hermes and opencode are intentionally omitted — neither runs via `agentcap run`

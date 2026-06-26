@@ -66,6 +66,12 @@ if [ -n "${AGENTCAP_SKILLS_DIR:-}" ] && [ -d "$AGENTCAP_SKILLS_DIR" ]; then
         ln -sf "$AGENTCAP_SKILLS_DIR/agents/AGENTS.md" "$PWD/AGENTS.md"
 fi
 
+# Toolchain mount (agentcap --tool-dir): prepend its bin/ so the agent's task
+# work can call it. The dir is bind-mounted (read-only) at its host path.
+if [ -n "${AGENTCAP_TOOL_BIN:-}" ] && [ -d "$AGENTCAP_TOOL_BIN" ]; then
+    export PATH="$AGENTCAP_TOOL_BIN:$PATH"
+fi
+
 # Record this shell's PID so the sandbox can target the about-to-be
 # exec'd agent precisely on timeout. ``exec`` keeps $$, so the value
 # stays valid after the replacement.
