@@ -169,6 +169,10 @@ explicitly first.
    the container — e.g. `transformers-coding-session`'s transformers
    source tree — pass it through as `--sandbox <host-path>` (writable)
    or `--skills <host-path>` (read-only); the driver hands those to
-   ``PodmanSandbox`` as bind mounts. Tokens / per-run secrets (e.g.
-   `HF_TOKEN`) flow through `sandbox.run(env={…})` →
-   `podman run -e KEY=VAL …`, no mount required.
+   ``PodmanSandbox`` as bind mounts. Per-run env (model id, proxy URL,
+   dirs) flows through `sandbox.run(env={…})` → `podman run -e KEY=VAL …`,
+   no mount required. The upstream API credential is the exception: the
+   sandbox receives only a placeholder (`AGENTCAP_API_KEY`), and the
+   capture proxy swaps in the real token on the outbound leg — so it
+   never enters the container, and an agent that dumps its env can't leak
+   it.

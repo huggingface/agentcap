@@ -17,6 +17,12 @@ use crate::provider::{hostname_fallback, refine_for_sub_provider};
 use crate::proxy::serve_in_thread;
 use crate::sandbox::require_sandbox;
 
+/// Placeholder key handed to the sandboxed agent in place of the real upstream
+/// token. All agent traffic flows through the capture proxy, which swaps in the
+/// real credential on the outbound leg — so the real token never enters the
+/// sandbox, and an agent that dumps its env captures only this string.
+const AGENT_PLACEHOLDER_KEY: &str = "agentcap-proxy-injects-real-token";
+
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     agent: String,
@@ -84,7 +90,7 @@ pub fn run(
         bail!("no tasks found in {tasks_file}");
     }
 
-    let proxy = serve_in_thread(&upstream, &captures, "0.0.0.0")?;
+    let proxy = serve_in_thread(&upstream, &captures, "0.0.0.0", api_key.clone())?;
     eprintln!("  [proxy] {}", proxy.proxy_url());
 
     let mut env: BTreeMap<String, String> = BTreeMap::from([
@@ -94,8 +100,11 @@ pub fn run(
         ("AGENTCAP_TRACES_DIR".into(), abs(&traces)),
         ("AGENTCAP_STATE_DIR".into(), abs(&state)),
     ]);
-    if let Some(k) = &api_key {
-        env.insert("AGENTCAP_API_KEY".into(), k.clone());
+    // Hand the agent a placeholder, never the real token: the capture proxy injects
+    // the real credential on the upstream leg (see `serve_in_thread`). So an agent
+    // that dumps its env — the leak vector — captures only this placeholder.
+    if api_key.is_some() {
+        env.insert("AGENTCAP_API_KEY".into(), AGENT_PLACEHOLDER_KEY.to_string());
     }
     let mut readonly: Vec<PathBuf> = Vec::new();
     if let Some(s) = &skills_dir {

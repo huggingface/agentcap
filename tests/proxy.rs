@@ -20,6 +20,15 @@ fn mock_upstream() -> (String, impl FnOnce()) {
             let Ok(mut req) = s.recv() else { break };
             let served_by = Header::from_bytes(&b"x-served-by"[..], &b"mock"[..]).unwrap();
             if req.url().starts_with("/v1/chat/completions") {
+                // Echo the Authorization the proxy forwarded, so a test can assert the
+                // real token was injected (and the agent's placeholder dropped).
+                let seen_auth = req
+                    .headers()
+                    .iter()
+                    .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case("authorization"))
+                    .map(|h| h.value.as_str().to_string())
+                    .unwrap_or_else(|| "none".to_string());
+                let seen = Header::from_bytes(&b"x-seen-auth"[..], seen_auth.as_bytes()).unwrap();
                 let mut body = Vec::new();
                 req.as_reader().read_to_end(&mut body).unwrap();
                 let stream = serde_json::from_slice::<Value>(&body)
@@ -29,11 +38,11 @@ fn mock_upstream() -> (String, impl FnOnce()) {
                 if stream {
                     let ct = Header::from_bytes(&b"content-type"[..], &b"text/event-stream"[..]).unwrap();
                     let raw = "data: {\"model\":\"m\",\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\ndata: [DONE]\n";
-                    let _ = req.respond(Response::from_string(raw).with_header(ct).with_header(served_by));
+                    let _ = req.respond(Response::from_string(raw).with_header(ct).with_header(served_by).with_header(seen));
                 } else {
                     let ct = Header::from_bytes(&b"content-type"[..], &b"application/json"[..]).unwrap();
                     let json = r#"{"id":"c1","model":"m","choices":[{"message":{"content":"hi"}}]}"#;
-                    let _ = req.respond(Response::from_string(json).with_header(ct).with_header(served_by));
+                    let _ = req.respond(Response::from_string(json).with_header(ct).with_header(served_by).with_header(seen));
                 }
             } else {
                 // passthrough target
@@ -71,7 +80,7 @@ fn captures_nonstream_stream_and_passes_through() {
     let tmp = tempfile::tempdir().unwrap();
     let cap = tmp.path().join("captures");
 
-    let proxy = agentcap::proxy::serve_in_thread(&upstream, &cap, "127.0.0.1").unwrap();
+    let proxy = agentcap::proxy::serve_in_thread(&upstream, &cap, "127.0.0.1", None).unwrap();
     let base = format!("http://127.0.0.1:{}", proxy.port);
     let client = reqwest::blocking::Client::new();
 
@@ -132,4 +141,34 @@ fn captures_nonstream_stream_and_passes_through() {
             assert_eq!(resp["upstream_fingerprint"]["served_model"], serde_json::json!("m"));
         }
     }
+}
+
+/// The proxy must replace the agent's `Authorization` with the real upstream token,
+/// so the sandbox never needs (or sees) the real credential. The mock upstream
+/// echoes the `Authorization` it received back in `x-seen-auth`.
+#[test]
+fn proxy_injects_real_upstream_token() {
+    let (upstream, shutdown) = mock_upstream();
+    let tmp = tempfile::tempdir().unwrap();
+    let cap = tmp.path().join("captures");
+
+    let proxy =
+        agentcap::proxy::serve_in_thread(&upstream, &cap, "127.0.0.1", Some("REAL-UPSTREAM-TOKEN".into())).unwrap();
+    let base = format!("http://127.0.0.1:{}", proxy.port);
+
+    // The agent sends only its placeholder key.
+    let r = reqwest::blocking::Client::new()
+        .post(format!("{base}/v1/chat/completions"))
+        .header("authorization", "Bearer agent-placeholder")
+        .json(&serde_json::json!({"model": "m", "messages": [], "stream": false}))
+        .send()
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let seen = r.headers().get("x-seen-auth").unwrap().to_str().unwrap().to_string();
+
+    proxy.shutdown();
+    shutdown();
+
+    assert_eq!(seen, "Bearer REAL-UPSTREAM-TOKEN", "proxy must inject the real upstream token");
+    assert!(!seen.contains("agent-placeholder"), "agent placeholder must not reach upstream");
 }

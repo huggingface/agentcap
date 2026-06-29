@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use reqwest::blocking::Client;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION};
 use serde_json::Value;
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
@@ -60,11 +60,14 @@ struct CaptureProxy {
     upstream: String,
     capture_dir: PathBuf,
     client: Client,
+    /// Real upstream credential, injected on every forwarded request in place of the
+    /// placeholder the sandboxed agent holds. `None` when the upstream needs no auth.
+    auth: Option<String>,
     ctx: Mutex<(Option<String>, Option<i64>)>,
 }
 
 impl CaptureProxy {
-    fn new(upstream: &str, capture_dir: PathBuf) -> Result<Self> {
+    fn new(upstream: &str, capture_dir: PathBuf, auth: Option<String>) -> Result<Self> {
         std::fs::create_dir_all(&capture_dir).with_context(|| format!("creating {}", capture_dir.display()))?;
         // Per-request cap above blocking's 30s default (too short for a slow streamed
         // generation), but finite so a hung upstream can't wedge a worker.
@@ -76,6 +79,7 @@ impl CaptureProxy {
             upstream: upstream.trim_end_matches('/').to_string(),
             capture_dir,
             client,
+            auth,
             ctx: Mutex::new((None, None)),
         })
     }
@@ -122,7 +126,7 @@ impl CaptureProxy {
         );
 
         let url = format!("{}{}", self.upstream, CHAT_COMPLETIONS_PATH);
-        let fwd = forward_headers(req.headers());
+        let fwd = forward_headers(req.headers(), self.auth.as_deref());
         if is_stream {
             self.forward_stream(req, &url, body, fwd, &rid)
         } else {
@@ -172,7 +176,7 @@ impl CaptureProxy {
     fn passthrough(&self, mut req: Request) -> Result<()> {
         let url = format!("{}{}", self.upstream, req.url());
         let method = reqwest::Method::from_bytes(req.method().to_string().as_bytes()).unwrap_or(reqwest::Method::GET);
-        let fwd = forward_headers(req.headers());
+        let fwd = forward_headers(req.headers(), self.auth.as_deref());
         let mut body = Vec::new();
         req.as_reader().read_to_end(&mut body)?;
         let mut builder = self.client.request(method, &url).headers(fwd);
@@ -200,11 +204,17 @@ fn respond_502(req: Request, e: &reqwest::Error) -> Result<()> {
 }
 
 /// Build a reqwest HeaderMap from the agent's request headers, dropping hop-by-hop.
-fn forward_headers(headers: &[Header]) -> HeaderMap {
+/// When `auth` is set, the agent's own `Authorization` is dropped and replaced with
+/// the real upstream credential — the sandboxed agent only ever holds a placeholder,
+/// so the real token is attached here, on the host, and never lives in the sandbox.
+fn forward_headers(headers: &[Header], auth: Option<&str>) -> HeaderMap {
     let mut map = HeaderMap::new();
     for h in headers {
         let name = h.field.as_str().as_str();
         if is_hop_by_hop(name) {
+            continue;
+        }
+        if auth.is_some() && name.eq_ignore_ascii_case("authorization") {
             continue;
         }
         if let (Ok(n), Ok(v)) = (
@@ -212,6 +222,11 @@ fn forward_headers(headers: &[Header]) -> HeaderMap {
             HeaderValue::from_bytes(h.value.as_str().as_bytes()),
         ) {
             map.insert(n, v);
+        }
+    }
+    if let Some(token) = auth {
+        if let Ok(v) = HeaderValue::from_str(&format!("Bearer {token}")) {
+            map.insert(AUTHORIZATION, v);
         }
     }
     map
@@ -274,9 +289,11 @@ impl ProxyHandle {
 
 /// Start the proxy on a worker-thread pool, bound to `host:0` (kernel-assigned
 /// port, read back into `ProxyHandle.port`). `run` binds `0.0.0.0` so the
-/// container can dial in via `host.containers.internal`.
-pub fn serve_in_thread(upstream: &str, capture_dir: &Path, host: &str) -> Result<ProxyHandle> {
-    let proxy = Arc::new(CaptureProxy::new(upstream, capture_dir.to_path_buf())?);
+/// container can dial in via `host.containers.internal`. `auth`, when set, is the
+/// real upstream credential the proxy injects on every forwarded request — the
+/// sandboxed agent holds only a placeholder, so the token never enters the sandbox.
+pub fn serve_in_thread(upstream: &str, capture_dir: &Path, host: &str, auth: Option<String>) -> Result<ProxyHandle> {
+    let proxy = Arc::new(CaptureProxy::new(upstream, capture_dir.to_path_buf(), auth)?);
     let server = Server::http((host, 0u16)).map_err(|e| anyhow::anyhow!("binding proxy: {e}"))?;
     let port = server
         .server_addr()
