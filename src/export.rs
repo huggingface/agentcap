@@ -3,8 +3,9 @@
 //! Three
 //! artifacts per push: `<owner>/<base>-captures` (parquet), one
 //! `<owner>/<base>-<agent>-traces` per agent (raw native traces), and a
-//! Collection titled `<base>` grouping them. The trufflehog gate (verified hits
-//! abort) runs first unless `--no-scan`.
+//! Collection titled `<base>` grouping them. The trufflehog gate runs first
+//! unless `--no-scan`: it scans offline (never verifying — see [`crate::scan`])
+//! and aborts on any pattern hit.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -252,11 +253,16 @@ pub fn run(targets: Vec<String>, all_runs: bool, push: String, no_scan: bool) ->
             .iter()
             .map(|c| c.capture_dir.parent().unwrap_or(Path::new(".")).to_path_buf())
             .collect();
-        let n_verified = scan_run_dirs(&run_dirs, false, false)?;
-        if n_verified > 0 {
+        // Scan offline only (no_verification = true). Verifying a candidate round-trips the
+        // live credential to the provider's API, whose secret-scanning treats that as an
+        // exposure and revokes the token — so detection must never verify. With nothing
+        // verified, the gate blocks on any pattern hit instead of on a verified count.
+        let n_hits = scan_run_dirs(&run_dirs, true, false)?;
+        if n_hits > 0 {
             bail!(
-                "export aborted: trufflehog found {n_verified} verified secret(s) — see output above. \
-                 Inspect, redact, or pass --no-scan to override."
+                "export aborted: trufflehog flagged {n_hits} potential secret(s) by pattern — see \
+                 output above. Inspect them (`agentcap inspect`), redact, or pass --no-scan to \
+                 override. The scan never verifies, so a real secret is never sent to the provider."
             );
         }
     }
@@ -460,39 +466,36 @@ fn push_agent_traces_dataset(
     Ok((repo_id, n_files))
 }
 
-/// Scan each run dir, printing a per-run summary; return the total verified-hit
-/// count across all runs (the caller aborts if > 0).
+/// Scan each run dir offline and print a per-run summary; return the total number
+/// of flagged hits across all runs (the caller aborts if > 0). Both buckets are
+/// summed defensively: an offline scan only fills `unverified`, but a stale
+/// verified-mode `scan.json` left by an older build would still block.
 fn scan_run_dirs(run_dirs: &[PathBuf], no_verification: bool, rescan: bool) -> Result<usize> {
-    let mut total_verified = 0;
+    let mut total_hits = 0;
     for run_dir in run_dirs {
         let (result, was_cached) = scan::scan_run_dir(run_dir, no_verification, rescan)?;
-        total_verified += result.verified.len();
+        let hits = result.verified.len() + result.unverified.len();
+        total_hits += hits;
         let cache_tag = if was_cached { " (cached)" } else { "" };
         let name = run_dir.file_name().and_then(|n| n.to_str()).unwrap_or("?");
         eprintln!(
-            "  [scan] {name}{cache_tag}: {} chunks / {} bytes; verified={} unverified={}",
-            result.chunks_scanned,
-            result.bytes_scanned,
-            result.verified.len(),
-            result.unverified.len()
+            "  [scan] {name}{cache_tag}: {} chunks / {} bytes; {hits} potential secret(s)",
+            result.chunks_scanned, result.bytes_scanned,
         );
-        for hit in &result.verified {
-            eprintln!("    VERIFIED  {}  {}", hit.detector, hit.file);
+        let mut by_det: BTreeMap<&str, usize> = BTreeMap::new();
+        for h in result.verified.iter().chain(&result.unverified) {
+            *by_det.entry(h.detector.as_str()).or_default() += 1;
         }
-        if !result.unverified.is_empty() {
-            let mut by_det: BTreeMap<&str, usize> = BTreeMap::new();
-            for h in &result.unverified {
-                *by_det.entry(h.detector.as_str()).or_default() += 1;
-            }
+        if !by_det.is_empty() {
             let tail = by_det
                 .iter()
                 .map(|(d, n)| format!("{d}={n}"))
                 .collect::<Vec<_>>()
                 .join(", ");
-            eprintln!("    unverified by detector: {tail}");
+            eprintln!("    by detector: {tail}");
         }
     }
-    Ok(total_verified)
+    Ok(total_hits)
 }
 
 fn captures_readme(repo_id: &str, owner: &str, base: &str) -> String {

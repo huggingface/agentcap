@@ -1,11 +1,14 @@
 //! Secret scan over a capture run, gating `export`.
 //!
-//! Shells out to `trufflehog filesystem` and parses its JSON. Policy: a single
-//! **verified** hit aborts the export;
-//! **unverified** hits are reported but non-blocking (pattern matchers have a
-//! real false-positive rate). Results are cached to `<run_dir>/scan.json`; the
-//! cache is invalidated by `rescan` or when a pattern-only cache can't satisfy a
-//! verify request.
+//! Shells out to `trufflehog filesystem` and parses its JSON. The `export` gate
+//! scans **offline** (`--no-verification`) and aborts on **any** pattern hit: it
+//! never verifies, because verifying round-trips the live credential to the
+//! provider's API, whose secret-scanning treats that as an exposure and revokes
+//! the token (verifying an HF token *is* the revocation). Pattern-only matching
+//! has a real false-positive rate; the escape hatch is `--no-scan` (after
+//! inspecting), never a network round-trip. Results are cached to
+//! `<run_dir>/scan.json`; the cache is invalidated by `rescan` or when a
+//! pattern-only cache can't satisfy a verify request.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -86,10 +89,11 @@ fn is_executable_file(p: &Path) -> bool {
     p.is_file()
 }
 
-/// Scan a directory or file with trufflehog. With `no_verification=false`
-/// (default) candidates are round-tripped against the provider API, so the
-/// `verified` bucket is high-precision (requires network). `true` is offline
-/// pattern-only matching — everything lands as `unverified`.
+/// Scan a directory or file with trufflehog. With `no_verification=true` it is an
+/// offline pattern match — everything lands as `unverified` and nothing touches
+/// the network. With `false`, candidates are round-tripped against the provider
+/// API (high precision, but the round-trip can get a live token revoked), so
+/// `export` always passes `true`.
 pub fn scan_path(path: &Path, no_verification: bool) -> Result<ScanResult> {
     let bin = find_trufflehog()?;
     let mut cmd = Command::new(&bin);

@@ -1,8 +1,8 @@
 # Exporting to a Hugging Face dataset
 
 `agentcap export` bundles one or more runs into parquet, ships each
-agent's native traces alongside, scans for verified secrets, and
-pushes everything as a [HF Collection][coll].
+agent's native traces alongside, scans for secrets (offline, never
+verifying), and pushes everything as a [HF Collection][coll].
 
 [coll]: https://huggingface.co/docs/hub/collections
 
@@ -46,8 +46,12 @@ agentcap export ./some/workdir --push my-org/my-captures
 ## Secret scanning
 
 Before pushing, `agentcap export` runs `trufflehog` against each run
-directory and aborts on any **verified** secret hit (pattern-only
-matches are surfaced but don't block).
+directory **offline** and aborts on **any** pattern hit. It never
+verifies: verifying round-trips the live credential to the provider,
+whose secret-scanning then revokes it (for an HF token, verifying *is*
+the revocation). The cost is that benign high-entropy strings can also
+trip the gate — inspect them (`agentcap inspect`), then redact or
+`--no-scan`.
 
 ```bash
 brew install trufflehog        # macOS
