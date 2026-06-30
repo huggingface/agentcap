@@ -1,0 +1,6 @@
+# Build artefacts and run outputs — never commit. Anchored to this dir.
+# The bundle carries the funes binary + a prewarmed model cache (~1.5 GB) and,
+# at run time, the user's HF token under funes-home/ — none of it belongs in git.
+/funesenv/
+/sandbox/
+/.agentcap/
