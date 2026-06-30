@@ -205,11 +205,11 @@ fn live_tool_dir_mount() {
         std::fs::set_permissions(&greet, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
-    // The env run() derives for this bundle: bin/ on AGENTCAP_TOOL_BIN, the whole
-    // bundle mounted read-only at its host path.
+    // The env run() derives for this bundle: AGENTCAP_TOOL_DIR is the bundle root,
+    // mounted read-only at its host path; the entrypoint scans it for bin/ dirs onto PATH.
     let env: BTreeMap<String, String> = BTreeMap::from([(
-        "AGENTCAP_TOOL_BIN".to_string(),
-        bundle.join("bin").to_string_lossy().into_owned(),
+        "AGENTCAP_TOOL_DIR".to_string(),
+        bundle.to_string_lossy().into_owned(),
     )]);
     let sandbox = agentcap::sandbox::require_sandbox("pi", env.clone(), vec![bundle.clone()], vec![], &|m| {
         eprintln!("  [sandbox] {m}")

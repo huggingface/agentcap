@@ -38,10 +38,15 @@ if [ -n "${AGENTCAP_SKILLS_DIR:-}" ] && [ -d "$AGENTCAP_SKILLS_DIR" ]; then
         ln -sfn "$AGENTCAP_SKILLS_DIR/skills" "$PWD/skills"
 fi
 
-# Toolchain mount (agentcap --tool-dir): prepend its bin/ so the agent's task
-# work can call it. The dir is bind-mounted (read-only) at its host path.
-if [ -n "${AGENTCAP_TOOL_BIN:-}" ] && [ -d "$AGENTCAP_TOOL_BIN" ]; then
-    export PATH="$AGENTCAP_TOOL_BIN:$PATH"
+# Toolchain mount (agentcap --tool-dir): put the bundle root and every bin/ it
+# ships on PATH, then run its tool_init.sh hook if present (agent-specific setup).
+# The dir is bind-mounted (read-only) at its host path.
+if [ -n "${AGENTCAP_TOOL_DIR:-}" ] && [ -d "$AGENTCAP_TOOL_DIR" ]; then
+    export PATH="$AGENTCAP_TOOL_DIR:$PATH"
+    for d in $(find "$AGENTCAP_TOOL_DIR" -maxdepth 2 -type d -name bin 2>/dev/null); do
+        export PATH="$d:$PATH"
+    done
+    [ -f "$AGENTCAP_TOOL_DIR/tool_init.sh" ] && sh "$AGENTCAP_TOOL_DIR/tool_init.sh" || true
 fi
 
 # Record this shell's PID so the sandbox can target the about-to-be
