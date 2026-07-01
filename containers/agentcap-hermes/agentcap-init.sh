@@ -68,8 +68,15 @@ fi
 
 # Toolchain mount (agentcap --tool-dir): prepend its bin/ so the agent's task
 # work can call it. The dir is bind-mounted (read-only) at its host path.
-if [ -n "${AGENTCAP_TOOL_BIN:-}" ] && [ -d "$AGENTCAP_TOOL_BIN" ]; then
-    export PATH="$AGENTCAP_TOOL_BIN:$PATH"
+if [ -n "${AGENTCAP_TOOL_DIR:-}" ] && [ -d "$AGENTCAP_TOOL_DIR" ]; then
+    # Put the bundle root and every bin/ it ships on PATH.
+    export PATH="$AGENTCAP_TOOL_DIR:$PATH"
+    for d in $(find "$AGENTCAP_TOOL_DIR" -maxdepth 2 -type d -name bin 2>/dev/null); do
+        export PATH="$d:$PATH"
+    done
+    # Run the bundle's init hook if it ships one (agent-specific setup: MCP
+    # registration, seeding the cwd, …). It sees AGENTCAP_AGENT + AGENTCAP_TOOL_DIR.
+    [ -f "$AGENTCAP_TOOL_DIR/tool_init.sh" ] && sh "$AGENTCAP_TOOL_DIR/tool_init.sh" || true
 fi
 
 # Record this shell's PID so the sandbox can target the about-to-be

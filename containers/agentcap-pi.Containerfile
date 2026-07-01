@@ -1,8 +1,10 @@
 # Per-agent sandbox image for the pi-coding-agent CLI
-# (``@mariozechner/pi-coding-agent`` on npm).
+# (``@earendil-works/pi-coding-agent`` on npm; the old
+# ``@mariozechner/pi-coding-agent`` is deprecated).
 #
 # Pinning ``PI_VERSION`` is the reproducibility knob — bump it
-# deliberately, never let it drift to ``latest``.
+# deliberately, never let it drift to ``latest``. 0.74.x is the
+# ``legacy-node20`` line; newer pi needs Node >= 22 (see below).
 
 FROM ubuntu:24.04
 
@@ -16,9 +18,9 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends nodejs \
  && rm -rf /var/lib/apt/lists/*
 
-ARG PI_VERSION=0.73.0
+ARG PI_VERSION=0.74.2
 RUN npm install -g --no-fund --no-audit \
-        "@mariozechner/pi-coding-agent@${PI_VERSION}" \
+        "@earendil-works/pi-coding-agent@${PI_VERSION}" \
  && command -v pi
 
 # Canonical Hub interaction tool — see agentcap-goose.Containerfile
