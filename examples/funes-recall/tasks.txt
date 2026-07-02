@@ -1,0 +1,12 @@
+# One prompt per line (# comments + blank lines ignored).
+# Past-decision questions with no temporal hand-holding: the agent must decide on
+# its own that the answer lives in prior-session memory and reach for `recall`.
+# The answers live in the shared index (FUNES_REMOTE, a corpus of Fable-5 traces
+# of the "MythosMini" project), not in the empty sandbox. Each `# →` line is the
+# gist a good run should recover from recall.
+Earlier in this project we experimented with front-loading procedural data before the main pretraining run. What proportion did we settle on, and what did it buy us over standard pretraining?
+# → 0.1–0.3% procedural data front-loaded; comparable quality at 55–86% of the training data (and 10%→98% needle-in-a-haystack recall).
+We added an output-embedding centering step (OEC) to stabilize training. Which variant did we choose — μ-centering or μ-loss — and what was the reasoning?
+# → μ-centering (deterministic), chosen over μ-loss as simpler to implement/test and a direct match for the "center embeddings" intent.
+One of the procedural-data patterns we relied on was Dyck sequences. Why did we include them, and what did they do for the model's long-context recall?
+# → balanced-bracket sequences train structure-tracking / working memory; they lifted long-context (needle-in-a-haystack) recall from 10% to 98%.
