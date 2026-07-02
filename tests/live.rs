@@ -207,10 +207,8 @@ fn live_tool_dir_mount() {
 
     // The env run() derives for this bundle: AGENTCAP_TOOL_DIR is the bundle root,
     // mounted read-only at its host path; the entrypoint scans it for bin/ dirs onto PATH.
-    let env: BTreeMap<String, String> = BTreeMap::from([(
-        "AGENTCAP_TOOL_DIR".to_string(),
-        bundle.to_string_lossy().into_owned(),
-    )]);
+    let env: BTreeMap<String, String> =
+        BTreeMap::from([("AGENTCAP_TOOL_DIR".to_string(), bundle.to_string_lossy().into_owned())]);
     let sandbox = agentcap::sandbox::require_sandbox("pi", env.clone(), vec![bundle.clone()], vec![], &|m| {
         eprintln!("  [sandbox] {m}")
     })
