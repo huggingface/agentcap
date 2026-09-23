@@ -26,8 +26,6 @@ on:
           - minor
           - major
 
-permissions:
-  contents: write
 
 # On pull requests the build jobs run (to validate the release build) but compute/publish
 # don't; cancel superseded PR runs. Tag/dispatch runs key on run_id, so they never cancel.
@@ -39,12 +37,16 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "1"
 
+permissions: {}
+
 jobs:
   # Dispatch-only: work out the release version (strip +dev, then bump). Nothing is written or
   # pushed here — the version is stamped into each build's working tree, and only the tag and the
   # dev-bump branch are pushed by `publish` after the builds succeed, so a failed build never tags a
   # release or pushes a bump branch.
   compute:
+    permissions:
+      contents: read
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -96,6 +98,8 @@ jobs:
           echo "tag=v${NEW}" >> "$GITHUB_OUTPUT"
 
   build-linux:
+    permissions:
+      contents: read
     name: Build Linux (${{ matrix.arch }})
     needs: [compute]
     if: |
@@ -142,6 +146,8 @@ jobs:
           path: dist/
 
   build-macos:
+    permissions:
+      contents: read
     name: Build macOS (arm64)
     needs: [compute]
     if: |
