@@ -77,18 +77,23 @@ jobs:
 
       - name: Resolve bump type
         id: bump
+        env:
+          INPUT_BUMP: ${{ inputs.bump }}
+          DETECTED_BUMP: ${{ steps.detect.outputs.detected }}
         run: |
-          BUMP="${{ inputs.bump }}"
-          [ "$BUMP" = "auto" ] && BUMP="${{ steps.detect.outputs.detected }}"
+          BUMP="$INPUT_BUMP"
+          [ "$BUMP" = "auto" ] && BUMP="$DETECTED_BUMP"
           echo "type=$BUMP" >> "$GITHUB_OUTPUT"
 
       - name: Compute new version
         id: version
+        env:
+          BUMP_TYPE: ${{ steps.bump.outputs.type }}
         run: |
           CURRENT=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')
           BASE="${CURRENT%%+*}" # drop any +dev build-metadata before bumping
           IFS='.' read -r MAJOR MINOR PATCH <<< "$BASE"
-          case "${{ steps.bump.outputs.type }}" in
+          case "$BUMP_TYPE" in
             major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
             minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
             patch) PATCH=$((PATCH + 1)) ;;
@@ -129,7 +134,9 @@ jobs:
       # it via CARGO_PKG_VERSION. Skipped on tag/PR builds, which use Cargo.toml as-is.
       - name: Set release version
         if: needs.compute.outputs.version != ''
-        run: perl -i -pe 'if (!$d && s/^version = ".*"/version = "${{ needs.compute.outputs.version }}"/) { $d = 1 }' Cargo.toml
+        env:
+          RELEASE_VERSION: ${{ needs.compute.outputs.version }}
+        run: perl -i -pe 'if (!$d && s/^version = ".*"/version = "$ENV{RELEASE_VERSION}"/) { $d = 1 }' Cargo.toml
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
@@ -169,7 +176,9 @@ jobs:
 
       - name: Set release version
         if: needs.compute.outputs.version != ''
-        run: perl -i -pe 'if (!$d && s/^version = ".*"/version = "${{ needs.compute.outputs.version }}"/) { $d = 1 }' Cargo.toml
+        env:
+          RELEASE_VERSION: ${{ needs.compute.outputs.version }}
+        run: perl -i -pe 'if (!$d && s/^version = ".*"/version = "$ENV{RELEASE_VERSION}"/) { $d = 1 }' Cargo.toml
 
       - name: Build
         run: cargo build --release --target aarch64-apple-darwin
@@ -220,14 +229,17 @@ jobs:
       - name: Tag and publish the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.compute.outputs.tag || github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
         run: |
-          TAG="${{ needs.compute.outputs.tag || github.ref_name }}"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          TAG="$RELEASE_TAG"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             git tag "$TAG"
             git push origin "$TAG"
           fi
           gh release create "$TAG" artifacts/* \
-            --repo "${{ github.repository }}" \
+            --repo "$REPO" \
             --title "$TAG" \
             --generate-notes
 
@@ -236,9 +248,13 @@ jobs:
       # "create PR" link in the run summary; a maintainer opens that PR and merges it.
       - name: Push the dev-bump branch
         if: needs.compute.outputs.version != ''
+        env:
+          RELEASE_VERSION: ${{ needs.compute.outputs.version }}
+          SERVER_URL: ${{ github.server_url }}
+          REPO: ${{ github.repository }}
         run: |
-          DEV="${{ needs.compute.outputs.version }}+dev"
-          BRANCH="chore/bump-dev-${{ needs.compute.outputs.version }}"
+          DEV="${RELEASE_VERSION}+dev"
+          BRANCH="chore/bump-dev-${RELEASE_VERSION}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git switch -c "$BRANCH"
@@ -247,7 +263,7 @@ jobs:
           git add Cargo.toml Cargo.lock
           git commit -m "chore: bump version to $DEV"
           git push --force origin "$BRANCH"
-          URL="${{ github.server_url }}/${{ github.repository }}/compare/main...${BRANCH}?expand=1"
+          URL="${SERVER_URL}/${REPO}/compare/main...${BRANCH}?expand=1"
           {
             echo "### Version bump ready"
             echo ""
